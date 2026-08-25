@@ -23,128 +23,131 @@
 
 ---
 
-## WEEK 1: LLM INTEGRATION
+## WEEK 1: PROVIDER-AGNOSTIC LLM INTEGRATION
 
 ### Overview
-Connect the 6 agent roles to Claude API. Each agent will receive specific instructions and make decisions.
+Build provider abstraction so JARVIS can use ANY LLM:
+- **Gemini API** (free tier - primary for Phase 1)
+- **Ollama** (completely local - zero cost)
+- **Claude** (optional paid - if user has subscription)
+- **Future LLMs** (extensible architecture)
+
+**Critical:** $0-first, provider-agnostic, local-capable
 
 ### Action Items
 
-#### 1. Create LLM Integration Layer
-**File:** `src/phase1/llm-integration.ts` (NEW)
+#### 1. Build Provider Abstraction Framework
+**Files:** `src/phase1/providers/` (NEW)
 
 ```typescript
-// This file will contain:
-class ArchitectAgent extends BaseAgent {
-  // Takes requirement + repository context
-  // Returns: architecture design and file plan
-  async designSolution(requirement, repositoryContext)
+// src/phase1/providers/base.ts
+interface LLMProvider {
+  name: string
+  available(): Promise<boolean>
+  call(prompt: string, options?: Options): Promise<string>
+  stream(prompt: string): AsyncIterator<string>
 }
 
-class CoderAgent extends BaseAgent {
-  // Takes architecture + specification
-  // Returns: complete code files
-  async writeCode(design, specification)
-}
-
-class TesterAgent extends BaseAgent {
-  // Takes code + test results
-  // Returns: test analysis, failures
-  async analyzeTests(code, testResults)
-}
-
-class DebuggerAgent extends BaseAgent {
-  // Takes failures + code
-  // Returns: fix suggestions, root cause
-  async debugFailure(failure, code)
-}
-
-class ReviewerAgent extends BaseAgent {
-  // Takes code + architecture
-  // Returns: quality assessment, issues
-  async reviewCode(code, design)
-}
-
-class VerifierAgent extends BaseAgent {
-  // Takes everything
-  // Returns: go/no-go decision
-  async verifyReadiness(context)
+// src/phase1/providers/selector.ts
+class ProviderSelector {
+  // Auto-detects and selects best available provider
+  // Priority: Ollama (local) → Gemini (free) → Claude (paid)
+  static async getProvider(): Promise<LLMProvider>
 }
 ```
 
-#### 2. Integration Steps
+#### 2. Implement Free Providers
 
-**Step 2a: Build ArchitectAgent**
-1. Extend BaseAgent from Phase 0
-2. Receive role from ARCHITECT_ROLE
-3. Call Claude with requirement + context
-4. Parse architecture response
-5. Return structured ArchitectureDesign
+**Step 2a: Build Gemini Provider** (Free tier, no credit card required)
+1. Create `src/phase1/providers/gemini.ts`
+2. Install `@google/generative-ai` (free package)
+3. Use free API key from makersuite.google.com
+4. Implement `call()` and `stream()` methods
+5. Handle rate limits (60 req/min - fine for Phase 1)
 
-**Step 2b: Build CoderAgent**
-1. Extend BaseAgent
-2. Receive role from CODER_ROLE
-3. Call Claude with architecture + spec
-4. Parse code response
-5. Return Map<filePath, content>
+**Step 2b: Build Ollama Provider** (Completely local)
+1. Create `src/phase1/providers/ollama.ts`
+2. No packages needed (use fetch)
+3. Connects to local http://localhost:11434
+4. Supports Llama 2, Mistral, etc.
+5. User installs from ollama.ai (free)
+6. Zero cost, completely local, no internet required
 
-**Step 2c: Build TesterAgent**
-1. Extend BaseAgent
-2. Parse test output
-3. Call Claude to analyze failures
-4. Return structured test results
+**Step 2c: Update Claude Provider** (Optional)
+1. Refactor existing Claude provider to implement interface
+2. Make it optional (only if ZO_API_KEY set)
+3. Keep as fallback for users with Claude access
 
-**Step 2d: Build DebuggerAgent**
-1. Extend BaseAgent
-2. Analyze error messages
-3. Call Claude for fix suggestions
-4. Return fix details
+#### 3. Connect Agents to Provider Abstraction
 
-**Step 2e: Build ReviewerAgent**
-1. Extend BaseAgent
-2. Analyze code quality
-3. Call Claude for quality assessment
-4. Return review findings
+**Build LLM Integration Layer**
+**File:** `src/phase1/llm-integration.ts` (NEW)
 
-**Step 2f: Build VerifierAgent**
-1. Extend BaseAgent
-2. Synthesize all findings
-3. Call Claude for final decision
-4. Return approval/rejection with reason
+```typescript
+// Agents use provider selector (not provider-specific)
 
-#### 3. Testing
+class ArchitectAgent extends BaseAgent {
+  async designSolution(requirement, repositoryContext) {
+    const provider = await ProviderSelector.getProvider()
+    // Works with Gemini, Ollama, or Claude
+    const response = await provider.call(prompt)
+    return parseArchitecture(response)
+  }
+}
+
+// Same pattern for all 6 agents
+// All use: const provider = await ProviderSelector.getProvider()
+// Not provider-specific
+```
+
+#### 4. Testing
 
 ```bash
 # Test TypeScript compilation
 bun run tsc --noEmit
 
-# Test each agent individually
-# (Create simple unit tests in src/phase1/__tests__/)
+# Test with Ollama (if running locally)
+export JARVIS_PROVIDER=ollama
+bun run dev phase1
 
-# Verify phase 1 still shows properly
+# Test with Gemini (if API key available)
+export GEMINI_API_KEY=your-key
+export JARVIS_PROVIDER=gemini
+bun run dev phase1
+
+# Test auto-detection
+export JARVIS_PROVIDER=auto
 bun run dev phase1
 ```
 
-#### 4. Commit
+#### 5. Commit
 ```bash
-git add src/phase1/llm-integration.ts
-git commit -m "feat: Phase 1 Week 1 - LLM integration layer
+git add src/phase1/providers/ src/phase1/llm-integration.ts
+git commit -m "feat: Phase 1 Week 1 - Provider-agnostic LLM integration
 
-Added all 6 agent implementations:
-- ArchitectAgent: Design solutions
-- CoderAgent: Write code
-- TesterAgent: Analyze tests
-- DebuggerAgent: Fix failures
-- ReviewerAgent: Review quality
-- VerifierAgent: Final approval
+CRITICAL FIX: Provider-agnostic architecture for $0-first JARVIS
 
-Each agent:
-- Extends BaseAgent from Phase 0
-- Calls Claude with specific role
-- Returns structured output
-- Ready for pipeline integration
+Added:
+- Provider abstraction (any LLM supported)
+- Gemini provider (free tier)
+- Ollama provider (completely local)
+- Provider selector (auto-detection)
+- All 6 agents use abstraction (not provider-specific)
 
-Status: All agents connected to Claude API"
+Features:
+- Works with Gemini free tier ($0)
+- Works with local Ollama ($0)
+- Works with Claude (optional paid)
+- Easily extensible for future LLMs
+- Users choose provider via config
+
+Fixes:
+- Removes Claude-only dependency
+- Aligns with $0-first principle
+- Enables local-first operation
+- Maintains provider-agnostic design
+
+Status: JARVIS is now truly provider-agnostic and $0-first"
 ```
 
 ---

@@ -59,42 +59,61 @@
 
 ## WHAT NEEDS TO BE BUILT (Integration)
 
-### 1. LLM Integration Layer
+### 1. Provider-Agnostic LLM Integration Layer
 
-**File:** `src/phase1/llm-integration.ts` (NEW)
+**Files:** `src/phase1/providers/` (NEW)
 
-Connect each agent role to actual LLM reasoning:
+Build abstraction so JARVIS works with ANY LLM provider:
 
 ```typescript
-class ArchitectAgent extends BaseAgent {
-  async designSolution(
-    requirement: string,
-    repositoryContext: RepositoryContext
-  ): Promise<ArchitectureDesign> {
-    // Use Claude to design solution
-    // Input: Requirement + code patterns
-    // Output: Architecture document
-  }
+// Abstract interface (any LLM implements this)
+interface LLMProvider {
+  name: string
+  available(): Promise<boolean>
+  call(prompt: string): Promise<string>
+  stream(prompt: string): AsyncIterator<string>
 }
 
-class CoderAgent extends BaseAgent {
-  async writeCode(
-    design: ArchitectureDesign,
-    specification: CodeSpec
-  ): Promise<CodeImplementation> {
-    // Use Claude to generate code
-    // Input: Design + specification
-    // Output: Complete code files
+// Implementations (pick one or auto-detect)
+class GeminiProvider implements LLMProvider { }     // Free tier
+class OllamaProvider implements LLMProvider { }     // Local, $0
+class ClaudeProvider implements LLMProvider { }     // Optional paid
+class FutureProvider implements LLMProvider { }     // Extensible
+
+// Auto-selector
+class ProviderSelector {
+  static async getProvider(): Promise<LLMProvider> {
+    // Priority: Ollama (local) → Gemini (free) → Claude (paid)
+    // User can override with JARVIS_PROVIDER env var
   }
 }
-
-// Similar for Tester, Debugger, Reviewer, Verifier
 ```
 
+**Agent Integration:**
+```typescript
+class ArchitectAgent extends BaseAgent {
+  async designSolution(requirement, context) {
+    const provider = await ProviderSelector.getProvider()
+    // Works with Gemini, Ollama, Claude, or future
+    const response = await provider.call(prompt)
+    return parseArchitecture(response)
+  }
+}
+```
+
+**Why This Matters:**
+- ✅ $0-first: Gemini free tier + Ollama local
+- ✅ Provider-agnostic: Not dependent on any one LLM
+- ✅ Local-capable: Works completely offline with Ollama
+- ✅ User-choice: Users pick which provider to use
+- ✅ Future-proof: Easy to add new providers
+
 **Dependencies:**
-- Uses existing `ClaudeProvider` from Phase 0
-- Uses `PHASE_1_AGENTS` role definitions
-- Returns structured outputs for next agent
+- `@google/generative-ai` (free, Gemini)
+- `fetch` (built-in, for Ollama)
+- Existing `ClaudeProvider` (keep as option)
+- `PHASE_1_AGENTS` role definitions
+- Phase 0 orchestrator
 
 ### 2. Code Modification Tools
 
