@@ -9,12 +9,12 @@
     "build": "bun build src/cli.ts --outdir dist",
     "test": "bun test",
     "test:live": "bun test src/**/*.test.ts",
-    "db:push": "bun run src/db/migrations/push.ts",
+    "db:push": "drizzle-kit push",
     "db:reset": "bun run src/db/migrations/reset.ts"
   },
   "dependencies": {
-    "drizzle-orm": "^0.30.0",
-    "drizzle-kit": "^0.30.0",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2",
     "pg": "^8.11.0",
     "uuid": "^9.0.0"
   },

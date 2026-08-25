@@ -90,12 +90,18 @@ ZO_API_KEY=your_zo_api_key_here
 3. Create an Access Token in the "Access Tokens" section
 4. Copy the token and paste it into `.env` as `ZO_API_KEY`
 
-### 3. Install Dependencies & Initialize
+### 3. Install Dependencies & Create the Schema
 
 ```bash
 cd JARVIS
 bun install
+bun run db:push
 ```
+
+`db:push` creates the six tables (`tasks`, `memories`, `agent_runs`, `audit_events`,
+`verification_runs`, `user_context`) that the app expects to already exist —
+skipping this step means `bun run dev` will fail with "relation does not
+exist" errors as soon as an agent tries to write anything.
 
 ### 4. Run Phase 0 Vertical Slice
 
@@ -271,6 +277,35 @@ bun run test:live
 - ✅ No subscription dependencies
 - ✅ Runs entirely locally on Windows PC
 - ✅ Claude/Zo is optional — can be replaced with local models
+
+## Project log
+
+- **2026-08-25 — vertical slice actually run and verified, one real bug found and fixed.**
+  `schema.ts` imported a symbol named `enum` from `drizzle-orm/pg-core` — that
+  export doesn't exist (the real name is `pgEnum`); this crashed on the very
+  first line of the very first run with `SyntaxError: Export named 'enum' not
+  found`, despite the repo being marked "production-ready" and "everything is
+  checked into GitHub." Fixed the import, and separately discovered `bun run
+  dev` also needs the schema pushed to Postgres first (`bun run db:push`) —
+  the original `db:push` script pointed at a migration file that was never
+  created, so it's now wired directly to `drizzle-kit push` instead (added
+  `drizzle.config.ts`; also bumped `drizzle-orm`/`drizzle-kit` to matching
+  current versions, since the originally pinned ones were incompatible with
+  each other). README's setup steps updated to include the schema-push step.
+  With both fixed, the full 5-agent vertical slice was run for real —
+  Postgres tables created, all 6 agent stages executed against live Zo/Claude
+  calls, task/memory/audit rows confirmed persisted in the database, task
+  completed with `partially_verified` status at 70% confidence. Phase 0 is
+  now proven working, not just claimed working.
+- **Postgres now runs persistently in Zo itself**, not only "when Gavin sets
+  it up on his Windows PC" — registered as an internal Zo service
+  (`jarvis-postgres`, process-mode, not publicly exposed) with the `jarvis`
+  role/database already created. This is what makes the twice-daily
+  `JARVIS Phase 0 Vertical Slice Test Report` automation able to actually
+  succeed instead of failing on a missing database every run — it only
+  still needs `DATABASE_URL` and `ZO_API_KEY` added as Zo secrets (Settings
+  > Advanced). Running it on an actual Windows PC instead/as well still
+  works exactly as documented above if that's ever wanted.
 
 ---
 
