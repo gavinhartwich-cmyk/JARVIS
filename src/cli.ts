@@ -5,14 +5,20 @@ import { AGENT_ROLES } from "./agents/types";
 import { ClaudeProvider } from "./models/claude-provider";
 import { toolManager } from "./tools/manager";
 import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
+import { VoiceInterface } from "./voice/index";
+import { LocationTracker } from "./location/index";
 
 /**
  * JARVIS CLI
  * Entry point for the system
+ * Supports: orchestration, voice interface, location tracking
  */
 
 async function main() {
-  console.log("\n🤖 JARVIS Phase 1.5 - Tool Integration\n");
+  const args = process.argv.slice(2);
+  const command = args[0] || "test";
+
+  console.log("\n🤖 JARVIS Phase 2 - Voice & Location\n");
 
   // Initialize database
   try {
@@ -36,7 +42,7 @@ async function main() {
     // Initialize tools
     console.log("🔧 Initializing tools...");
     const availableTools = toolManager.getAvailableTools();
-    console.log(`   📌 ${availableTools.length} tools registered`);
+    console.log(`   📋 ${availableTools.length} tools registered`);
 
     const isAvailable = await modelProvider.available();
     if (!isAvailable) {
@@ -90,38 +96,93 @@ async function main() {
       console.log(`   ✓ ${roleConfig.role}`);
     }
 
-    // Test the system with a vertical slice
-    console.log("\n" + "=".repeat(60));
-    console.log("🚀 RUNNING VERTICAL SLICE TEST");
-    console.log("=".repeat(60));
+    // Handle commands
+    switch (command) {
+      case "voice": {
+        console.log("\n🎤 Starting Voice Interface (Phase 2)\n");
+        const zoApiKey = process.env.ZO_API_KEY || "";
+        
+        const voiceInterface = new VoiceInterface(orchestrator, {
+          zoApiKey,
+          sttModel: "whisper-1",
+          ttsVoice: "en-us-libritts-high",
+          wakeWords: ["hey jarvis", "jarvis"],
+          locationTracking: true,
+          autoPlay: true,
+        });
 
-    const testTask = "What are the key differences between TypeScript and Python for building AI systems?";
-    console.log(`\nTask: ${testTask}\n`);
+        await voiceInterface.start();
+        
+        // Run for a bit to allow testing
+        console.log("\n📝 Voice interface is running (send 'exit' to stop)");
+        console.log("   Say: 'Hey JARVIS' to activate");
+        
+        // Keep running until interrupted
+        await new Promise((resolve) => {
+          process.on("SIGINT", resolve);
+          setTimeout(resolve, 300000); // 5 minute timeout
+        });
 
-    try {
-      const result = await orchestrator.orchestrate(testTask);
+        await voiceInterface.stop();
+        break;
+      }
 
-      console.log("\n" + "=".repeat(60));
-      console.log("📊 RESULT");
-      console.log("=".repeat(60));
+      case "location": {
+        console.log("\n📍 Starting Location Tracking (Phase 3.2)\n");
+        const zoApiKey = process.env.ZO_API_KEY || "";
+        
+        const tracker = new LocationTracker(zoApiKey);
+        tracker.startTracking();
 
-      console.log(`\nTask ID: ${result.taskId}`);
-      console.log(`Status: ${result.verificationStatus}`);
-      console.log(`Confidence: ${(result.confidence * 100).toFixed(1)}%`);
-      console.log(`\nFinal Answer:\n${result.finalResult}`);
+        console.log("\n📍 Location tracking enabled");
+        console.log("   Current rooms configured:");
+        tracker.getRooms().forEach((room) => {
+          console.log(`   - ${room.name} (${room.latitude}, ${room.longitude})`);
+        });
 
-      console.log("\n" + "=".repeat(60));
-      console.log("✅ VERTICAL SLICE TEST PASSED");
-      console.log("=".repeat(60));
-      console.log("\nPhase 0 foundation is working!");
-      console.log("Next steps:");
-      console.log("  1. Add more specialized agents");
-      console.log("  2. Implement task persistence");
-      console.log("  3. Build the CLI interface");
-      console.log("  4. Add tool execution support");
-    } catch (error) {
-      console.error("\n❌ Vertical slice test failed:");
-      console.error(error instanceof Error ? error.message : String(error));
+        // Get current context
+        const context = await tracker.getLocationContext();
+        console.log(`\n   Current location: ${context.currentRoom?.name || "Unknown"}`);
+        console.log(`   Home distance: ${context.homeDistance.toFixed(0)}m`);
+
+        tracker.stopTracking();
+        break;
+      }
+
+      case "test":
+      default: {
+        console.log("\n" + "=".repeat(60));
+        console.log("🚀 RUNNING VERTICAL SLICE TEST");
+        console.log("=".repeat(60));
+
+        const testTask = "What are the key differences between TypeScript and Python for building AI systems?";
+        console.log(`\nTask: ${testTask}\n`);
+
+        try {
+          const result = await orchestrator.orchestrate(testTask);
+
+          console.log("\n" + "=".repeat(60));
+          console.log("📊 RESULT");
+          console.log("=".repeat(60));
+
+          console.log(`\nTask ID: ${result.taskId}`);
+          console.log(`Status: ${result.verificationStatus}`);
+          console.log(`Confidence: ${(result.confidence * 100).toFixed(1)}%`);
+          console.log(`\nFinal Answer:\n${result.finalResult}`);
+
+          console.log("\n" + "=".repeat(60));
+          console.log("✅ VERTICAL SLICE TEST PASSED");
+          console.log("=".repeat(60));
+          console.log("\nPhase 0-1.5 foundation is working!");
+          console.log("\nAvailable commands:");
+          console.log("  bun run dev voice    - Start voice interface (Phase 2)");
+          console.log("  bun run dev location - Check location tracking (Phase 3.2)");
+          console.log("  bun run dev test     - Run this test");
+        } catch (error) {
+          console.error("\n❌ Vertical slice test failed:");
+          console.error(error instanceof Error ? error.message : String(error));
+        }
+      }
     }
   } finally {
     await closeDatabase();
