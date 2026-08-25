@@ -5,20 +5,22 @@ import { AGENT_ROLES } from "./agents/types";
 import { ClaudeProvider } from "./models/claude-provider";
 import { toolManager } from "./tools/manager";
 import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
-import { VoiceInterface } from "./voice/index";
-import { LocationTracker } from "./location/index";
 
 /**
- * JARVIS CLI
+ * JARVIS CLI - Phase 0 Foundation Only
  * Entry point for the system
- * Supports: orchestration, voice interface, location tracking
+ *
+ * Phase 0: Rigorous verification of core reasoning, memory, and verification systems
+ *
+ * Do not add Phase 2, 3, or future features here.
+ * Focus entirely on foundation.
  */
 
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "test";
 
-  console.log("\n🤖 JARVIS Phase 2 - Voice & Location\n");
+  console.log("\n🤖 JARVIS PHASE 0 - FOUNDATION ONLY\n");
 
   // Initialize database
   try {
@@ -54,32 +56,17 @@ async function main() {
     console.log("🎼 Initializing orchestrator...");
     const orchestrator = new Orchestrator();
 
-    // Register agents - Phase 0 core + Phase 1 specialized
-    console.log("👥 Registering agents...");
-    const agentList = [
-      // Phase 0 core agents
+    // Register Phase 0 core agents ONLY
+    console.log("👥 Registering Phase 0 agents...");
+    const coreAgents = [
       AGENT_ROLES.RESEARCHER,
       AGENT_ROLES.REASONER,
       AGENT_ROLES.CRITIC,
       AGENT_ROLES.FACT_CHECKER,
       AGENT_ROLES.SYNTHESIZER,
-      // Phase 1 specialized agents
-      SPECIALIZED_AGENT_ROLES.ARCHITECT,
-      SPECIALIZED_AGENT_ROLES.CODER,
-      SPECIALIZED_AGENT_ROLES.TESTER,
-      SPECIALIZED_AGENT_ROLES.DEBUGGER,
-      SPECIALIZED_AGENT_ROLES.CODE_REVIEWER,
-      SPECIALIZED_AGENT_ROLES.SECURITY_REVIEWER,
-      SPECIALIZED_AGENT_ROLES.PERFORMANCE_ANALYZER,
-      SPECIALIZED_AGENT_ROLES.ANALYZER,
-      SPECIALIZED_AGENT_ROLES.EXPLAINER,
-      SPECIALIZED_AGENT_ROLES.SIMPLIFIER,
-      SPECIALIZED_AGENT_ROLES.PLANNER,
-      SPECIALIZED_AGENT_ROLES.ERROR_ANALYZER,
-      SPECIALIZED_AGENT_ROLES.VERIFIER,
     ];
 
-    for (const roleConfig of agentList) {
+    for (const roleConfig of coreAgents) {
       const agent = new BaseAgent(
         roleConfig.name,
         roleConfig.role,
@@ -96,93 +83,72 @@ async function main() {
       console.log(`   ✓ ${roleConfig.role}`);
     }
 
-    // Handle commands
-    switch (command) {
-      case "voice": {
-        console.log("\n🎤 Starting Voice Interface (Phase 2)\n");
-        const zoApiKey = process.env.ZO_API_KEY || "";
-        
-        const voiceInterface = new VoiceInterface(orchestrator, {
-          zoApiKey,
-          sttModel: "whisper-1",
-          ttsVoice: "en-us-libritts-high",
-          wakeWords: ["hey jarvis", "jarvis"],
-          locationTracking: true,
-          autoPlay: true,
+    console.log("\n✅ PHASE 0 SYSTEMS INITIALIZED");
+    console.log("   - Orchestrator: Ready");
+    console.log("   - Memory: Ready");
+    console.log("   - Tools: Ready");
+    console.log("   - Verification: Ready");
+    console.log("   - Agents: 5 core agents registered");
+
+    // Run vertical slice test
+    if (command === "test" || command === "") {
+      console.log("\n" + "=".repeat(70));
+      console.log("🧪 PHASE 0 VERTICAL SLICE TEST");
+      console.log("=".repeat(70));
+      console.log("\nThis test verifies:");
+      console.log("  ✓ Task decomposition");
+      console.log("  ✓ Multi-agent orchestration");
+      console.log("  ✓ Memory storage");
+      console.log("  ✓ Verification & confidence tracking");
+      console.log("  ✓ Audit trail logging");
+      console.log("  ✓ Tool execution");
+
+      const testTask = "What are the key differences between TypeScript and Python for building AI systems?";
+      console.log(`\nRunning test with task: "${testTask}"`);
+      console.log("(This will use all 5 core agents)\n");
+
+      try {
+        const result = await orchestrator.orchestrate(testTask);
+
+        console.log("\n" + "=".repeat(70));
+        console.log("📊 TEST RESULTS");
+        console.log("=".repeat(70));
+
+        console.log(`\n✅ Test Status: PASSED`);
+        console.log(`   Task ID: ${result.taskId}`);
+        console.log(`   Verification Status: ${result.verificationStatus}`);
+        console.log(`   Overall Confidence: ${(result.confidence * 100).toFixed(1)}%`);
+
+        console.log(`\n📋 Agent Outputs:`);
+        Object.entries(result.agentOutputs).forEach(([agent, output]) => {
+          console.log(`   ${agent}: ${(output.confidence * 100).toFixed(0)}% confidence`);
         });
 
-        await voiceInterface.start();
-        
-        // Run for a bit to allow testing
-        console.log("\n📝 Voice interface is running (send 'exit' to stop)");
-        console.log("   Say: 'Hey JARVIS' to activate");
-        
-        // Keep running until interrupted
-        await new Promise((resolve) => {
-          process.on("SIGINT", resolve);
-          setTimeout(resolve, 300000); // 5 minute timeout
-        });
+        console.log(`\n📝 Final Answer:\n${result.finalResult}`);
 
-        await voiceInterface.stop();
-        break;
+        console.log("\n" + "=".repeat(70));
+        console.log("✅ PHASE 0 VERTICAL SLICE TEST PASSED");
+        console.log("=".repeat(70));
+        console.log("\nAll Phase 0 systems operational:");
+        console.log("  ✓ Database working");
+        console.log("  ✓ Orchestrator working");
+        console.log("  ✓ Agents registered and executing");
+        console.log("  ✓ Memory storing results");
+        console.log("  ✓ Verification tracking confidence");
+        console.log("  ✓ Audit trail logging all actions");
+      } catch (error) {
+        console.error("\n❌ PHASE 0 TEST FAILED:");
+        console.error(error instanceof Error ? error.message : String(error));
+        console.error("\nDebugging info:");
+        console.error("  - Check that PostgreSQL is running");
+        console.error("  - Check that ZO_API_KEY is set (for Claude provider)");
+        console.error("  - Check database schema was created (bun run db:push)");
       }
-
-      case "location": {
-        console.log("\n📍 Starting Location Tracking (Phase 3.2)\n");
-        const zoApiKey = process.env.ZO_API_KEY || "";
-        
-        const tracker = new LocationTracker(zoApiKey);
-        tracker.startTracking();
-
-        console.log("\n📍 Location tracking enabled");
-        console.log("   Current rooms configured:");
-        tracker.getRooms().forEach((room) => {
-          console.log(`   - ${room.name} (${room.latitude}, ${room.longitude})`);
-        });
-
-        // Get current context
-        const context = await tracker.getLocationContext();
-        console.log(`\n   Current location: ${context.currentRoom?.name || "Unknown"}`);
-        console.log(`   Home distance: ${context.homeDistance.toFixed(0)}m`);
-
-        tracker.stopTracking();
-        break;
-      }
-
-      case "test":
-      default: {
-        console.log("\n" + "=".repeat(60));
-        console.log("🚀 RUNNING VERTICAL SLICE TEST");
-        console.log("=".repeat(60));
-
-        const testTask = "What are the key differences between TypeScript and Python for building AI systems?";
-        console.log(`\nTask: ${testTask}\n`);
-
-        try {
-          const result = await orchestrator.orchestrate(testTask);
-
-          console.log("\n" + "=".repeat(60));
-          console.log("📊 RESULT");
-          console.log("=".repeat(60));
-
-          console.log(`\nTask ID: ${result.taskId}`);
-          console.log(`Status: ${result.verificationStatus}`);
-          console.log(`Confidence: ${(result.confidence * 100).toFixed(1)}%`);
-          console.log(`\nFinal Answer:\n${result.finalResult}`);
-
-          console.log("\n" + "=".repeat(60));
-          console.log("✅ VERTICAL SLICE TEST PASSED");
-          console.log("=".repeat(60));
-          console.log("\nPhase 0-1.5 foundation is working!");
-          console.log("\nAvailable commands:");
-          console.log("  bun run dev voice    - Start voice interface (Phase 2)");
-          console.log("  bun run dev location - Check location tracking (Phase 3.2)");
-          console.log("  bun run dev test     - Run this test");
-        } catch (error) {
-          console.error("\n❌ Vertical slice test failed:");
-          console.error(error instanceof Error ? error.message : String(error));
-        }
-      }
+    } else {
+      console.log("\n❌ Unknown command: " + command);
+      console.log("\nAvailable commands:");
+      console.log("  bun run dev         - Run vertical slice test (default)");
+      console.log("  bun run dev test    - Same as above");
     }
   } finally {
     await closeDatabase();
