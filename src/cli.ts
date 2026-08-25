@@ -3,6 +3,7 @@ import { Orchestrator } from "./core/orchestrator";
 import { BaseAgent } from "./agents/agent";
 import { AGENT_ROLES } from "./agents/types";
 import { ClaudeProvider } from "./models/claude-provider";
+import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
 
 /**
  * JARVIS CLI
@@ -41,14 +42,29 @@ async function main() {
     console.log("🎼 Initializing orchestrator...");
     const orchestrator = new Orchestrator();
 
-    // Register agents
+    // Register agents - Phase 0 core + Phase 1 specialized
     console.log("👥 Registering agents...");
     const agentList = [
+      // Phase 0 core agents
       AGENT_ROLES.RESEARCHER,
       AGENT_ROLES.REASONER,
       AGENT_ROLES.CRITIC,
       AGENT_ROLES.FACT_CHECKER,
       AGENT_ROLES.SYNTHESIZER,
+      // Phase 1 specialized agents
+      SPECIALIZED_AGENT_ROLES.ARCHITECT,
+      SPECIALIZED_AGENT_ROLES.CODER,
+      SPECIALIZED_AGENT_ROLES.TESTER,
+      SPECIALIZED_AGENT_ROLES.DEBUGGER,
+      SPECIALIZED_AGENT_ROLES.CODE_REVIEWER,
+      SPECIALIZED_AGENT_ROLES.SECURITY_REVIEWER,
+      SPECIALIZED_AGENT_ROLES.PERFORMANCE_ANALYZER,
+      SPECIALIZED_AGENT_ROLES.ANALYZER,
+      SPECIALIZED_AGENT_ROLES.EXPLAINER,
+      SPECIALIZED_AGENT_ROLES.SIMPLIFIER,
+      SPECIALIZED_AGENT_ROLES.PLANNER,
+      SPECIALIZED_AGENT_ROLES.ERROR_ANALYZER,
+      SPECIALIZED_AGENT_ROLES.VERIFIER,
     ];
 
     for (const roleConfig of agentList) {

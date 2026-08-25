@@ -2,6 +2,7 @@ import { getDatabase } from "../db/client";
 import { memories } from "../db/schema";
 import { v4 as uuid } from "uuid";
 import type { NewMemory } from "../db/schema";
+import { eq, like } from "drizzle-orm";
 
 export interface MemoryInput {
   type: "fact" | "episode" | "semantic" | "preference" | "project" | "goal" | "relationship" | "event";
@@ -35,19 +36,22 @@ export async function storeMemory(memory: MemoryInput) {
 }
 
 export async function retrieveMemories(
-  type?: string,
+  type?: MemoryInput["type"],
   limit: number = 10
 ) {
   try {
     const db = getDatabase();
 
-    let query = db.select().from(memories);
-
+    // Drizzle's query builder doesn't accept a JS predicate function in
+    // .where() (that was the old, incorrect version of this code — it
+    // type-checked as an error and would have thrown at runtime the first
+    // time this function was actually called). Real Drizzle conditions are
+    // built with its own operators (eq, like, etc.) against the schema's
+    // column objects.
     if (type) {
-      query = query.where((m) => m.type === type);
+      return db.select().from(memories).where(eq(memories.type, type)).limit(limit);
     }
-
-    return query.limit(limit);
+    return db.select().from(memories).limit(limit);
   } catch (error) {
     console.error("Failed to retrieve memories:", error);
     return [];
@@ -63,7 +67,7 @@ export async function searchMemories(query: string, limit: number = 10) {
     return db
       .select()
       .from(memories)
-      .where((m) => m.content.like(`%${query}%`))
+      .where(like(memories.content, `%${query}%`))
       .limit(limit);
   } catch (error) {
     console.error("Failed to search memories:", error);

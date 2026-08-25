@@ -3,7 +3,13 @@ import { Client } from "pg";
 import * as schema from "./schema";
 
 let client: Client | null = null;
-let db: ReturnType<typeof drizzle> | null = null;
+// Explicit <typeof schema, Client> type args — without them, TypeScript
+// infers ReturnType<typeof drizzle> against drizzle's default client type
+// (Pool), which doesn't match the actual pg.Client used below and fails
+// strict type-checking (this file previously wasn't being type-checked at
+// all; `bun run dev` transpiles without checking types, so this only
+// surfaced once `tsc --noEmit` was actually run).
+let db: ReturnType<typeof drizzle<typeof schema, Client>> | null = null;
 
 export async function initializeDatabase(connectionString?: string) {
   if (db) return db;

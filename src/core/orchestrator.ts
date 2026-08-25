@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { v4 as uuid } from "uuid";
 import { logAuditEvent } from "./audit";
 import { storeMemory } from "./memory";
+import { TaskDecomposer } from "./task-decomposer";
 
 /**
  * Orchestrator
@@ -31,6 +32,7 @@ export interface OrchestrationResult {
 
 export class Orchestrator {
   private agents: Map<string, Agent> = new Map();
+  private decomposer = new TaskDecomposer();
 
   registerAgent(agent: Agent) {
     this.agents.set(agent.name, agent);
@@ -182,20 +184,8 @@ export class Orchestrator {
     userTask: string,
     taskId: string
   ): Promise<TaskDecomposition> {
-    // For Phase 0, use a simple fixed pipeline
-    // Later, this can be dynamic based on task type
-
-    return {
-      mainGoal: userTask,
-      subgoals: [
-        "Research the task and gather relevant information",
-        "Reason about the problem",
-        "Critique the proposed solution",
-        "Verify important claims",
-        "Synthesize into final answer",
-      ],
-      agentSequence: ["researcher", "reasoner", "critic", "fact-checker", "synthesizer"],
-    };
+    // Use dynamic task decomposer instead of fixed pipeline
+    return this.decomposer.decompose(userTask);
   }
 
   private async synthesizeResults(
@@ -205,7 +195,7 @@ export class Orchestrator {
   ): Promise<{
     result: string;
     confidence: number;
-    verificationStatus: string;
+    verificationStatus: "unverified" | "partially_verified" | "verified" | "conflicted" | "failed";
     conflicts: string[];
     evidence: string[];
   }> {
@@ -230,7 +220,8 @@ export class Orchestrator {
       Object.values(outputs).reduce((sum, o) => sum + o.confidence, 0) /
       Object.keys(outputs).length;
 
-    let verificationStatus = "unverified";
+    type VerificationStatus = "unverified" | "partially_verified" | "verified" | "conflicted" | "failed";
+    let verificationStatus: VerificationStatus = "unverified";
     if (avgConfidence >= 0.9) {
       verificationStatus = "verified";
     } else if (avgConfidence >= 0.7) {

@@ -7,6 +7,20 @@ import { Tool, ToolResult, ParameterDefinition } from "./types";
 import * as fs from "fs/promises";
 import * as path from "path";
 
+// BufferEncoding is a global ambient type (from bun-types/@types/node),
+// not a named export of the "buffer" module — no import needed.
+const VALID_ENCODINGS: readonly BufferEncoding[] = [
+  "utf-8", "utf8", "ascii", "base64", "base64url", "hex", "latin1", "binary", "ucs2", "ucs-2", "utf16le",
+];
+
+function toBufferEncoding(value: unknown): BufferEncoding {
+  const encoding = String(value || "utf-8");
+  if ((VALID_ENCODINGS as string[]).includes(encoding)) {
+    return encoding as BufferEncoding;
+  }
+  throw new Error(`Unsupported encoding: ${encoding}`);
+}
+
 export class ReadFileTool implements Tool {
   name = "read_file";
   description = "Read the contents of a file";
@@ -30,7 +44,7 @@ export class ReadFileTool implements Tool {
 
     try {
       const filePath = String(parameters.path);
-      const encoding = String(parameters.encoding || "utf-8");
+      const encoding = toBufferEncoding(parameters.encoding);
 
       // Safety check: prevent reading system files
       if (filePath.includes("/etc") || filePath.includes("/sys")) {

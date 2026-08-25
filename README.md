@@ -280,6 +280,20 @@ bun run test:live
 
 ## Project log
 
+- **2026-08-25 — Phase 1 integration complete: Dynamic task routing + 13 specialized agents**
+  Integrated TaskDecomposer into Orchestrator to replace fixed pipeline with dynamic routing.
+  System now analyzes task type and selects appropriate agent sequence:
+  - **Code writing** → architect → coder → tester → code-reviewer → security-reviewer → synthesizer
+  - **Debugging** → error-analyzer → debugger → tester → code-reviewer → synthesizer
+  - **Explanation** → researcher → explainer → simplifier → synthesizer
+  - **Planning** → architect → planner → critic → verifier → synthesizer
+  - **Research** → researcher → synthesizer
+  - Plus 5 more task types handled intelligently.
+  
+  All 18 agents now registered (5 Phase 0 core + 13 Phase 1 specialized). Type checking passes.
+  TaskDecomposer routing verified working correctly for all task types. Ready for Zo API integration
+  when ZO_API_KEY is set. Files: task-decomposer.ts, specialized-agents.ts, orchestrator.ts, cli.ts
+
 - **2026-08-25 — vertical slice actually run and verified, one real bug found and fixed.**
   `schema.ts` imported a symbol named `enum` from `drizzle-orm/pg-core` — that
   export doesn't exist (the real name is `pgEnum`); this crashed on the very
