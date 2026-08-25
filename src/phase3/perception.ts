@@ -1,17 +1,19 @@
 /**
  * Phase 3: Perception Module
  *
- * Orchestrates screen capture, camera input, and vision analysis
- * Central hub for understanding the world around JARVIS
+ * Orchestrates screen capture, camera input, vision analysis, and screen control
+ * Central hub for understanding and operating the world around JARVIS
  */
 
 import { ScreenCapture, ScreenContext } from "./screen-capture";
 import { VisionSystem, VisualAnalysis } from "./vision-system";
 import { ContextRouter, ContextType, RoutingDecision } from "./context-router";
+import { ScreenControl, ControlSequence, ControlResult } from "./screen-control";
 
 export interface PerceptionQuery {
   query: string;
   requiresVisual: boolean;
+  requiresControl: boolean;
   contextTypes: ContextType[];
   reasoning: string;
 }
@@ -21,6 +23,7 @@ export interface PerceptionResult {
   decision: RoutingDecision;
   screenContext?: ScreenContext;
   visualAnalysis?: VisualAnalysis;
+  controlResult?: ControlResult;
   answer?: string;
   timestamp: Date;
   processingTimeMs: number;
@@ -29,12 +32,13 @@ export interface PerceptionResult {
 /**
  * Perception Module
  *
- * JARVIS's ability to perceive and understand the environment
+ * JARVIS's complete sensory and motor system
  */
 export class Perception {
   private screenCapture: ScreenCapture;
   private visionSystem: VisionSystem;
   private contextRouter: ContextRouter;
+  private screenControl: ScreenControl;
 
   private perceptionHistory: PerceptionResult[] = [];
   private queryCache: Map<string, PerceptionResult> = new Map();
@@ -44,11 +48,13 @@ export class Perception {
     console.log("   Screen capture: ✓");
     console.log("   Vision system: ✓");
     console.log("   Context router: ✓");
+    console.log("   Screen control: ✓");
     console.log('   Principle: "Vision should not run unnecessarily"');
 
     this.screenCapture = new ScreenCapture();
     this.visionSystem = new VisionSystem();
     this.contextRouter = new ContextRouter();
+    this.screenControl = new ScreenControl();
   }
 
   /**
@@ -84,14 +90,23 @@ export class Perception {
       );
     }
 
-    // Step 4: Optimize for efficiency
+    // Step 4: Execute screen control if needed
+    let controlResult: ControlResult | undefined;
+    if (decision.requiresScreenControl) {
+      console.log("\n🖱️  Screen Control activated");
+      // Build a control sequence based on the query
+      const sequence = this.buildControlSequence(query);
+      controlResult = await this.screenControl.executeSequence(sequence, true);
+    }
+
+    // Step 5: Optimize for efficiency
     const optimizedContexts = await this.contextRouter.optimizeForEfficiency(
       decision.primaryContext,
       decision.secondaryContexts
     );
 
-    // Step 5: Generate answer based on available context
-    const answer = this.generateAnswer(query, decision, screenContext, visualAnalysis);
+    // Step 6: Generate answer based on available context
+    const answer = this.generateAnswer(query, decision, screenContext, visualAnalysis, controlResult);
 
     const processingTimeMs = Date.now() - startTime;
 
@@ -100,6 +115,7 @@ export class Perception {
       decision,
       screenContext,
       visualAnalysis,
+      controlResult,
       answer,
       timestamp: new Date(),
       processingTimeMs,
@@ -125,14 +141,86 @@ export class Perception {
   }
 
   /**
+   * Build a control sequence from a query
+   * Uses pattern matching to determine what actions are needed
+   */
+  private buildControlSequence(query: string): ControlSequence {
+    const lower = query.toLowerCase();
+
+    // Pattern: "open [application]"
+    if (lower.match(/^open\s+(\w+)/i)) {
+      const match = lower.match(/^open\s+(\w+)/i);
+      const appName = match?.[1] || "application";
+      const seq = this.screenControl.buildSequence(`Open ${appName}`);
+      this.screenControl.open(seq, appName);
+      return seq;
+    }
+
+    // Pattern: "close [window/app]"
+    if (lower.match(/^close\s+(.+)/i)) {
+      const match = lower.match(/^close\s+(.+)/i);
+      const target = match?.[1] || "window";
+      const seq = this.screenControl.buildSequence(`Close ${target}`);
+      this.screenControl.close(seq, target);
+      return seq;
+    }
+
+    // Pattern: "click [target]"
+    if (lower.match(/^click\s+(.+)/i)) {
+      const match = lower.match(/^click\s+(.+)/i);
+      const target = match?.[1] || "button";
+      const seq = this.screenControl.buildSequence(`Click ${target}`);
+      this.screenControl.click(seq, target);
+      return seq;
+    }
+
+    // Pattern: "type [text]"
+    if (lower.match(/^type\s+(.+)/i)) {
+      const match = lower.match(/^type\s+(.+)/i);
+      const text = match?.[1] || "text";
+      const seq = this.screenControl.buildSequence(`Type text`);
+      this.screenControl.type(seq, text);
+      return seq;
+    }
+
+    // Pattern: "click [target] and type [text]"
+    if (lower.includes("click") && lower.includes("and type")) {
+      const seq = this.screenControl.buildSequence("Click and type");
+      const clickMatch = lower.match(/click\s+([^,\s]+)/);
+      const typeMatch = lower.match(/type\s+(.+?)(?:\.|$)/);
+      if (clickMatch?.[1]) {
+        this.screenControl.click(seq, clickMatch[1]);
+      }
+      if (typeMatch?.[1]) {
+        this.screenControl.type(seq, typeMatch[1]);
+      }
+      return seq;
+    }
+
+    // Default: generic automation sequence
+    const seq = this.screenControl.buildSequence(query);
+    this.screenControl.click(seq, "confirm");
+    return seq;
+  }
+
+  /**
    * Generate answer based on available context
    */
   private generateAnswer(
     query: string,
     decision: RoutingDecision,
     screenContext?: ScreenContext,
-    visualAnalysis?: VisualAnalysis
+    visualAnalysis?: VisualAnalysis,
+    controlResult?: ControlResult
   ): string {
+    if (controlResult) {
+      if (controlResult.success) {
+        return `✅ Successfully completed: ${controlResult.output}`;
+      } else {
+        return `❌ Failed to complete: ${controlResult.error}`;
+      }
+    }
+
     if (visualAnalysis) {
       return visualAnalysis.text;
     }
@@ -151,7 +239,11 @@ export class Perception {
     }
 
     if (decision.primaryContext === "computer_control") {
-      return `I can help with that. I would need to interact with your computer to complete this task.`;
+      return "I can help with that. I would need to interact with your computer to complete this task.";
+    }
+
+    if (decision.primaryContext === "screen_control") {
+      return "I'm ready to automate this task. Please confirm and I'll proceed with the automation.";
     }
 
     // Default reasoning answer
@@ -183,7 +275,7 @@ export class Perception {
   async detectScreenObjects(): Promise<
     Array<{ label: string; confidence: number }>
   > {
-    console.log("\n🔎 Detecting objects on screen...");
+    console.log("\n🔍 Detecting objects on screen...");
 
     const context = await this.screenCapture.getScreenContext();
     if (!context.screenshot?.data) {
@@ -191,6 +283,15 @@ export class Perception {
     }
 
     return this.visionSystem.detectObjects(context.screenshot.data);
+  }
+
+  /**
+   * Execute a control sequence directly
+   */
+  async executeControl(description: string): Promise<ControlResult> {
+    console.log(`\n🖱️  Executing control: ${description}`);
+    const seq = this.screenControl.buildSequence(description);
+    return this.screenControl.executeSequence(seq, true);
   }
 
   /**
@@ -224,6 +325,7 @@ export class Perception {
             requiresScreenCapture: true,
             requiresCamera: false,
             requiresVision: false,
+            requiresScreenControl: false,
             estimatedEfficiency: 0.7,
           },
           screenContext: context,
@@ -253,12 +355,16 @@ export class Perception {
     totalQueries: number;
     cacheHitRate: number;
     queriesRequiringVision: number;
+    queriesRequiringControl: number;
     averageProcessingTimeMs: number;
     efficiency: string;
   } {
     const total = this.perceptionHistory.length;
     const withVision = this.perceptionHistory.filter(
       (r) => r.decision.requiresVision
+    ).length;
+    const withControl = this.perceptionHistory.filter(
+      (r) => r.decision.requiresScreenControl
     ).length;
     const avgTime =
       total > 0
@@ -270,6 +376,7 @@ export class Perception {
       totalQueries: total,
       cacheHitRate: this.queryCache.size / Math.max(total, 1),
       queriesRequiringVision: withVision,
+      queriesRequiringControl: withControl,
       averageProcessingTimeMs: Math.round(avgTime),
       efficiency: `${(100 - (withVision / Math.max(total, 1)) * 100).toFixed(0)}% queries optimized (no vision)`,
     };
@@ -291,16 +398,28 @@ export class Perception {
     screenCapture: string;
     vision: string;
     contextRouter: string;
+    screenControl: string;
     queriesProcessed: number;
     cacheSize: number;
+    systemOperating: boolean;
   } {
+    const controlStatus = this.screenControl.getStatus();
     return {
       screenCapture: "Active",
       vision: this.visionSystem.isConnected() ? "Connected" : "Ready",
       contextRouter: "Active",
+      screenControl: "Ready",
       queriesProcessed: this.perceptionHistory.length,
       cacheSize: this.queryCache.size,
+      systemOperating: controlStatus.isOperating,
     };
+  }
+
+  /**
+   * Get screen control system
+   */
+  getScreenControlSystem(): ScreenControl {
+    return this.screenControl;
   }
 }
 
@@ -310,3 +429,4 @@ export class Perception {
 export { ScreenCapture, ScreenContext } from "./screen-capture";
 export { VisionSystem, VisualAnalysis } from "./vision-system";
 export { ContextRouter, ContextType, RoutingDecision } from "./context-router";
+export { ScreenControl, ControlSequence, ControlResult, ControlAction } from "./screen-control";

@@ -11,6 +11,7 @@ export type ContextType =
   | "memory"
   | "web"
   | "computer_control"
+  | "screen_control"
   | "tool"
   | "voice"
   | "multiple";
@@ -22,6 +23,7 @@ export interface RoutingDecision {
   requiresScreenCapture: boolean;
   requiresCamera: boolean;
   requiresVision: boolean;
+  requiresScreenControl: boolean;
   estimatedEfficiency: number; // 0-1, higher = more efficient
 }
 
@@ -32,7 +34,7 @@ export interface RoutingDecision {
  */
 export class ContextRouter {
   constructor() {
-    console.log("🛣️  Context Router initialized");
+    console.log("🎛️  Context Router initialized");
     console.log('   "Vision should not run unnecessarily"');
   }
 
@@ -51,6 +53,9 @@ export class ContextRouter {
       console.log(`   Secondary: ${decision.secondaryContexts.join(", ")}`);
     }
     console.log(`   Efficiency: ${(decision.estimatedEfficiency * 100).toFixed(0)}%`);
+    if (decision.requiresScreenControl) {
+      console.log(`   Screen Control: Required`);
+    }
 
     return decision;
   }
@@ -65,6 +70,7 @@ export class ContextRouter {
     needsMemory: boolean;
     needsWeb: boolean;
     needsControl: boolean;
+    needsScreenControl: boolean;
     keywords: string[];
   } {
     const lower = query.toLowerCase();
@@ -76,6 +82,7 @@ export class ContextRouter {
       needsMemory: this.hasMemoryKeywords(lower),
       needsWeb: this.hasWebKeywords(lower),
       needsControl: this.hasControlKeywords(lower),
+      needsScreenControl: this.hasScreenControlKeywords(lower),
       keywords: this.extractKeywords(lower),
     };
   }
@@ -190,7 +197,7 @@ export class ContextRouter {
   }
 
   /**
-   * Check for control-related keywords
+   * Check for control-related keywords (generic)
    */
   private hasControlKeywords(query: string): boolean {
     const keywords = [
@@ -207,6 +214,37 @@ export class ContextRouter {
       "operate",
       "change",
       "modify",
+    ];
+    return keywords.some((kw) => query.includes(kw));
+  }
+
+  /**
+   * Check for screen control-specific keywords
+   * These indicate JARVIS should directly control the screen
+   */
+  private hasScreenControlKeywords(query: string): boolean {
+    const keywords = [
+      "click",
+      "type",
+      "open this",
+      "open that",
+      "close",
+      "fill in",
+      "send",
+      "compose",
+      "draft",
+      "do it for me",
+      "automate",
+      "perform",
+      "execute",
+      "run",
+      "click the",
+      "open the",
+      "go to",
+      "navigate",
+      "press",
+      "save as",
+      "rename",
     ];
     return keywords.some((kw) => query.includes(kw));
   }
@@ -246,6 +284,22 @@ export class ContextRouter {
    */
   private makeRoutingDecision(analysis: ReturnType<typeof this.analyzeQuery>): RoutingDecision {
     // Priority-based routing logic
+
+    // Screen control is highest priority if requested
+    if (analysis.needsScreenControl) {
+      return {
+        primaryContext: "screen_control",
+        secondaryContexts: analysis.needsScreen ? ["screen"] : [],
+        reasoning:
+          "Query requires direct computer automation. JARVIS will operate keyboard/mouse to complete the task.",
+        requiresScreenCapture: analysis.needsScreen,
+        requiresCamera: false,
+        requiresVision: analysis.needsScreen,
+        requiresScreenControl: true,
+        estimatedEfficiency: 0.88,
+      };
+    }
+
     if (analysis.needsVisual && analysis.needsScreen) {
       return {
         primaryContext: "screen",
@@ -255,6 +309,7 @@ export class ContextRouter {
         requiresScreenCapture: true,
         requiresCamera: false,
         requiresVision: true,
+        requiresScreenControl: false,
         estimatedEfficiency: 0.9,
       };
     }
@@ -268,11 +323,12 @@ export class ContextRouter {
         requiresScreenCapture: false,
         requiresCamera: true,
         requiresVision: true,
+        requiresScreenControl: false,
         estimatedEfficiency: 0.8,
       };
     }
 
-    if (analysis.needsControl) {
+    if (analysis.needsControl && !analysis.needsScreenControl) {
       return {
         primaryContext: "computer_control",
         secondaryContexts: analysis.needsScreen ? ["screen"] : [],
@@ -281,6 +337,7 @@ export class ContextRouter {
         requiresScreenCapture: analysis.needsScreen,
         requiresCamera: false,
         requiresVision: analysis.needsScreen,
+        requiresScreenControl: false,
         estimatedEfficiency: 0.85,
       };
     }
@@ -294,7 +351,8 @@ export class ContextRouter {
         requiresScreenCapture: false,
         requiresCamera: false,
         requiresVision: false,
-        estimatedEfficiency: 0.95, // Most efficient - no vision overhead
+        requiresScreenControl: false,
+        estimatedEfficiency: 0.95,
       };
     }
 
@@ -307,7 +365,8 @@ export class ContextRouter {
         requiresScreenCapture: false,
         requiresCamera: false,
         requiresVision: false,
-        estimatedEfficiency: 1.0, // Most efficient - pure memory lookup
+        requiresScreenControl: false,
+        estimatedEfficiency: 1.0,
       };
     }
 
@@ -320,7 +379,8 @@ export class ContextRouter {
       requiresScreenCapture: false,
       requiresCamera: false,
       requiresVision: false,
-      estimatedEfficiency: 1.0, // Most efficient - pure reasoning
+      requiresScreenControl: false,
+      estimatedEfficiency: 1.0,
     };
   }
 
@@ -342,10 +402,11 @@ export class ContextRouter {
       memory: 1.0,
       web: 0.95,
       computer_control: 0.85,
+      screen_control: 0.88,
+      tool: 0.8,
       screen: 0.7, // Vision overhead
       camera: 0.6, // Vision overhead + camera processing
       multiple: 0.5, // Multiple vision sources
-      tool: 0.8, // General tool use
     };
 
     // Filter out lower efficiency alternatives if primary is efficient enough
@@ -374,11 +435,13 @@ export class ContextRouter {
   getStats(): {
     routesWithVision: number;
     routesWithoutVision: number;
+    routesWithScreenControl: number;
     averageEfficiency: number;
   } {
     return {
       routesWithVision: 0,
       routesWithoutVision: 0,
+      routesWithScreenControl: 0,
       averageEfficiency: 0.9,
     };
   }
