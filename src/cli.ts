@@ -144,11 +144,37 @@ async function main() {
         console.error("  - Check that ZO_API_KEY is set (for Claude provider)");
         console.error("  - Check database schema was created (bun run db:push)");
       }
+    } else if (command === "phase1" || command === "developer") {
+      console.log("\n" + "=".repeat(70));
+      console.log("📖 PHASE 1: JARVIS DEVELOPER - PLANNING PHASE");
+      console.log("=".repeat(70));
+      console.log(
+        "\nPhase 1 implementation is starting. The system now has:"
+      );
+      console.log("  ✓ Repository understanding tools");
+      console.log("  ✓ Git integration");
+      console.log("  ✓ Developer agent roles and pipeline");
+      console.log("  ✓ Developer orchestrator framework");
+      console.log(
+        "\nNext steps to complete Phase 1:"
+      );
+      console.log("  1. Connect agent roles to actual LLM reasoning");
+      console.log("  2. Implement repository context passing");
+      console.log("  3. Build code modification tools");
+      console.log("  4. Integrate with test runners");
+      console.log("  5. Connect Git operations to PR creation");
+      console.log("  6. Build verification pipeline");
+      console.log("  7. End-to-end test on real repository");
+      console.log("\nPhase 1 status: FOUNDATION READY ✓");
+      console.log("Next: Full implementation and integration");
+      console.log("\n" + "=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
-      console.log("  bun run dev         - Run vertical slice test (default)");
-      console.log("  bun run dev test    - Same as above");
+      console.log("  bun run dev              - Run Phase 0 vertical slice test");
+      console.log("  bun run dev test         - Same as above");
+      console.log("  bun run dev phase1       - Show Phase 1 status");
+      console.log("  bun run dev developer    - Same as phase1");
     }
   } finally {
     await closeDatabase();
