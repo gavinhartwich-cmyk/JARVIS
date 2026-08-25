@@ -7,11 +7,20 @@ import { logAuditEvent } from "./audit";
 import { storeMemory } from "./memory";
 import { TaskDecomposer } from "./task-decomposer";
 import { toolManager } from "../tools/manager";
+import { ConversationEngine } from "../phase2/conversation-engine";
+import { ConversationalIntelligence } from "./conversation-intelligence";
+import { IntelligentModelRouter } from "./model-router";
 
 /**
- * Orchestrator
- * Central coordinator for multi-agent reasoning
- * Manages task decomposition and agent execution
+ * Orchestrator with Conversational Intelligence
+ *
+ * Central coordinator that integrates:
+ * - Multi-agent reasoning
+ * - Conversational state management
+ * - Intelligent model routing
+ * - Memory systems (short + long-term)
+ * - Proactive monitoring
+ * - Natural interaction
  */
 
 export interface TaskDecomposition {
@@ -34,6 +43,56 @@ export interface OrchestrationResult {
 export class Orchestrator {
   private agents: Map<string, Agent> = new Map();
   private decomposer = new TaskDecomposer();
+
+  // Conversational intelligence integration
+  private conversationEngine: ConversationEngine;
+  private conversationalIntelligence: ConversationalIntelligence;
+  private modelRouter: IntelligentModelRouter;
+
+  constructor() {
+    // Initialize conversational layer
+    this.conversationEngine = new ConversationEngine();
+    this.modelRouter = new IntelligentModelRouter();
+    this.conversationalIntelligence = new ConversationalIntelligence(
+      this.conversationEngine,
+      this.modelRouter
+    );
+
+    // Set up proactive monitors
+    this.setupProactiveMonitors();
+  }
+
+  /**
+   * Setup proactive monitoring capabilities
+   */
+  private setupProactiveMonitors(): void {
+    // Monitor for unfinished tasks
+    this.conversationalIntelligence.registerProactiveMonitor(
+      "pending-tasks",
+      async () => {
+        const context = this.conversationEngine.getConversationContext();
+        if (
+          context.workingMemory.currentTask &&
+          this.conversationEngine.getStatus().pendingActionsCount > 0
+        ) {
+          return `You have ${this.conversationEngine.getStatus().pendingActionsCount} pending actions.`;
+        }
+        return null;
+      }
+    );
+
+    // Monitor for conversation length
+    this.conversationalIntelligence.registerProactiveMonitor(
+      "long-conversation",
+      async () => {
+        const status = this.conversationEngine.getStatus();
+        if (status.turnCount > 20) {
+          return "We've been talking for a while. Would you like a summary?";
+        }
+        return null;
+      }
+    );
+  }
 
   registerAgent(agent: Agent) {
     this.agents.set(agent.name, agent);
@@ -259,5 +318,115 @@ export class Orchestrator {
       conflicts: [],
       evidence: Object.values(outputs).map((o) => o.content),
     };
+  }
+
+  /**
+   * Process user input with conversational intelligence
+   *
+   * Replaces simple task strings with context-aware conversation
+   */
+  async processConversation(userUtterance: string): Promise<{
+    response: string;
+    taskId?: string;
+    context: ReturnType<ConversationEngine["getConversationContext"]>;
+  }> {
+    // Use conversational intelligence to process utterance
+    const stream = await this.conversationalIntelligence.processWithStreaming(
+      userUtterance
+    );
+
+    // In production: stream tokens to TTS
+    // For now: collect full response
+    const response = stream.text;
+
+    // Extract task if implied
+    let taskId: string | undefined;
+    const conversationContext = this.conversationEngine.getConversationContext();
+
+    if (this.isTaskRequest(userUtterance)) {
+      // Would decompose and execute as task
+      console.log(`\n📋 Implied task detected in conversation`);
+    }
+
+    // Record in memory
+    this.conversationalIntelligence.completeTurn(userUtterance, response);
+
+    return {
+      response,
+      taskId,
+      context: conversationContext,
+    };
+  }
+
+  /**
+   * Check if utterance implies a task to be executed
+   */
+  private isTaskRequest(utterance: string): boolean {
+    const taskKeywords = [
+      "do",
+      "make",
+      "create",
+      "build",
+      "write",
+      "generate",
+      "find",
+      "fetch",
+      "research",
+      "analyze",
+    ];
+
+    const lower = utterance.toLowerCase();
+    return taskKeywords.some((keyword) => lower.includes(keyword));
+  }
+
+  /**
+   * Get conversational context for integration with voice/text interfaces
+   */
+  getConversationContext() {
+    return this.conversationEngine.getConversationContext();
+  }
+
+  /**
+   * Get memory status
+   */
+  getMemoryStatus() {
+    return this.conversationalIntelligence.getMemoryStatus();
+  }
+
+  /**
+   * Get model router status
+   */
+  getModelRouterStatus() {
+    return this.modelRouter.getStatus();
+  }
+
+  /**
+   * Get full orchestrator status
+   */
+  getOrchestratorStatus() {
+    return {
+      agents: this.agents.size,
+      conversation: this.conversationEngine.getStatus(),
+      memory: this.conversationalIntelligence.getMemoryStatus(),
+      modelRouter: this.modelRouter.getStatus(),
+    };
+  }
+
+  /**
+   * Register semantic fact in memory
+   */
+  recordSemanticFact(key: string, fact: string, confidence?: number): void {
+    this.conversationalIntelligence.recordSemanticFact(key, fact, confidence);
+  }
+
+  /**
+   * Register procedure in memory
+   */
+  recordProcedure(
+    name: string,
+    steps: string[],
+    variations?: Record<string, string[]>
+  ): void {
+    this.conversationalIntelligence.recordProcedure(name, steps, variations);
   }
 }
