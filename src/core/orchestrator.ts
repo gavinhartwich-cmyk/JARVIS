@@ -6,6 +6,7 @@ import { v4 as uuid } from "uuid";
 import { logAuditEvent } from "./audit";
 import { storeMemory } from "./memory";
 import { TaskDecomposer } from "./task-decomposer";
+import { toolManager } from "../tools/manager";
 
 /**
  * Orchestrator
@@ -78,6 +79,7 @@ export class Orchestrator {
       const context: Record<string, unknown> = {
         originalTask: userTask,
         decomposition,
+        toolResults: {} as Record<string, unknown>,
       };
 
       for (const agentName of decomposition.agentSequence) {
@@ -96,6 +98,28 @@ export class Orchestrator {
 
         const output = await agent.execute(agentInput);
         agentOutputs[agentName] = output;
+
+        // NEW: Execute any tool calls the agent requested
+        if (output.toolCalls && output.toolCalls.length > 0) {
+          console.log(`\n  🔧 Executing ${output.toolCalls.length} tool call(s)...`);
+          const toolResults: Record<string, unknown> = {};
+
+          for (const toolCall of output.toolCalls) {
+            console.log(`     → ${toolCall.toolName}`);
+            const result = await toolManager.executeTool(toolCall, taskId);
+            toolResults[toolCall.toolName] = result;
+            
+            if (result.success) {
+              console.log(`       ✓ Success (${result.executionTime}ms)`);
+            } else {
+              console.log(`       ✗ Failed: ${result.error}`);
+            }
+          }
+
+          // Store tool results in context for next agent
+          const toolResultsMap = context.toolResults as Record<string, unknown>;
+          context.toolResults = { ...toolResultsMap, ...toolResults };
+        }
 
         // Store in database
         await db.insert(agentRuns).values({

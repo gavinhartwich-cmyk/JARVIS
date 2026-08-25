@@ -1,4 +1,5 @@
 import { ModelConfig } from "../models/types";
+import { ToolCall } from "../tools/types";
 
 /**
  * Agent abstraction
@@ -20,6 +21,7 @@ export interface AgentOutput {
   reasoning: string;
   confidence: number; // 0-1
   tokensUsed: number;
+  toolCalls?: ToolCall[]; // Agents can request tools
   metadata?: Record<string, unknown>;
 }
 

@@ -3,6 +3,7 @@ import { Orchestrator } from "./core/orchestrator";
 import { BaseAgent } from "./agents/agent";
 import { AGENT_ROLES } from "./agents/types";
 import { ClaudeProvider } from "./models/claude-provider";
+import { toolManager } from "./tools/manager";
 import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
 
 /**
@@ -11,7 +12,7 @@ import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
  */
 
 async function main() {
-  console.log("\n🤖 JARVIS Phase 0 - Initialization\n");
+  console.log("\n🤖 JARVIS Phase 1.5 - Tool Integration\n");
 
   // Initialize database
   try {
@@ -31,6 +32,11 @@ async function main() {
     // Initialize model provider
     console.log("🧠 Initializing model provider...");
     const modelProvider = new ClaudeProvider();
+
+    // Initialize tools
+    console.log("🔧 Initializing tools...");
+    const availableTools = toolManager.getAvailableTools();
+    console.log(`   📌 ${availableTools.length} tools registered`);
 
     const isAvailable = await modelProvider.available();
     if (!isAvailable) {
