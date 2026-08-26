@@ -323,4 +323,33 @@ export class DependencyAnalyzer {
 
     return allImports;
   }
+
+  /**
+   * Authoritative list of npm package names this repo actually declares in
+   * package.json (dependencies + devDependencies + peerDependencies). This
+   * is the real dependency fence the Coder and Debugger agents get told
+   * about — found necessary via a live run where the small local Ollama
+   * model, given only the requirement text, produced an Angular
+   * `@Injectable` service for a plain `greet(name)` function (pattern-matched
+   * to a common tutorial shape instead of the actual repo). Deliberately
+   * NOT LLM-derived: read straight from package.json, not guessed.
+   *
+   * Does not include Node/Bun built-in modules — callers that need a full
+   * "is this import allowed" set should union this with `builtinModules`.
+   */
+  static getDeclaredPackageNames(rootPath: string): Set<string> {
+    const names = new Set<string>();
+    const pkgPath = path.join(rootPath, "package.json");
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+        if (pkg[section]) {
+          Object.keys(pkg[section]).forEach((name) => names.add(name));
+        }
+      }
+    } catch {
+      // No/unreadable package.json — caller gets an empty declared set.
+    }
+    return names;
+  }
 }

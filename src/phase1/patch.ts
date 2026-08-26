@@ -46,6 +46,54 @@ export function isNoChangesResponse(text: string): boolean {
 }
 
 /**
+ * Root package name for an import specifier ("@angular/core/testing" ->
+ * "@angular/core", "lodash/fp" -> "lodash", "./local" -> "./local" unchanged).
+ */
+function packageRootName(specifier: string): string {
+  const parts = specifier.split("/");
+  if (specifier.startsWith("@")) return parts.slice(0, 2).join("/");
+  return parts[0];
+}
+
+/**
+ * Scan written files for bare (non-relative, non-builtin) import/require
+ * specifiers that aren't in the repo's actual installed-package list.
+ * Mechanical check, not LLM-guessed — this is what caught the Coder
+ * hallucinating an `@angular/core` import for a plain utility function that
+ * `tsc` also caught, but which the Debugger then failed to act on. Running
+ * this immediately after a Coder/Debugger write gives a much more specific,
+ * actionable error than a generic TS2307 buried in a typecheck dump.
+ */
+export function findDisallowedImports(
+  files: Map<string, string>,
+  allowedPackages: Set<string>
+): string[] {
+  const errors: string[] = [];
+  const importRe = /(?:^|\n)\s*import\s+(?:type\s+)?.*?from\s+['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+  for (const [filePath, content] of files) {
+    let match: RegExpExecArray | null;
+    importRe.lastIndex = 0;
+    while ((match = importRe.exec(content)) !== null) {
+      const specifier = match[1] ?? match[2];
+      if (!specifier) continue;
+      if (specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("node:")) {
+        continue; // relative import or explicit node: builtin
+      }
+      const rootName = packageRootName(specifier);
+      if (!allowedPackages.has(rootName) && !allowedPackages.has(specifier)) {
+        errors.push(
+          `${filePath}: imports "${specifier}", which is not an installed dependency of this project (not in package.json). ` +
+            `Rewrite this file without that import — use only plain TypeScript/Bun built-ins or the project's existing dependencies.`
+        );
+      }
+    }
+  }
+
+  return errors;
+}
+
+/**
  * Instructions appended to any Coder/Debugger task prompt so the model's
  * free-form response is actually machine-parseable.
  */

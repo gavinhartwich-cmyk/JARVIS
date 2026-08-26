@@ -16,6 +16,7 @@
  */
 
 import { execSync } from "child_process";
+import { builtinModules } from "module";
 import { RepositoryExplorer, CodeReader, DependencyAnalyzer } from "./repository";
 import { v4 as uuidv4 } from "uuid";
 import { GitManager } from "./git";
@@ -37,6 +38,7 @@ import {
   parseFileBlocks,
   applyFileBlocks,
   isNoChangesResponse,
+  findDisallowedImports,
   FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
   type FileBlock,
 } from "./patch";
@@ -140,6 +142,12 @@ export class JARVISDeveloper {
   // Set fresh at the start of each developFeature() call, not here, so
   // concurrent/repeated runs on the same instance don't share one id.
   private runId: string = "";
+  // Declared package.json deps + Node/Bun builtins — the fence used to
+  // catch the Coder/Debugger importing packages this repo doesn't actually
+  // have (see findDisallowedImports). Recomputed per run in case an earlier
+  // debug attempt changed package.json.
+  private allowedPackages: Set<string> = new Set(builtinModules);
+  private declaredDependencies: Set<string> = new Set();
 
   constructor(repositoryPath: string, modelProvider?: ModelProvider) {
     this.repositoryPath = repositoryPath;
@@ -289,6 +297,11 @@ export class JARVISDeveloper {
       // Step 1: Analyze requirement + repository
       const analysis = await this.step1_AnalyzeRequirement(requirement);
 
+      // Recompute the dependency fence fresh per run (package.json won't
+      // usually change mid-run, but this is cheap and avoids a stale set).
+      this.declaredDependencies = DependencyAnalyzer.getDeclaredPackageNames(this.repositoryPath);
+      this.allowedPackages = new Set([...builtinModules, ...this.declaredDependencies]);
+
       // Real branch creation (previously computed but never checked out)
       console.log(`\n🌿 Creating branch '${branchName}' from '${baseBranch}'...`);
       await this.gitManager.createBranch(branchName, baseBranch);
@@ -309,7 +322,7 @@ export class JARVISDeveloper {
       result.implementation = implementation.files;
 
       // Step 5: Build
-      let buildResult = await this.step5_BuildCode();
+      let buildResult = await this.step5_BuildCode(result.implementation);
       result.buildStatus = { success: buildResult.success, errors: buildResult.errors };
 
       // Step 6: Run tests
@@ -332,14 +345,20 @@ export class JARVISDeveloper {
         console.log(`\n🐛 Build/test failures detected — debug attempt ${debugAttempts}/${MAX_DEBUG_ATTEMPTS}`);
         const debugResult = await this.step7_DebugFailures(buildResult, testResult, result.implementation);
         if (debugResult.filesChanged === 0) {
-          console.log("   ⚠️  Debugger produced no file changes — stopping retry loop.");
-          break;
-        }
-        for (const [path, content] of debugResult.files) {
-          result.implementation.set(path, content);
+          // Don't give up the remaining attempt budget on one unproductive
+          // response — a live run showed this triggering after just the
+          // *first* attempt, silently forfeiting attempt 2/2. Log why (so a
+          // future failure like this is diagnosable) and let the bounded
+          // while-loop condition decide whether to try again.
+          console.log(`   ⚠️  Debugger produced no usable file changes on attempt ${debugAttempts}/${MAX_DEBUG_ATTEMPTS}.`);
+          console.log(`   Raw response preview: ${truncate(debugResult.rawResponse, 300)}`);
+        } else {
+          for (const [path, content] of debugResult.files) {
+            result.implementation.set(path, content);
+          }
         }
 
-        buildResult = await this.step5_BuildCode();
+        buildResult = await this.step5_BuildCode(result.implementation);
         result.buildStatus = { success: buildResult.success, errors: buildResult.errors };
         testResult = await this.step6_RunTests();
         result.testResults = {
@@ -494,7 +513,7 @@ export class JARVISDeveloper {
     console.log("\n💻 STEP 4: Implementing Code (Coder Agent)");
     const output = await this.agents.coder.execute({
       taskId: this.runId,
-      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.`,
+      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}`,
       context: {},
     });
 
@@ -518,10 +537,41 @@ export class JARVISDeveloper {
   }
 
   /**
+   * Explicit, per-run dependency fence told to the Coder/Debugger agents.
+   * Found necessary via a live run: the small local Ollama model, given
+   * only a requirement like "add a greet(name) function", produced an
+   * Angular `@Injectable` service — a hallucinated framework it has never
+   * seen in this repo. Naming the real installed packages gives it far
+   * less room to pattern-match to unrelated training data.
+   */
+  private dependencyConstraintText(): string {
+    const declared = Array.from(this.declaredDependencies).sort().join(", ") || "(none declared)";
+    return (
+      `This project's ONLY installed npm packages are: ${declared}. ` +
+      `It is a plain Bun/TypeScript backend project — NOT Angular, React, Vue, NestJS, or Express. ` +
+      `Do NOT import any package that isn't in that list (e.g. no "@angular/core", "react", "express", ` +
+      `"@nestjs/*", "lodash", "axios", etc.) unless the requirement explicitly asks you to add a new ` +
+      `dependency. If you need functionality beyond what's listed, implement it with plain TypeScript ` +
+      `and Node/Bun built-ins instead.`
+    );
+  }
+
+  /**
    * Step 5: Build/compile verification — real, not LLM-guessed
    */
-  private async step5_BuildCode(): Promise<BuildResult> {
+  private async step5_BuildCode(currentFiles: Map<string, string>): Promise<BuildResult> {
     console.log("\n🔨 STEP 5: Building Code (typecheck)");
+
+    // Mechanical check, cheaper and far more specific than waiting for tsc
+    // to surface a generic TS2307 for the same problem — see
+    // findDisallowedImports for the live bug that made this necessary.
+    const importErrors = findDisallowedImports(currentFiles, this.allowedPackages);
+    if (importErrors.length > 0) {
+      console.log("   ❌ Build failed — disallowed import(s) detected");
+      console.log(`   Errors:\n${importErrors.join("\n")}`);
+      return { success: false, errors: importErrors, warnings: [], output: importErrors.join("\n"), durationMs: 0 };
+    }
+
     const result = runTypecheck(this.repositoryPath);
     console.log(`   ${result.success ? "✅ Build succeeded" : "❌ Build failed"} (${result.durationMs}ms)`);
     if (!result.success) {
@@ -551,7 +601,7 @@ export class JARVISDeveloper {
     buildResult: BuildResult,
     testResult: TestResult,
     currentFiles: Map<string, string>
-  ): Promise<{ filesChanged: number; files: Map<string, string> }> {
+  ): Promise<{ filesChanged: number; files: Map<string, string>; rawResponse: string }> {
     console.log("\n🐛 STEP 7: Debugging Failures (Debugger Agent)");
 
     const currentFilesText = Array.from(currentFiles.entries())
@@ -567,23 +617,23 @@ export class JARVISDeveloper {
 
     const output = await this.agents.debugger.execute({
       taskId: this.runId,
-      task: `The following files were just changed and are failing:\n\n${truncate(currentFilesText, 8000)}\n\n${failureText}\n\nFix the failure(s). Repository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.`,
+      task: `The following files were just changed and are failing:\n\n${truncate(currentFilesText, 8000)}\n\n${failureText}\n\nFix the failure(s). Repository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}\n\nYou MUST respond with at least one ===FILE:===...===END FILE=== block containing the complete corrected file — a prose-only explanation with no file block will be treated as a failed attempt.`,
       context: {},
     });
 
     if (isNoChangesResponse(output.content)) {
-      return { filesChanged: 0, files: new Map() };
+      return { filesChanged: 0, files: new Map(), rawResponse: output.content };
     }
 
     const blocks = parseFileBlocks(output.content);
     if (blocks.length === 0) {
       console.log("   ⚠️  Debugger response did not use the required file-block format.");
-      return { filesChanged: 0, files: new Map() };
+      return { filesChanged: 0, files: new Map(), rawResponse: output.content };
     }
 
     console.log(`   Rewriting ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
     const written = applyFileBlocks(this.repositoryPath, blocks);
-    return { filesChanged: written.size, files: written };
+    return { filesChanged: written.size, files: written, rawResponse: output.content };
   }
 
   /**
