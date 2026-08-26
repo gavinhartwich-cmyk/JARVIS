@@ -152,7 +152,11 @@ async function main() {
         console.error(error instanceof Error ? error.message : String(error));
         console.error("\nDebugging info:");
         console.error("  - Check that PostgreSQL is running");
-        console.error("  - Check that ZO_API_KEY is set (for Claude provider)");
+        console.error(
+          providerName === "gemini"
+            ? "  - Check that GEMINI_API_KEY is set and valid (aistudio.google.com/apikey)"
+            : "  - Check that ZO_API_KEY is set (Settings > Advanced > Access Tokens)"
+        );
         console.error("  - Check database schema was created (bun run db:push)");
       }
     } else if (command === "phase1" || command === "developer") {
