@@ -6,16 +6,24 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { SpeechSynthesizer } from "../phase2/speech-synthesizer";
 import { WakeWordDetector, WakeWordEvent } from "../phase2/wake-word-detector";
+import { DEFAULT_VOICE_CONFIG } from "../phase2/voice-config";
+
+// Test against the real tuned default, not a hardcoded number, so this
+// test tracks voice-config.ts if the sensitivity is ever re-tuned.
+const SENSITIVITY = DEFAULT_VOICE_CONFIG.wakeWord.sensitivity;
 
 /**
  * Proves Phase 2 wake word detection is real, not the old
- * Math.random()-based stub: synthesizes a real "hey jarvis" clip with
- * Piper, resamples it to the 16kHz openWakeWord requires (via ffmpeg),
- * and checks the actual pretrained hey_jarvis model fires the event —
- * while an unrelated sentence, run through the identical pipeline, does
- * not. Matches the manual verification already done on 2026-08-26
- * (positive ~0.999, negative ~0.00003 — see jarvis-phase-1-developer
- * memory, Phase 2 update).
+ * Math.random()-based stub, and that it fires on bare "Jarvis" (not just
+ * the literal "hey Jarvis" the underlying model was trained on, per
+ * Gavin's request): synthesizes real clips with Piper, resamples them to
+ * the 16kHz openWakeWord requires (via ffmpeg), and checks the actual
+ * pretrained hey_jarvis model — at the tuned default sensitivity (0.15)
+ * — fires on bare-"jarvis" utterances while staying silent on unrelated
+ * speech. Matches the manual verification already done on 2026-08-26 —
+ * see jarvis-phase-1-developer memory, Phase 2 update, for the full data
+ * including the one known mid-sentence outlier this tuning does not
+ * catch.
  *
  * Requires scripts/setup-voice.sh's Piper output plus openwakeword
  * installed in the whisper venv (WAKEWORD_PYTHON_PATH / _SCRIPT_PATH env
@@ -76,7 +84,7 @@ async function detectOnce(text: string): Promise<WakeWordEvent | null> {
 
   const detector = new WakeWordDetector({
     keyword: "jarvis",
-    sensitivity: 0.5,
+    sensitivity: SENSITIVITY,
     sampleRate: 16000,
   });
 
@@ -96,12 +104,31 @@ describe.if(allAvailable)("WakeWordDetector (real openWakeWord)", () => {
     const event = await detectOnce("hey jarvis, what's the weather like today");
     expect(event).not.toBeNull();
     expect(event!.keyword).toBe("jarvis");
-    expect(event!.confidence).toBeGreaterThan(0.5);
+    expect(event!.confidence).toBeGreaterThan(SENSITIVITY);
     expect(event!.confidence).toBeLessThanOrEqual(1);
+  }, 30000);
+
+  test("detects bare 'jarvis' with a following pause (no 'hey')", async () => {
+    const event = await detectOnce("jarvis, can you help me");
+    expect(event).not.toBeNull();
+    expect(event!.confidence).toBeGreaterThan(SENSITIVITY);
+  }, 30000);
+
+  test("detects 'jarvis' run directly into the next word, no pause", async () => {
+    // Real measured borderline case (2026-08-26): scores ~0.25, well below
+    // "hey jarvis" but still above the tuned 0.15 default.
+    const event = await detectOnce("jarvis what's the weather like today");
+    expect(event).not.toBeNull();
+    expect(event!.confidence).toBeGreaterThan(SENSITIVITY);
   }, 30000);
 
   test("does not fire on unrelated speech", async () => {
     const event = await detectOnce("the quick brown fox jumps over the lazy dog");
+    expect(event).toBeNull();
+  }, 30000);
+
+  test("does not fire on a phonetically-similar word ('harvest')", async () => {
+    const event = await detectOnce("harvest season starts in the fall");
     expect(event).toBeNull();
   }, 30000);
 });

@@ -65,7 +65,23 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   wakeWord: {
     enabled: true,
     keyword: "jarvis",
-    sensitivity: 0.5,
+    // The underlying model (openWakeWord's "hey_jarvis") was trained on the
+    // phrase "hey jarvis", not bare "jarvis" — but Gavin wants any mention
+    // of "Jarvis" to trigger it, not just "hey Jarvis". Measured against
+    // real Piper-synthesized clips (2026-08-26): unrelated speech scores
+    // ~0.0001-0.0003 (noise floor); bare "jarvis" utterances scored
+    // 0.25-0.99 depending on sentence position/cadence, with one
+    // deeply-embedded mid-sentence case ("...if jarvis knows...") scoring
+    // only 0.003. 0.15 sits ~50x above the noise floor (safe from false
+    // triggers) while catching every measured "jarvis" case except that
+    // one low-cadence outlier — see wake-word-detector.ts header comment
+    // and jarvis-phase-1-developer memory for the full data. This is a
+    // real accuracy tradeoff, not a guarantee: catching that remaining
+    // case reliably would need training a dedicated "jarvis" model
+    // (openWakeWord supports this, but it's a much bigger task — large
+    // negative dataset + synthetic positive generation), not just a
+    // threshold change.
+    sensitivity: 0.15,
   },
   speechRecognition: {
     enabled: true,

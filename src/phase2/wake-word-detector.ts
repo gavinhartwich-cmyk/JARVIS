@@ -1,12 +1,27 @@
 /**
  * Phase 2: Wake Word Detection
  *
- * Detects when user says the wake word (e.g., "JARVIS") using a real
- * local openWakeWord model (via scripts/wakeword_detect.py — see
- * detectWakeWord()), not a simulation. Verified against real Piper-
- * synthesized audio: a "hey jarvis, what's the weather" clip scores
- * ~0.999, an unrelated "the quick brown fox" clip scores ~0.00003 — see
- * jarvis-phase-1-developer memory, Phase 2 update, for the full trace.
+ * Detects when the user says "Jarvis" — anywhere in speech, not just the
+ * literal phrase "hey Jarvis" — using a real local openWakeWord model
+ * (via scripts/wakeword_detect.py — see detectWakeWord()), not a
+ * simulation.
+ *
+ * IMPORTANT CAVEAT: the underlying pretrained model ("hey_jarvis") was
+ * only ever trained on the phrase "hey jarvis", not bare "jarvis". Real
+ * measurements against Piper-synthesized clips (2026-08-26): unrelated
+ * speech scores ~0.0001-0.0003 (noise floor); "hey jarvis" scores ~0.999;
+ * bare "jarvis" scores 0.25-0.99 depending on sentence position and
+ * cadence (higher near a pause/end-of-utterance, e.g. "jarvis, can you
+ * help me" -> 0.997; lower when buried mid-sentence with no pause, e.g.
+ * "...if jarvis knows the answer..." -> 0.003). voice-config.ts's default
+ * sensitivity (0.15) is tuned from this real data to catch the large
+ * majority of "jarvis" mentions while staying far above the noise floor
+ * — but it is NOT a 100% guarantee of catching every utterance in every
+ * sentence position; that outlier case would need a dedicated custom-
+ * trained "jarvis" model (openWakeWord supports this, but it's
+ * substantially more work than a threshold tune — see
+ * jarvis-phase-1-developer memory for the full data and the open
+ * decision on whether that's worth doing).
  *
  * Real continuous microphone capture doesn't exist in this codebase yet
  * (out of scope for this sandbox — needs Gavin's PC); this class buffers
