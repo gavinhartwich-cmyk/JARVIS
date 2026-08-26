@@ -30,11 +30,35 @@ export interface TestResult {
 }
 
 /**
+ * Install dependencies if they're missing. The pipeline operates on repos
+ * checked out fresh (e.g. a scratch clone for a feature branch), which have
+ * no node_modules — found via a real run where every typecheck failed with
+ * "Cannot find type definition file for 'bun-types'" even though the coder's
+ * own output was correct. Only runs when node_modules is actually absent,
+ * so repeat calls in the same working copy stay cheap.
+ */
+function ensureDependenciesInstalled(repoRoot: string): void {
+  if (!fs.existsSync(path.join(repoRoot, "package.json"))) return;
+  if (fs.existsSync(path.join(repoRoot, "node_modules"))) return;
+  try {
+    execSync("bun install", {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    // Let the actual typecheck/test command surface the real error —
+    // an install failure here will just reappear as a clearer failure below.
+  }
+}
+
+/**
  * Run `bun run typecheck` (tsc --noEmit) against the repo. Falls back to
  * `bunx tsc --noEmit` if no typecheck script is defined in package.json.
  */
 export function runTypecheck(repoRoot: string): BuildResult {
   const startTime = Date.now();
+  ensureDependenciesInstalled(repoRoot);
   const pkgPath = path.join(repoRoot, "package.json");
   let command = "bunx tsc --noEmit";
 
@@ -88,6 +112,7 @@ export function runTypecheck(repoRoot: string): BuildResult {
  */
 export function runTests(repoRoot: string): TestResult {
   const startTime = Date.now();
+  ensureDependenciesInstalled(repoRoot);
   const hasTestFiles = walkForTestFiles(repoRoot);
 
   if (!hasTestFiles) {
