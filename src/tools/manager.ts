@@ -7,6 +7,8 @@ import { Tool, ToolCall, ToolResult } from "./types";
 import { ReadFileTool, WriteFileTool, ListFilesTool, DeleteFileTool } from "./file-tools";
 import { BashTool } from "./command-tools";
 import { logAuditEvent } from "../core/audit";
+import { authorizationEngine, type RiskTier } from "../core/authorization";
+import type { IdentityResult } from "../core/identity";
 
 export class ToolManager {
   private tools: Map<string, Tool> = new Map();
@@ -48,13 +50,21 @@ export class ToolManager {
     return this.tools.get(name);
   }
 
+  /** Tools flagged requiresApproval are admin-tier (need Level 3/verified); everything else is normal-tier (needs Level 2/gavin). */
+  private riskTierFor(tool: Tool): RiskTier {
+    return tool.requiresApproval ? "admin" : "normal";
+  }
+
   /**
-   * Execute a tool call with optional approval
+   * Execute a tool call. `identity` is REQUIRED and is resolved through the
+   * AuthorizationEngine before anything runs — this replaced a prior
+   * "auto-approve, log a line" placeholder that never actually blocked
+   * anything (invariant #2: LLM output is not automatic permission).
    */
   async executeTool(
     toolCall: ToolCall,
     taskId: string,
-    requiresApproval: boolean = true
+    identity: IdentityResult
   ): Promise<ToolResult> {
     const tool = this.tools.get(toolCall.toolName);
 
@@ -74,15 +84,35 @@ export class ToolManager {
       parameters: toolCall.parameters,
     });
 
-    // Check if approval is required
-    if (requiresApproval && tool.requiresApproval) {
-      console.log(`\n⚠️  Tool approval required: ${toolCall.toolName}`);
-      console.log(`   Parameters: ${JSON.stringify(toolCall.parameters, null, 2)}`);
-      
-      // For now, auto-approve. Later: implement approval workflow
-      console.log(`   ✓ Auto-approved (approval workflow coming in Phase 2)`);
-      this.executionLog[this.executionLog.length - 1].status = "approved";
+    const authResult = await authorizationEngine.authorize(
+      identity,
+      tool.name,
+      this.riskTierFor(tool)
+    );
+
+    if (!authResult.allowed) {
+      this.executionLog[this.executionLog.length - 1].status = "rejected";
+      console.log(`\n🔒 Authorization denied for "${toolCall.toolName}": ${authResult.reason}`);
+      await logAuditEvent({
+        actor: "tool_manager",
+        action: "blocked",
+        resource: "tool",
+        resourceId: toolCall.toolName,
+        input: toolCall.parameters,
+        statusCode: 403,
+        message: authResult.reason,
+      });
+      return {
+        success: false,
+        error:
+          authResult.decision === "needs_verification"
+            ? `Blocked: ${authResult.reason} Provide PIN verification and retry.`
+            : `Blocked: ${authResult.reason}`,
+        executionTime: 0,
+      };
     }
+
+    this.executionLog[this.executionLog.length - 1].status = "approved";
 
     try {
       // Execute the tool

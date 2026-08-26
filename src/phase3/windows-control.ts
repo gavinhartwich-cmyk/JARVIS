@@ -1,0 +1,157 @@
+/**
+ * Real Windows input automation, backed by PowerShell.
+ *
+ * IMPORTANT — read before trusting this: this file was written and
+ * typechecked on a Linux sandbox that cannot run PowerShell or drive a
+ * Windows desktop. It has NEVER been executed. It is real code, not a
+ * simulation, but it is UNVERIFIED until it's actually run on the PC.
+ * Use `bun run dev control-test` there first and report back what happens
+ * before trusting it inside a real task pipeline.
+ *
+ * Approach: shell out to `powershell.exe` per action rather than a native
+ * Node addon (robotjs/nut-js) — native addons have a history of breaking
+ * against Bun's ABI, and a PowerShell one-liner is something a human can
+ * read, copy, and run by hand to debug when something goes wrong.
+ */
+
+import { spawn } from "node:child_process";
+
+function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ stdout: string; stderr: string }> {
+  if (process.platform !== "win32") {
+    return Promise.reject(
+      new Error(
+        `Computer control requires Windows (got "${process.platform}"). ` +
+          `This can only run on the actual PC, not in the Zo sandbox.`
+      )
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      timeout: timeoutMs,
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (stdout += d.toString()));
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`PowerShell exited ${code}: ${stderr || stdout}`));
+    });
+  });
+}
+
+// Escapes a string for safe interpolation inside a PowerShell double-quoted string.
+function psEscape(s: string): string {
+  return s.replace(/`/g, "``").replace(/"/g, '`"').replace(/\$/g, "`$");
+}
+
+// Win32 API bindings, loaded once per PowerShell invocation via Add-Type.
+const WIN32_TYPE = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Control {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+}
+"@
+`;
+
+const MOUSEEVENTF_LEFTDOWN = 0x0002;
+const MOUSEEVENTF_LEFTUP = 0x0004;
+const MOUSEEVENTF_WHEEL = 0x0800;
+
+export class WindowsController {
+  async click(x: number, y: number): Promise<void> {
+    await runPowerShell(`
+${WIN32_TYPE}
+[Win32Control]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})
+Start-Sleep -Milliseconds 30
+[Win32Control]::mouse_event(${MOUSEEVENTF_LEFTDOWN}, 0, 0, 0, 0)
+Start-Sleep -Milliseconds 30
+[Win32Control]::mouse_event(${MOUSEEVENTF_LEFTUP}, 0, 0, 0, 0)
+`);
+  }
+
+  async typeText(text: string): Promise<void> {
+    await runPowerShell(`
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait("${psEscape(text)}")
+`);
+  }
+
+  /**
+   * key("ctrl+s"), key("enter"), key("escape") — translates a simple
+   * "mod+mod+key" string into SendKeys syntax.
+   */
+  async pressKey(combo: string): Promise<void> {
+    const sendKeysCombo = this.toSendKeysSyntax(combo);
+    await runPowerShell(`
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait("${sendKeysCombo}")
+`);
+  }
+
+  private toSendKeysSyntax(combo: string): string {
+    const specialKeys: Record<string, string> = {
+      enter: "{ENTER}",
+      escape: "{ESC}",
+      esc: "{ESC}",
+      tab: "{TAB}",
+      backspace: "{BACKSPACE}",
+      delete: "{DELETE}",
+      up: "{UP}",
+      down: "{DOWN}",
+      left: "{LEFT}",
+      right: "{RIGHT}",
+      home: "{HOME}",
+      end: "{END}",
+      pageup: "{PGUP}",
+      pagedown: "{PGDN}",
+      f1: "{F1}", f2: "{F2}", f3: "{F3}", f4: "{F4}", f5: "{F5}", f6: "{F6}",
+    };
+
+    const parts = combo.toLowerCase().split("+").map((p) => p.trim());
+    let modifiers = "";
+    let mainKey = parts[parts.length - 1];
+
+    for (const part of parts.slice(0, -1)) {
+      if (part === "ctrl" || part === "control") modifiers += "^";
+      else if (part === "alt") modifiers += "%";
+      else if (part === "shift") modifiers += "+";
+    }
+
+    const mainKeySyntax = specialKeys[mainKey] ?? mainKey;
+    return modifiers + mainKeySyntax;
+  }
+
+  async openApplication(name: string): Promise<void> {
+    await runPowerShell(`Start-Process "${psEscape(name)}"`);
+  }
+
+  async closeApplication(name: string): Promise<void> {
+    // Stops the first matching process by name (without .exe). Best-effort —
+    // if nothing matches, PowerShell just reports nothing to stop.
+    await runPowerShell(`Get-Process "${psEscape(name)}" -ErrorAction SilentlyContinue | Stop-Process`);
+  }
+
+  async focusWindow(windowTitle: string): Promise<void> {
+    await runPowerShell(`
+$shell = New-Object -ComObject WScript.Shell
+$shell.AppActivate("${psEscape(windowTitle)}")
+`);
+  }
+
+  async scroll(amount: number): Promise<void> {
+    // amount > 0 scrolls up, < 0 scrolls down, following the mouse_event WHEEL_DELTA convention (120 per notch).
+    const delta = Math.round(amount) * 120;
+    await runPowerShell(`
+${WIN32_TYPE}
+[Win32Control]::mouse_event(${MOUSEEVENTF_WHEEL}, 0, 0, ${delta}, 0)
+`);
+  }
+}
+
+export const windowsController = new WindowsController();

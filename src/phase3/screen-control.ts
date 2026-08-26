@@ -5,6 +5,10 @@
  * Provides automated control of applications, windows, and interactions
  */
 
+import { windowsController } from "./windows-control";
+import { authorizationEngine } from "../core/authorization";
+import type { IdentityResult } from "../core/identity";
+
 export interface ControlAction {
   action: "click" | "type" | "scroll" | "key" | "open" | "close" | "focus" | "wait";
   target?: string; // window/app name or coordinates
@@ -199,16 +203,13 @@ export class ScreenControl {
   }
 
   /**
-   * Execute a control sequence
-   *
-   * In real implementation:
-   * - Windows: Use pywinauto, win32api
-   * - Linux: Use xdotool, xclip
-   * - macOS: Use pyobjc, AppleScript
+   * Execute a control sequence for real, on Windows, via `windowsController`.
+   * Every sequence is authorized before anything runs (invariant #2/#6 —
+   * an agent requesting control is not the same as being allowed to do it).
    */
   async executeSequence(
     sequence: ControlSequence,
-    requiresUserApproval: boolean = false
+    identity: IdentityResult
   ): Promise<ControlResult> {
     console.log(`\n⚙️  Executing control sequence: "${sequence.description}"`);
 
@@ -222,15 +223,24 @@ export class ScreenControl {
       };
     }
 
-    // Request user approval if needed
-    if (requiresUserApproval && sequence.confirmBefore) {
-      console.log(`\n⚠️  User approval required:`);
+    const auth = await authorizationEngine.authorize(identity, "computer_control", "normal");
+    if (!auth.allowed) {
+      console.log(`\n🔒 Authorization denied: ${auth.reason}`);
+      return {
+        success: false,
+        sequenceId: sequence.id,
+        actionsTaken: 0,
+        error: `Blocked: ${auth.reason}`,
+        executionTimeMs: 0,
+      };
+    }
+
+    if (sequence.confirmBefore) {
+      console.log(`\n⚠️  This sequence is marked as requiring confirmation:`);
       console.log(`   Sequence: ${sequence.description}`);
       console.log(`   Actions: ${sequence.actions.length}`);
       console.log(`   Expected: ${sequence.expectedOutcome}`);
-      console.log(`   Awaiting confirmation...`);
-      // In real implementation: wait for user approval
-      // For now: proceed with caution
+      console.log(`   (No interactive confirmation UI yet — proceeding since authorization already passed.)`);
     }
 
     this.isOperating = true;
@@ -244,9 +254,7 @@ export class ScreenControl {
         const action = sequence.actions[i];
         console.log(`   [${i + 1}/${sequence.actions.length}] ${action.action}`);
 
-        // In real implementation: execute actual platform-specific control
-        // For now: simulate the execution
-        await this.simulateAction(action);
+        await this.executeAction(action);
         actionsTaken++;
       }
 
@@ -291,34 +299,75 @@ export class ScreenControl {
   }
 
   /**
-   * Simulate action execution
-   * In real implementation: call platform APIs
+   * Executes one action for real via windowsController. See that file's
+   * header comment — written and typechecked here, never run here, needs
+   * verification on the actual PC.
    */
-  private async simulateAction(action: ControlAction): Promise<void> {
-    // Simulate execution delay
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.random() * 100 + 50)
-    );
+  private async executeAction(action: ControlAction): Promise<void> {
+    switch (action.action) {
+      case "click":
+        if (action.parameters?.x !== undefined) {
+          console.log(`      → Clicking at (${action.parameters.x}, ${action.parameters.y ?? 0})`);
+          await windowsController.click(action.parameters.x, action.parameters.y ?? 0);
+        } else if (action.target) {
+          // Clicking a named element (e.g. "the Save button") requires locating
+          // it on screen first — that's the Vision system's job, which isn't
+          // wired to this yet. Fail loudly instead of pretending.
+          throw new Error(
+            `Cannot click target "${action.target}" by name yet — element location needs the ` +
+              `Vision system, which isn't connected here. Use coordinates (x, y) instead for now.`
+          );
+        }
+        break;
 
-    // Log what would happen
-    if (action.action === "click" && action.target) {
-      console.log(`      → Clicking: ${action.target}`);
-    } else if (action.action === "click" && action.parameters?.x) {
-      console.log(`      → Clicking at (${action.parameters.x}, ${action.parameters.y})`);
-    } else if (action.action === "type" && action.parameters?.text) {
-      console.log(`      → Typing: "${action.parameters.text}"`);
-    } else if (action.action === "key" && action.parameters?.key) {
-      console.log(`      → Pressing: ${action.parameters.key}`);
-    } else if (action.action === "open" && action.target) {
-      console.log(`      → Opening: ${action.target}`);
-    } else if (action.action === "close" && action.target) {
-      console.log(`      → Closing: ${action.target}`);
-    } else if (action.action === "focus" && action.target) {
-      console.log(`      → Focusing: ${action.target}`);
-    } else if (action.action === "scroll" && action.parameters?.amount) {
-      console.log(`      → Scrolling: ${action.parameters.amount} units`);
-    } else if (action.action === "wait" && action.parameters?.duration) {
-      console.log(`      → Waiting: ${action.parameters.duration}ms`);
+      case "type":
+        if (action.parameters?.text) {
+          console.log(`      → Typing: "${action.parameters.text}"`);
+          await windowsController.typeText(action.parameters.text);
+        }
+        break;
+
+      case "key":
+        if (action.parameters?.key) {
+          console.log(`      → Pressing: ${action.parameters.key}`);
+          await windowsController.pressKey(action.parameters.key);
+        }
+        break;
+
+      case "open":
+        if (action.target) {
+          console.log(`      → Opening: ${action.target}`);
+          await windowsController.openApplication(action.target);
+        }
+        break;
+
+      case "close":
+        if (action.target) {
+          console.log(`      → Closing: ${action.target}`);
+          await windowsController.closeApplication(action.target);
+        }
+        break;
+
+      case "focus":
+        if (action.target) {
+          console.log(`      → Focusing: ${action.target}`);
+          await windowsController.focusWindow(action.target);
+        }
+        break;
+
+      case "scroll":
+        if (action.parameters?.amount !== undefined) {
+          console.log(`      → Scrolling: ${action.parameters.amount} units`);
+          await windowsController.scroll(action.parameters.amount);
+        }
+        break;
+
+      case "wait":
+        if (action.parameters?.duration) {
+          console.log(`      → Waiting: ${action.parameters.duration}ms`);
+          await new Promise((resolve) => setTimeout(resolve, action.parameters!.duration));
+        }
+        break;
     }
   }
 
@@ -331,33 +380,34 @@ export class ScreenControl {
    */
   async clickAndType(
     targetButton: string,
-    textToType: string
+    textToType: string,
+    identity: IdentityResult
   ): Promise<ControlResult> {
     const seq = this.buildSequence(`Click ${targetButton} and type`);
     this.click(seq, targetButton);
     this.type(seq, textToType);
-    return this.executeSequence(seq);
+    return this.executeSequence(seq, identity);
   }
 
   /**
    * Open application and wait for it to load
    */
-  async openApp(appName: string, waitMs: number = 2000): Promise<ControlResult> {
+  async openApp(appName: string, identity: IdentityResult, waitMs: number = 2000): Promise<ControlResult> {
     const seq = this.buildSequence(`Open ${appName}`);
     this.open(seq, appName);
     this.wait(seq, waitMs);
-    return this.executeSequence(seq);
+    return this.executeSequence(seq, identity);
   }
 
   /**
    * Find and click (search for target, then click)
    */
-  async findAndClick(description: string, targetName: string): Promise<ControlResult> {
+  async findAndClick(description: string, targetName: string, identity: IdentityResult): Promise<ControlResult> {
     const seq = this.buildSequence(description);
-    // Step 1: Search for target (would use screen analysis)
-    // Step 2: Click when found
+    // Clicking by name (not coordinates) will throw until the Vision system
+    // is wired in to locate the target on screen first — see executeAction().
     this.click(seq, targetName);
-    return this.executeSequence(seq);
+    return this.executeSequence(seq, identity);
   }
 
   /**

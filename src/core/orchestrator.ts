@@ -10,6 +10,7 @@ import { toolManager } from "../tools/manager";
 import { ConversationEngine } from "../phase2/conversation-engine";
 import { ConversationalIntelligence } from "./conversation-intelligence";
 import { IntelligentModelRouter } from "./model-router";
+import { identityEngine, type IdentityResult } from "./identity";
 
 /**
  * Orchestrator with Conversational Intelligence
@@ -48,6 +49,18 @@ export class Orchestrator {
   private conversationEngine: ConversationEngine;
   private conversationalIntelligence: ConversationalIntelligence;
   private modelRouter: IntelligentModelRouter;
+
+  // Resolved once per process, not per tool call — a real PIN-elevation
+  // flow would refresh this; for now every tool call in a run shares the
+  // same device-session identity (see IdentityEngine).
+  private cachedIdentity: IdentityResult | null = null;
+
+  private async getIdentity(): Promise<IdentityResult> {
+    if (!this.cachedIdentity) {
+      this.cachedIdentity = await identityEngine.resolveFromDeviceSession();
+    }
+    return this.cachedIdentity;
+  }
 
   constructor() {
     // Initialize conversational layer
@@ -163,9 +176,10 @@ export class Orchestrator {
           console.log(`\n  🔧 Executing ${output.toolCalls.length} tool call(s)...`);
           const toolResults: Record<string, unknown> = {};
 
+          const identity = await this.getIdentity();
           for (const toolCall of output.toolCalls) {
             console.log(`     → ${toolCall.toolName}`);
-            const result = await toolManager.executeTool(toolCall, taskId);
+            const result = await toolManager.executeTool(toolCall, taskId, identity);
             toolResults[toolCall.toolName] = result;
             
             if (result.success) {

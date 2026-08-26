@@ -9,6 +9,7 @@ import { ScreenCapture, ScreenContext } from "./screen-capture";
 import { VisionSystem, VisualAnalysis } from "./vision-system";
 import { ContextRouter, ContextType, RoutingDecision } from "./context-router";
 import { ScreenControl, ControlSequence, ControlResult } from "./screen-control";
+import { identityEngine, type IdentityResult } from "../core/identity";
 
 export interface PerceptionQuery {
   query: string;
@@ -42,6 +43,14 @@ export class Perception {
 
   private perceptionHistory: PerceptionResult[] = [];
   private queryCache: Map<string, PerceptionResult> = new Map();
+  private cachedIdentity: IdentityResult | null = null;
+
+  private async getIdentity(): Promise<IdentityResult> {
+    if (!this.cachedIdentity) {
+      this.cachedIdentity = await identityEngine.resolveFromDeviceSession();
+    }
+    return this.cachedIdentity;
+  }
 
   constructor() {
     console.log("\n🧠 Perception Module initialized");
@@ -96,7 +105,7 @@ export class Perception {
       console.log("\n🖱️  Screen Control activated");
       // Build a control sequence based on the query
       const sequence = this.buildControlSequence(query);
-      controlResult = await this.screenControl.executeSequence(sequence, true);
+      controlResult = await this.screenControl.executeSequence(sequence, await this.getIdentity());
     }
 
     // Step 5: Optimize for efficiency
@@ -291,7 +300,7 @@ export class Perception {
   async executeControl(description: string): Promise<ControlResult> {
     console.log(`\n🖱️  Executing control: ${description}`);
     const seq = this.screenControl.buildSequence(description);
-    return this.screenControl.executeSequence(seq, true);
+    return this.screenControl.executeSequence(seq, await this.getIdentity());
   }
 
   /**

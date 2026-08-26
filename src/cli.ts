@@ -3,17 +3,22 @@ import { Orchestrator } from "./core/orchestrator";
 import { BaseAgent } from "./agents/agent";
 import { AGENT_ROLES } from "./agents/types";
 import { ClaudeProvider } from "./models/claude-provider";
+import { GeminiProvider } from "./models/gemini-provider";
+import type { ModelProvider } from "./models/types";
 import { toolManager } from "./tools/manager";
 import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
+import { presenceEngine } from "./core/presence";
+import { identityEngine } from "./core/identity";
+import { authorizationEngine } from "./core/authorization";
+import { ScreenControl } from "./phase3/screen-control";
 
 /**
- * JARVIS CLI - Phase 0 Foundation Only
- * Entry point for the system
+ * JARVIS CLI - Entry point for the system
  *
- * Phase 0: Rigorous verification of core reasoning, memory, and verification systems
- *
- * Do not add Phase 2, 3, or future features here.
- * Focus entirely on foundation.
+ * Every command here actually runs the thing it claims to. If a system
+ * isn't wired up yet, it doesn't get a command — see
+ * JARVIS-MASTER-ARCHITECTURE-UPDATED.md's ground-truth status table for
+ * what's real vs. still scaffolding.
  */
 
 async function main() {
@@ -37,9 +42,13 @@ async function main() {
   }
 
   try {
-    // Initialize model provider
-    console.log("🧠 Initializing model provider...");
-    const modelProvider = new ClaudeProvider();
+    // Initialize model provider — provider-agnostic per invariant #3.
+    // JARVIS_PROVIDER=gemini switches to Gemini's free tier (no Zo dependency);
+    // default stays Claude via Zo since that's what's been tested against live.
+    const providerName = (process.env.JARVIS_PROVIDER || "claude").toLowerCase();
+    console.log(`🧠 Initializing model provider (${providerName})...`);
+    const modelProvider: ModelProvider =
+      providerName === "gemini" ? new GeminiProvider() : new ClaudeProvider();
 
     // Initialize tools
     console.log("🔧 Initializing tools...");
@@ -48,7 +57,7 @@ async function main() {
 
     const isAvailable = await modelProvider.available();
     if (!isAvailable) {
-      console.warn("⚠️  Claude provider not available. Set ZO_API_KEY environment variable.");
+      console.warn(`⚠️  ${modelProvider.name} provider not available. Check its API key env var is set.`);
       console.warn("   For now, using the provider anyway - will fail on actual queries.");
     }
 
@@ -72,8 +81,8 @@ async function main() {
         roleConfig.role,
         roleConfig.instructions,
         {
-          provider: "claude",
-          model: "claude-haiku-4-5",
+          provider: modelProvider.name,
+          model: providerName === "gemini" ? (process.env.GEMINI_MODEL || "gemini-2.0-flash") : "claude-haiku-4-5",
           temperature: 0.7,
           maxTokens: 2000,
         },
@@ -168,13 +177,61 @@ async function main() {
       console.log("\nPhase 1 status: FOUNDATION READY ✓");
       console.log("Next: Full implementation and integration");
       console.log("\n" + "=".repeat(70));
+    } else if (command === "whoami") {
+      console.log("\n" + "=".repeat(70));
+      console.log("🔐 PRESENCE / IDENTITY / AUTHORIZATION CHECK");
+      console.log("=".repeat(70));
+
+      await presenceEngine.registerDevice("pc", "pc", ["voice", "screen", "notification"]);
+      await presenceEngine.heartbeat("pc");
+      const active = await presenceEngine.getActiveDevice();
+      console.log(`\n📡 Presence: PC is ${active ? "active" : "not detected as active"}`);
+
+      const identity = await identityEngine.resolveFromDeviceSession(active?.id);
+      console.log(`\n🪪 Identity: resolved as "${identity.resolvedAs}" via ${identity.signal} (confidence ${(identity.confidence * 100).toFixed(0)}%)`);
+
+      const normalCheck = await authorizationEngine.authorize(identity, "read_file", "normal");
+      const adminCheck = await authorizationEngine.authorize(identity, "install_software", "admin");
+      console.log(`\n🔒 Authorization:`);
+      console.log(`   normal-risk action (e.g. read_file): ${normalCheck.decision} — ${normalCheck.reason}`);
+      console.log(`   admin-risk action (e.g. install_software): ${adminCheck.decision} — ${adminCheck.reason}`);
+
+      if (args[1] === "--pin" && args[2]) {
+        const pinResult = await identityEngine.resolveFromPin(args[2], active?.id);
+        console.log(`\n🔑 PIN check: resolved as "${pinResult.resolvedAs}" (confidence ${(pinResult.confidence * 100).toFixed(0)}%)`);
+        const adminWithPin = await authorizationEngine.authorize(pinResult, "install_software", "admin");
+        console.log(`   admin-risk action with PIN: ${adminWithPin.decision} — ${adminWithPin.reason}`);
+      } else {
+        console.log(`\n   (run "bun run dev whoami --pin YOUR_PIN" to test Level 3 verification, once JARVIS_PIN is set in .env)`);
+      }
+      console.log("\n" + "=".repeat(70));
+    } else if (command === "control-test") {
+      console.log("\n" + "=".repeat(70));
+      console.log("🖱️  COMPUTER CONTROL TEST (real, unverified until run here)");
+      console.log("=".repeat(70));
+      console.log("\nThis will actually open Notepad on this PC via PowerShell.");
+      console.log("If this is not running on Windows, it will fail — that's expected.\n");
+
+      const identity = await identityEngine.resolveFromDeviceSession();
+      const screenControl = new ScreenControl();
+      const result = await screenControl.openApp("notepad", identity, 1500);
+
+      if (result.success) {
+        console.log(`\n✅ Real computer control confirmed working: ${result.output}`);
+      } else {
+        console.log(`\n❌ Computer control failed: ${result.error}`);
+      }
+      console.log("\n" + "=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
-      console.log("  bun run dev              - Run Phase 0 vertical slice test");
-      console.log("  bun run dev test         - Same as above");
-      console.log("  bun run dev phase1       - Show Phase 1 status");
-      console.log("  bun run dev developer    - Same as phase1");
+      console.log("  bun run dev               - Run Phase 0 vertical slice test");
+      console.log("  bun run dev test          - Same as above");
+      console.log("  bun run dev phase1        - Show Phase 1 status (not yet wired to a real LLM)");
+      console.log("  bun run dev developer     - Same as phase1");
+      console.log("  bun run dev whoami        - Test Presence + Identity + Authorization end to end");
+      console.log("  bun run dev whoami --pin PIN - Same, plus test Level 3 PIN verification");
+      console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
     }
   } finally {
     await closeDatabase();

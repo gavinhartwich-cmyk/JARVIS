@@ -6,6 +6,9 @@ export const memoryTypeEnum = pgEnum("memory_type", ["fact", "episode", "semanti
 export const verificationStatusEnum = pgEnum("verification_status", ["unverified", "partially_verified", "verified", "conflicted", "failed"]);
 export const agentStatusEnum = pgEnum("agent_status", ["pending", "running", "completed", "failed", "cancelled"]);
 export const taskStatusEnum = pgEnum("task_status", ["created", "decomposed", "in_progress", "completed", "failed"]);
+export const deviceTypeEnum = pgEnum("device_type", ["pc", "phone", "wearable", "other"]);
+export const presenceStateEnum = pgEnum("presence_state", ["active", "idle", "away", "unknown"]);
+export const authLevelEnum = pgEnum("auth_level", ["unknown", "recognized", "gavin", "verified"]);
 
 // Memory tables
 export const memories = pgTable("memories", {
@@ -119,6 +122,68 @@ export const userContext = pgTable("user_context", {
   metadata: jsonb("metadata"),
 });
 
+// Presence & Device Awareness (master plan Part 3.1)
+export const devices = pgTable("devices", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  type: deviceTypeEnum("type").notNull(),
+  capabilities: text("capabilities").array().default(sql`ARRAY[]::text[]`), // e.g. "voice", "screen", "notification"
+  presenceState: presenceStateEnum("presence_state").default("unknown"),
+  lastSeenAt: timestamp("last_seen_at"),
+  registeredAt: timestamp("registered_at").defaultNow(),
+  metadata: jsonb("metadata"),
+}, (table) => ({
+  typeIdx: index("devices_type_idx").on(table.type),
+  nameIdx: index("devices_name_idx").on(table.name),
+}));
+
+export const presenceEvents = pgTable("presence_events", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  deviceId: uuid("device_id").references(() => devices.id).notNull(),
+  state: presenceStateEnum("state").notNull(),
+  source: varchar("source", { length: 255 }).notNull(), // heartbeat, explicit_command, activity_detected, timeout
+  createdAt: timestamp("created_at").defaultNow(),
+  metadata: jsonb("metadata"),
+}, (table) => ({
+  deviceIdx: index("presence_events_device_idx").on(table.deviceId),
+  createdIdx: index("presence_events_created_idx").on(table.createdAt),
+}));
+
+// Identity Recognition (master plan Part 3.2)
+// Confidence is tracked here and is explicitly NOT the same as authorization level.
+export const identitySessions = pgTable("identity_sessions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  deviceId: uuid("device_id").references(() => devices.id),
+  claimedIdentity: varchar("claimed_identity", { length: 255 }).notNull().default("gavin"),
+  signal: varchar("signal", { length: 255 }).notNull(), // device_session, pin, face (future), voice (future)
+  confidence: numeric("confidence", { precision: 3, scale: 2 }).notNull(), // 0.00-1.00
+  resolvedAs: varchar("resolved_as", { length: 255 }).notNull(), // unknown, recognized, gavin
+  createdAt: timestamp("created_at").defaultNow(),
+  metadata: jsonb("metadata"),
+}, (table) => ({
+  deviceIdx: index("identity_sessions_device_idx").on(table.deviceId),
+  createdIdx: index("identity_sessions_created_idx").on(table.createdAt),
+}));
+
+// Authorization Engine (master plan Part 3.3) — every permission check is audited here,
+// independent of the general audit_events log, so authorization decisions can be
+// queried/reviewed on their own.
+export const authorizationDecisions = pgTable("authorization_decisions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  identitySessionId: uuid("identity_session_id").references(() => identitySessions.id),
+  level: authLevelEnum("level").notNull(),
+  action: varchar("action", { length: 255 }).notNull(),
+  riskTier: varchar("risk_tier", { length: 50 }).notNull(), // low, medium, high, admin
+  requiredLevel: authLevelEnum("required_level").notNull(),
+  decision: varchar("decision", { length: 50 }).notNull(), // allowed, denied, needs_verification
+  verificationMethod: varchar("verification_method", { length: 100 }), // pin, none
+  createdAt: timestamp("created_at").defaultNow(),
+  metadata: jsonb("metadata"),
+}, (table) => ({
+  decisionIdx: index("authorization_decisions_decision_idx").on(table.decision),
+  createdIdx: index("authorization_decisions_created_idx").on(table.createdAt),
+}));
+
 export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;
 export type Task = typeof tasks.$inferSelect;
@@ -129,3 +194,11 @@ export type VerificationRun = typeof verificationRuns.$inferSelect;
 export type NewVerificationRun = typeof verificationRuns.$inferInsert;
 export type AuditEvent = typeof auditEvents.$inferSelect;
 export type NewAuditEvent = typeof auditEvents.$inferInsert;
+export type Device = typeof devices.$inferSelect;
+export type NewDevice = typeof devices.$inferInsert;
+export type PresenceEvent = typeof presenceEvents.$inferSelect;
+export type NewPresenceEvent = typeof presenceEvents.$inferInsert;
+export type IdentitySession = typeof identitySessions.$inferSelect;
+export type NewIdentitySession = typeof identitySessions.$inferInsert;
+export type AuthorizationDecision = typeof authorizationDecisions.$inferSelect;
+export type NewAuthorizationDecision = typeof authorizationDecisions.$inferInsert;

@@ -1,8 +1,19 @@
 # JARVIS — Comprehensive Master Architecture
 
-**Updated:** August 25, 2026  
-**Status:** Phase 0 Foundation built, Phase 1.5 (Conversational Intelligence) ready for integration  
+**Updated:** August 26, 2026  
+**Status:** Phase 0 verified real. Everything else below was previously marked "complete" without ever being executed — corrected here after actually reading the source, not the prior status reports.  
 **Core Principle:** One persistent intelligence with multiple interfaces, devices, memories, and capabilities
+
+**Ground-truth status (verified by reading code — last updated 2026-08-26, after building Part 3):**
+- ✅ **Phase 0** — real. 5-agent orchestrator, memory, verification, audit trail. Proven end-to-end against live Postgres + Claude.
+- ✅ **Phase 1.5 (Conversational Intelligence)** — real. Actually imported and called from `orchestrator.ts` (`processWithStreaming`, `completeTurn`, memory methods), not just sitting unused.
+- ✅ **Part 3 Foundational Subsystems** — real, built 2026-08-26. Presence & Device Awareness (`core/presence.ts`), Identity Recognition (`core/identity.ts`), Authorization Engine (`core/authorization.ts`, 4 levels), and Security Layer are wired into actual tool execution (`tools/manager.ts`, `phase3/screen-control.ts`) — not documentation, actually enforced: `bun run dev whoami` exercises the full chain. Computer Control (`phase3/windows-control.ts`) is real PowerShell/Win32 automation, but **unverified** — written and typechecked on a Linux sandbox that cannot run it; must be confirmed with `bun run dev control-test` on the actual Windows PC before it's trusted.
+- ✅ **Second LLM provider (Gemini)** — real (`models/gemini-provider.ts`), direct REST call to Google's API, no Zo dependency. Select with `JARVIS_PROVIDER=gemini`. Also unverified against a live key — needs `GEMINI_API_KEY` and a real run to confirm the model name/response shape still match Google's API.
+- ❌ **Phase 1 (JARVIS Developer)** — NOT real. `developer.ts`'s 10-agent pipeline has zero calls to any LLM provider; it's console.log simulation. `bun run dev phase1` doesn't even invoke it — prints a static status message and exits.
+- ❌ **Phase 2 (Voice)** — NOT real. `speech-recognizer.ts`, `speech-synthesizer.ts`, `wake-word-detector.ts` have zero external imports (no Whisper, no Piper, no wake-word library). No CLI command reaches any of it.
+- ⚠️ **Phase 3 (Vision/Screen)** — screen control is now real (see above); `GeminiVisionProvider` still throws "not yet implemented" on every method — vision itself (not control) remains unbuilt. No CLI command reaches vision or the rest of Perception.
+- ❌ **Phase 5 (Visual HUD)** — doesn't exist. No `desktop/` folder. Never got past a chat message.
+- ⚠️ **Provider-agnostic / $0-first** — closer to true. Claude via Zo (`ZO_API_KEY`) still works and is the default; Gemini (`GEMINI_API_KEY`, free tier) is now a real second path with zero Zo dependency. No Ollama/local model yet — that piece of "$0 without any API key at all" is still not built.
 
 ---
 
@@ -1022,22 +1033,22 @@ Continue operating
 
 ### Phase 1: JARVIS Developer
 
-**Status:** ✅ Complete
+**Status:** ❌ Scaffolded only, not real. Agent roles/pipeline/git tools exist as code but the pipeline never calls an LLM provider — it's simulated. `bun run dev phase1` prints a status message instead of running it. Needs: wire each pipeline step to a real provider call, then wire `phase1` command in cli.ts to actually invoke `JARVISDeveloper`.
 
-**Capabilities:**
-- Repository understanding
-- Code modification
-- Git integration
-- Automated testing
-- Debugging
-- Code review
-- Self-improvement loop
+**Capabilities (claimed, not proven):**
+- Repository understanding (tools exist, unused by pipeline)
+- Code modification (not implemented)
+- Git integration (tools exist, unused by pipeline)
+- Automated testing (not implemented)
+- Debugging (not implemented)
+- Code review (not implemented)
+- Self-improvement loop (not implemented — never executed once)
 
-**Success Criteria:** JARVIS can meaningfully build, test, debug, and improve software.
+**Success Criteria:** JARVIS can meaningfully build, test, debug, and improve software. **Not yet met.**
 
-### Phase 1.5: Conversational Intelligence (NEW)
+### Phase 1.5: Conversational Intelligence
 
-**Status:** ✅ Code ready, needs orchestrator integration
+**Status:** ✅ Real. Imported and actively called from `orchestrator.ts`.
 
 **Capabilities:**
 - Conversation state machine ✅
@@ -1058,7 +1069,7 @@ Continue operating
 
 ### Phase 2: Natural Voice Interface
 
-**Status:** Ready to build after Phase 1.5
+**Status:** ❌ Not real. Files exist (`speech-recognizer.ts`, `speech-synthesizer.ts`, `wake-word-detector.ts`) but have zero external library imports — no Whisper, no Piper, no wake-word engine. Pure stubs. No CLI command reaches them. Needs actual libraries and hardware testing on the PC — cannot be built or verified from Zo's Linux sandbox alone.
 
 **Capabilities:**
 - Wake word detection
@@ -1076,7 +1087,7 @@ Continue operating
 
 ### Phase 3: Perception
 
-**Status:** Planned
+**Status:** ❌ Not real. `screen-control.ts` exists but `executeSequence()` only calls `simulateAction()` — no real OS input control. `GeminiVisionProvider` throws "not yet implemented" on every method. No CLI command reaches any of it.
 
 **Capabilities:**
 - Screen awareness
