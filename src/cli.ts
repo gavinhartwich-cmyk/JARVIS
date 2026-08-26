@@ -84,7 +84,7 @@ async function main() {
         roleConfig.instructions,
         {
           provider: modelProvider.name,
-          model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
+          model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
           temperature: 0.7,
           maxTokens: 2000,
         },

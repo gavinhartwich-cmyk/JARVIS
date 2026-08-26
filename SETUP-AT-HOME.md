@@ -254,10 +254,21 @@ Create `config/hardware.json`:
 
 **Correction:** there is no `config/providers.json` — the code never reads
 one. Provider selection is entirely env-driven: `GEMINI_API_KEY` (and
-optionally `GEMINI_MODEL`, default `gemini-3.6-flash`) in `.env`, set in
+optionally `GEMINI_MODEL`, default `gemini-2.5-flash`) in `.env`, set in
 Step D.3. Gemini is the only provider JARVIS uses; there's nothing to
 configure here beyond that key. (Ollama/local is planned but has no
 provider implementation yet — nothing to enable today.)
+
+**2026-08-26 correction:** the default was originally `gemini-3.6-flash`
+(Google's newest Flash model at the time this was written) — it turned
+out to carry a free-tier quota of only 20 requests/day on a real project,
+discovered by actually running the Phase 1 pipeline and hitting a 429.
+Google doesn't publish exact free-tier daily quotas per model (they're
+account-specific, viewable at https://aistudio.google.com/rate-limit) —
+`gemini-2.5-flash` is the new default because older, non-preview Flash
+models have historically carried much larger free daily allowances, but
+check your own project's actual number at that URL rather than trusting
+any fixed figure here or elsewhere.
 
 ### Step E.4: JARVIS Identity Config
 

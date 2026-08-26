@@ -61,7 +61,7 @@ export class IntelligentModelRouter implements IModelRouter {
    */
   private getDefaultModels(): Map<string, LLMConfig> {
     const models = new Map<string, LLMConfig>();
-    const geminiModel = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+    const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
     // Fast - quick response for simple tasks
     models.set("fast-reasoning", {
@@ -220,7 +220,7 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // If user has limited budget, use faster model
     if (this.userPreferences.budget === "free") {
-      adjusted.model = process.env.GEMINI_MODEL || "gemini-3.6-flash"; // Cheapest option
+      adjusted.model = process.env.GEMINI_MODEL || "gemini-2.5-flash"; // Cheapest option
       adjusted.maxTokens = Math.min(adjusted.maxTokens, 1000);
     }
 

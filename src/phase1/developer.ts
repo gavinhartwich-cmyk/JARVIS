@@ -149,7 +149,7 @@ export class JARVISDeveloper {
 
     const modelConfig = {
       provider: this.modelProvider.name,
-      model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
+      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
       temperature: 0.3, // lower than Phase 0's conversational default — code needs precision, not creativity
       maxTokens: 8000, // Coder/Debugger need room for full file contents
     };
