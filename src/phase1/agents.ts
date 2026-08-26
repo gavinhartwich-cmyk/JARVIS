@@ -124,6 +124,12 @@ Scope discipline — only touch files this requirement actually needs:
   replace it with a minimal version from memory.
 - When in doubt about whether a file needs a block, leave it out.
 
+Test runtime: this project uses Bun's built-in test runner, not Jest or
+Mocha. If you write a test file, it MUST start with
+\`import { describe, expect, test } from "bun:test";\` (Bun's runner names
+the test function \`test\`, not \`it\`) — \`describe\`/\`it\`/\`expect\` are
+NOT ambient globals here and will fail to typecheck without that import.
+
 Output format:
 - File: Path to create/modify
 - Content: Complete file content
@@ -235,6 +241,12 @@ actually change to fix the reported error. Never regenerate or replace
 project configuration files (package.json, tsconfig.json, jest.config.js,
 tslint.json, prettier.config.js, .gitignore, README.md, etc.) as a side
 effect of fixing an unrelated bug.
+
+Test runtime: this project uses Bun's built-in test runner, not Jest or
+Mocha. A test file must import \`describe\`/\`expect\`/\`test\` from
+"bun:test" — they are not ambient globals. If a failure is exactly this
+(missing name 'describe'/'it'/'expect'), the fix is adding that import,
+not installing @types/jest or @types/mocha.
 
 Output format:
 - Issue: Description of the problem
