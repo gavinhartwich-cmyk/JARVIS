@@ -11,6 +11,8 @@ import { identityEngine } from "./core/identity";
 import { authorizationEngine } from "./core/authorization";
 import { ScreenControl } from "./phase3/screen-control";
 import { JARVISDeveloper } from "./phase1/developer";
+import { VoiceInterface } from "./phase2/voice-interface";
+import { writeFileSync } from "node:fs";
 
 /**
  * JARVIS CLI - Entry point for the system
@@ -25,7 +27,7 @@ async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "test";
 
-  console.log("\n🤖 JARVIS — Phase 0 (verified) + Phase 1 (JARVIS Developer, real pipeline)\n");
+  console.log("\n🤖 JARVIS — Phase 0 (verified) + Phase 1 (JARVIS Developer, real pipeline) + Phase 2 (voice reply, real LLM/TTS)\n");
 
   // Initialize database
   try {
@@ -259,6 +261,28 @@ async function main() {
       );
       console.log("Still unverified: click, focus, scroll (need real screen coordinates/window titles — not exercised by this test).");
       console.log("=".repeat(70));
+    } else if (command === "voice-reply") {
+      const text = args.slice(1).join(" ");
+      if (!text) {
+        console.log('\nUsage: bun run dev voice-reply "<what you\'d say to JARVIS>"');
+      } else {
+        console.log("\n" + "=".repeat(70));
+        console.log("🎙️  VOICE REPLY (real LLM + real Piper TTS — no mic/wake-word: text in, audio out)");
+        console.log("=".repeat(70));
+
+        const voice = new VoiceInterface();
+        const { response, audio } = await voice.respondToText(text);
+        console.log(`\n🤖 JARVIS: "${response}"`);
+
+        if (audio) {
+          const outPath = `/tmp/jarvis-voice-reply-${Date.now()}.wav`;
+          writeFileSync(outPath, audio.audio);
+          console.log(`\n🔊 Spoken reply saved to ${outPath} (${audio.duration}ms)`);
+        } else {
+          console.log("\n⚠️  Text-to-speech is disabled in the current voice config — text-only reply above.");
+        }
+        console.log("=".repeat(70));
+      }
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -271,6 +295,7 @@ async function main() {
       console.log("  bun run dev whoami        - Test Presence + Identity + Authorization end to end");
       console.log("  bun run dev whoami --pin PIN - Same, plus test Level 3 PIN verification");
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
+      console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
     }
   } finally {
     await closeDatabase();

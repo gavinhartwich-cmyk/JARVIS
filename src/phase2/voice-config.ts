@@ -92,7 +92,16 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   },
   textToSpeech: {
     enabled: true,
-    voiceId: "en_GB-alba-medium", // British accent, natural sounding
+    // en_GB-alba-medium (British accent) was the aspirational original
+    // default, but that voice model was never actually downloaded — until
+    // 2026-08-26, voiceId was purely cosmetic (see speech-synthesizer.ts's
+    // resolvePiperPaths) and every synthesis silently used en_US-amy-medium
+    // regardless of this value. Now that voiceId really does select the
+    // model, defaulting to the one actually downloaded and tested. To use
+    // a different Piper voice, download its .onnx/.onnx.json into
+    // models/piper/ (see https://huggingface.co/rhasspy/piper-voices) and
+    // set voiceId to match the filename.
+    voiceId: "en_US-amy-medium",
     speakingRate: 1.0,
     outputFormat: "wav",
   },

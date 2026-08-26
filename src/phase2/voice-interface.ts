@@ -10,6 +10,12 @@ import { WakeWordDetector, WakeWordEvent } from "./wake-word-detector";
 import { SpeechRecognizer, RecognitionResult } from "./speech-recognizer";
 import { SpeechSynthesizer, SynthesisResult } from "./speech-synthesizer";
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
+import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
+import type { ModelProvider } from "../models/types";
+
+const JARVIS_SYSTEM_PROMPT =
+  "You are JARVIS, a helpful voice assistant. Keep replies short and " +
+  "conversational (1-3 sentences) since they will be spoken aloud, not read.";
 
 export interface VoiceInteractionContext {
   conversationId: string;
@@ -40,6 +46,7 @@ export class VoiceInterface {
   private wakeWordDetector?: WakeWordDetector;
   private speechRecognizer?: SpeechRecognizer;
   private speechSynthesizer?: SpeechSynthesizer;
+  private modelProvider: ModelProvider;
 
   private context: VoiceInteractionContext;
   private isRunning: boolean = false;
@@ -47,8 +54,11 @@ export class VoiceInterface {
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
 
-  constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG) {
+  constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG, modelProvider?: ModelProvider) {
     this.config = config;
+    // Same Gemini -> Ollama -> OpenRouter gateway Phase 1 uses, so a voice
+    // reply degrades to the local model instead of dying on a 429 too.
+    this.modelProvider = modelProvider || new GatewayModelProvider(createDefaultGateway());
     this.context = {
       conversationId: `conversation-${Date.now()}`,
       messageHistory: [],
@@ -199,39 +209,19 @@ export class VoiceInterface {
    */
   private async handleUserSpeech(result: RecognitionResult) {
     console.log(`\n👤 User said: "${result.text}"`);
-
-    this.context.messageHistory.push({
-      role: "user",
-      content: result.text,
-      timestamp: new Date(),
-    });
-
     this.emit("user-speech-recognized", result);
 
-    // Generate JARVIS response
-    // In real implementation, this would call the JARVIS Core
-    const jarvisResponse = await this.generateResponse(result.text);
+    const { response, audio } = await this.respondToText(result.text);
 
-    // Add response to history
-    this.context.messageHistory.push({
-      role: "assistant",
-      content: jarvisResponse,
-      timestamp: new Date(),
-    });
-
-    // Synthesize speech response
-    if (this.speechSynthesizer) {
-      const audioResult = await this.speechSynthesizer.synthesize(jarvisResponse);
-
-      this.emit("audio-ready", audioResult);
-      console.log(`\n🔊 Response ready: ${audioResult.duration}ms`);
+    if (audio) {
+      console.log(`\n🔊 Response ready: ${audio.duration}ms`);
     }
 
     // Interaction complete
     this.context.isActive = false;
     this.emit("interaction-complete", {
       input: result.text,
-      response: jarvisResponse,
+      response,
     });
 
     // Resume listening for next wake word
@@ -241,29 +231,77 @@ export class VoiceInterface {
   }
 
   /**
+   * Run one text-in, text-and-audio-out turn: push the user turn, get a
+   * real JARVIS response, synthesize it if TTS is enabled, push the
+   * assistant turn. Shared by the mic pipeline (handleUserSpeech) and any
+   * text-only caller (e.g. the `voice-reply` CLI command, which has no
+   * mic to drive the wake-word/STT half of the pipeline).
+   */
+  async respondToText(userText: string): Promise<{ response: string; audio?: SynthesisResult }> {
+    this.context.messageHistory.push({
+      role: "user",
+      content: userText,
+      timestamp: new Date(),
+    });
+
+    const response = await this.generateResponse(userText);
+
+    this.context.messageHistory.push({
+      role: "assistant",
+      content: response,
+      timestamp: new Date(),
+    });
+
+    let audio: SynthesisResult | undefined;
+    if (this.speechSynthesizer) {
+      audio = await this.speechSynthesizer.synthesize(response);
+      this.emit("audio-ready", audio);
+    }
+
+    return { response, audio };
+  }
+
+  /**
    * Generate JARVIS response
    *
-   * This is where the JARVIS Core would be called
-   * For now, returning simulated response
+   * Real LLM call through the same Gemini/Ollama/OpenRouter gateway Phase 1
+   * uses — not the old canned "I received your command..." string. Does
+   * NOT go through the full Phase 0/1 agent pipeline (BaseAgent, audit
+   * logging, multi-agent orchestration) — that's a much heavier flow built
+   * for autonomous dev tasks, not a snappy voice reply; this is a direct,
+   * single model call with just the recent conversation history as
+   * context, which is the right shape for "answer what was just said."
    */
   private async generateResponse(userInput: string): Promise<string> {
     this.emit("jarvis-responding", { input: userInput });
 
-    // In real implementation:
-    // 1. Pass to JARVIS Core
-    // 2. Process through agent pipeline
-    // 3. Generate response
-    // 4. Return text response
-
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);
 
-    // Simulated processing delay
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const recentHistory = this.context.messageHistory.slice(-6, -1); // exclude the just-pushed user turn
+    const messages = [
+      ...recentHistory.map((turn) => ({
+        role: turn.role,
+        content: turn.content,
+      })),
+      { role: "user" as const, content: userInput },
+    ];
 
-    const simulated_response = `I received your command: "${userInput}". In the real system, I would process this through the agent pipeline and provide a meaningful response.`;
+    let response: string;
+    try {
+      const result = await this.modelProvider.complete(messages, {
+        systemPrompt: JARVIS_SYSTEM_PROMPT,
+        maxTokens: 200,
+      });
+      response = result.content.trim();
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      console.error("❌ JARVIS response generation failed:", err);
+      this.emit("error", { message: err });
+      response = "Sorry, I couldn't reach any model provider to answer that.";
+    }
 
-    console.log(`🤖 JARVIS: "${simulated_response}"`);
-    return simulated_response;
+    console.log(`🤖 JARVIS: "${response}"`);
+    return response;
   }
 
   /**

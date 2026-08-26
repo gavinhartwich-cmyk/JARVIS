@@ -35,10 +35,16 @@ function resolvePiperPaths(config: SynthesizerConfig) {
     config.piperBinaryPath ||
     process.env.PIPER_BINARY_PATH ||
     "tools/piper/piper/piper";
+  // Real bug found 2026-08-26: this used to hardcode en_US-amy-medium
+  // regardless of config.voiceId, so changing voiceId silently did
+  // nothing — the log line said one voice while a different model
+  // actually spoke. Derive the model path from voiceId by convention
+  // (models/piper/<voiceId>.onnx, matching scripts/setup-voice.sh's
+  // download naming) so voiceId actually selects the model.
   const modelPath =
     config.modelPath ||
     process.env.PIPER_MODEL_PATH ||
-    "models/piper/en_US-amy-medium.onnx";
+    `models/piper/${config.voiceId}.onnx`;
   const espeakDataPath =
     config.espeakDataPath ||
     process.env.PIPER_ESPEAK_DATA_PATH ||
