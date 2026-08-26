@@ -13,7 +13,7 @@
 - ❌ **Phase 2 (Voice)** — NOT real. `speech-recognizer.ts`, `speech-synthesizer.ts`, `wake-word-detector.ts` have zero external imports (no Whisper, no Piper, no wake-word library). No CLI command reaches any of it.
 - ⚠️ **Phase 3 (Vision/Screen)** — screen control is now real (see above); `GeminiVisionProvider` still throws "not yet implemented" on every method — vision itself (not control) remains unbuilt. No CLI command reaches vision or the rest of Perception.
 - ❌ **Phase 5 (Visual HUD)** — doesn't exist. No `desktop/` folder. Never got past a chat message.
-- ✅ **Standalone / provider-agnostic / $0-first** — true now, not aspirational. Every Claude/Zo/Anthropic reference (`claude-provider.ts`, `ZO_API_KEY`, `ClaudeVisionProvider`, hardcoded `"claude"` entries in `model-router.ts`) has been removed from the codebase; Gemini (`GEMINI_API_KEY`, free tier) is the only active cloud path and does not touch Zo in any form. Ollama/local still isn't built — that's the remaining gap for "$0 without any API key at all," not a Claude/Zo remnant.
+- ✅ **Standalone / provider-agnostic / $0-first** — true now, not aspirational. Every Claude/Zo/Anthropic reference (`claude-provider.ts`, `ZO_API_KEY`, `ClaudeVisionProvider`, hardcoded `"claude"` entries in `model-router.ts`) has been removed from the codebase. Both real cloud (Gemini, `GEMINI_API_KEY`) and real local (Ollama, no API key at all) providers exist now, unified behind `LLMGateway` (`src/models/llm-gateway.ts`), which tries Gemini first and automatically falls back to Ollama on failure/quota exhaustion — a Gemini 429 no longer kills the pipeline. OpenRouter is a third, optional provider if `OPENROUTER_API_KEY` is set. None of this touches Zo in any form. Verified 2026-08-26 with `llm-gateway.test.ts` (fake-provider fallback/health/cooldown logic) and a live `bun run dev test` run that reached the gateway and failed with the correct "no provider configured" message when no key/Ollama was present in the CI sandbox — the wiring itself is proven, the LLM calls' actual content still needs a live key to exercise end-to-end.
 
 ---
 
@@ -1217,7 +1217,7 @@ Add to existing subsystems:
 | TTS | Piper | Local, natural, free |
 | Wake word | openWakeWord | Local, efficient, free |
 | LLM (primary) | Gemini (Google, free tier) | Standalone — zero Claude/Zo dependency |
-| LLM (local) | Ollama (Llama or similar) | $0 fallback path, not yet built |
+| LLM (local) | Ollama (`qwen2.5-coder:1.5b` default) | $0 fallback path — built and gateway-wired 2026-08-26 |
 | Vision | Local model | When needed |
 | GUI | Tauri (future) | Native + web for desktop |
 

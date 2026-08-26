@@ -2,7 +2,7 @@ import { initializeDatabase, closeDatabase } from "./db/client";
 import { Orchestrator } from "./core/orchestrator";
 import { BaseAgent } from "./agents/agent";
 import { AGENT_ROLES } from "./agents/types";
-import { GeminiProvider } from "./models/gemini-provider";
+import { createDefaultGateway, GatewayModelProvider } from "./models/llm-gateway";
 import type { ModelProvider } from "./models/types";
 import { toolManager } from "./tools/manager";
 import { SPECIALIZED_AGENT_ROLES } from "./agents/specialized-agents";
@@ -42,15 +42,19 @@ async function main() {
   }
 
   try {
-    // Initialize model provider — provider-agnostic per invariant #3.
-    // Gemini is the only wired-up cloud provider: free tier, direct to
-    // Google, zero dependency on Claude/Anthropic/Zo (this project is
-    // standalone — it does not run through or depend on Zo in any form).
-    // Ollama/local is the planned $0-with-no-API-key-at-all path but isn't
-    // implemented yet — see JARVIS-MASTER-ARCHITECTURE-UPDATED.md status table.
-    const providerName = "gemini";
-    console.log(`🧠 Initializing model provider (${providerName})...`);
-    const modelProvider: ModelProvider = new GeminiProvider();
+    // Initialize model provider — provider-agnostic per invariant #3, and
+    // zero dependency on Claude/Anthropic/Zo (this project is standalone —
+    // it does not run through or depend on Zo in any form). The gateway
+    // tries Gemini first (best quality within its free daily quota), then
+    // falls back to Ollama (local, no API key, no quota) automatically if
+    // Gemini fails or its quota is exhausted — this is what turns a
+    // Gemini 429 from "pipeline dead for the day" into "keeps working,
+    // just on the local model." OpenRouter joins as a third option only
+    // if OPENROUTER_API_KEY is set. See src/models/llm-gateway.ts.
+    console.log("🧠 Initializing model provider (gateway)...");
+    const gateway = createDefaultGateway();
+    console.log(`   Providers registered: ${gateway.listProviders().join(", ")}`);
+    const modelProvider: ModelProvider = new GatewayModelProvider(gateway);
 
     // Initialize tools
     console.log("🔧 Initializing tools...");
@@ -152,7 +156,8 @@ async function main() {
         console.error(error instanceof Error ? error.message : String(error));
         console.error("\nDebugging info:");
         console.error("  - Check that PostgreSQL is running");
-        console.error("  - Check that GEMINI_API_KEY is set and valid (aistudio.google.com/apikey)");
+        console.error("  - Check that at least one provider is configured: GEMINI_API_KEY (aistudio.google.com/apikey)");
+        console.error("    or a running local Ollama server (ollama serve + ollama pull qwen2.5-coder:1.5b)");
         console.error("  - Check database schema was created (bun run db:push)");
       }
     } else if (command === "phase1" || command === "phase1-status") {

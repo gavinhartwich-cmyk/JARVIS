@@ -1,13 +1,20 @@
-/**
- * Model provider abstraction layer
- * Allows JARVIS to work with different model providers (Gemini, Ollama/local, etc)
- * without depending on any single one — and never on Claude or Zo, which
- * this project is intentionally standalone from.
- */
-
 export interface ModelMessage {
   role: "user" | "assistant" | "system";
   content: string;
+}
+
+export interface ModelRequestOptions {
+  provider?: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  systemPrompt?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  responseFormat?: {
+    type: "json_object" | "json_schema";
+    schema?: Record<string, unknown>;
+  };
 }
 
 export interface ModelResponse {
@@ -16,19 +23,26 @@ export interface ModelResponse {
   provider: string;
   model: string;
   confidence?: number;
+  requestId?: string;
+  finishReason?: string;
+}
+
+export interface ModelStreamChunk {
+  delta: string;
+  done: boolean;
+  provider: string;
+  model: string;
+  tokensUsed?: number;
+  confidence?: number;
+  requestId?: string;
+  finishReason?: string;
 }
 
 export interface ModelProvider {
   name: string;
-  available: () => Promise<boolean>;
-  complete(
-    messages: ModelMessage[],
-    options?: {
-      temperature?: number;
-      maxTokens?: number;
-      systemPrompt?: string;
-    }
-  ): Promise<ModelResponse>;
+  available(): Promise<boolean>;
+  complete(messages: ModelMessage[], options?: ModelRequestOptions): Promise<ModelResponse>;
+  stream(messages: ModelMessage[], options?: ModelRequestOptions): AsyncIterable<ModelStreamChunk>;
 }
 
 export interface ModelConfig {
@@ -36,4 +50,5 @@ export interface ModelConfig {
   model: string;
   temperature?: number;
   maxTokens?: number;
+  stream?: boolean;
 }

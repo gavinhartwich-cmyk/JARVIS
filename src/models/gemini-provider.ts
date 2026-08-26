@@ -1,4 +1,4 @@
-import { ModelProvider, ModelMessage, ModelResponse } from "./types";
+import { ModelProvider, ModelMessage, ModelRequestOptions, ModelResponse, ModelStreamChunk } from "./types";
 
 /**
  * Gemini model provider — talks directly to Google's API, not through Zo.
@@ -19,7 +19,7 @@ import { ModelProvider, ModelMessage, ModelResponse } from "./types";
 export class GeminiProvider implements ModelProvider {
   name = "gemini";
   private apiKey: string;
-  private model: string;
+  readonly model: string;
 
   constructor(apiKey?: string, model?: string) {
     this.apiKey = apiKey || process.env.GEMINI_API_KEY || "";
@@ -150,5 +150,103 @@ export class GeminiProvider implements ModelProvider {
       model: this.model,
       confidence,
     };
+  }
+
+  /**
+   * Streaming variant for real-time conversational use (Phase 2 voice
+   * interface). Unlike `complete()`, this does NOT request structured
+   * JSON output — partial JSON fragments aren't meaningfully parseable
+   * mid-stream, and a live voice response needs raw text deltas, not a
+   * confidence score. Uses Gemini's documented `streamGenerateContent`
+   * SSE endpoint. NOTE: written against Google's documented response
+   * shape but not yet exercised against a live API key in this sandbox —
+   * treat the first real call as the actual verification, same caveat as
+   * `complete()` above.
+   */
+  async *stream(messages: ModelMessage[], options: ModelRequestOptions = {}): AsyncIterable<ModelStreamChunk> {
+    if (!this.apiKey) {
+      throw new Error(
+        "Gemini provider not configured. Set GEMINI_API_KEY environment variable (free at aistudio.google.com/apikey)."
+      );
+    }
+
+    const contents = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }],
+      }));
+
+    const systemText = options.systemPrompt ?? messages.find((m) => m.role === "system")?.content;
+
+    const body: Record<string, unknown> = {
+      contents,
+      generationConfig: {
+        temperature: options.temperature ?? 0.7,
+        maxOutputTokens: options.maxTokens ?? 2000,
+      },
+      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+    };
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: options.signal || AbortSignal.timeout(options.timeoutMs ?? 60_000),
+      });
+    } catch (error) {
+      throw new Error(`Gemini streaming request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (!response.ok || !response.body) {
+      const details = await response.text().catch(() => "");
+      throw new Error(`Gemini API error: ${response.status} ${response.statusText} — ${details}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let tokensUsed = 0;
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const payload = trimmed.slice(5).trim();
+          if (!payload) continue;
+
+          let chunk: {
+            candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+            usageMetadata?: { totalTokenCount?: number };
+          };
+          try {
+            chunk = JSON.parse(payload);
+          } catch {
+            continue;
+          }
+
+          tokensUsed = chunk.usageMetadata?.totalTokenCount ?? tokensUsed;
+          const candidate = chunk.candidates?.[0];
+          const delta = candidate?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+          const finishReason = candidate?.finishReason;
+          if (delta || finishReason) {
+            yield { delta, done: Boolean(finishReason), provider: this.name, model: this.model, tokensUsed, finishReason };
+          }
+        }
+      }
+      yield { delta: "", done: true, provider: this.name, model: this.model, tokensUsed };
+    } finally {
+      reader.releaseLock();
+    }
   }
 }

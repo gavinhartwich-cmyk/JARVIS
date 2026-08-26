@@ -31,7 +31,7 @@ import {
 } from "./agents";
 import { BaseAgent } from "../agents/agent";
 import type { Agent } from "../agents/types";
-import { GeminiProvider } from "../models/gemini-provider";
+import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
 import {
   parseFileBlocks,
@@ -145,7 +145,10 @@ export class JARVISDeveloper {
     this.repositoryPath = repositoryPath;
     this.gitManager = new GitManager(repositoryPath);
     this.repositoryExplorer = new RepositoryExplorer(repositoryPath);
-    this.modelProvider = modelProvider ?? new GeminiProvider();
+    // Same Gemini-first, Ollama-fallback gateway as Phase 0 (see
+    // src/models/llm-gateway.ts) — the Coder/Debugger loop is exactly
+    // where a Gemini 429 mid-pipeline used to be most costly to hit.
+    this.modelProvider = modelProvider ?? new GatewayModelProvider(createDefaultGateway());
 
     const modelConfig = {
       provider: this.modelProvider.name,

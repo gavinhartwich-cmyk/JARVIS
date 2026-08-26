@@ -90,6 +90,23 @@ GEMINI_API_KEY=your_gemini_api_key_here
 3. Click "Create API key"
 4. Copy the key and paste it into `.env` as `GEMINI_API_KEY`
 
+**Provider fallback (no `.env` changes needed to benefit from it):** JARVIS
+now routes every LLM call through a gateway (`src/models/llm-gateway.ts`)
+that tries Gemini first and automatically falls back to a local Ollama
+server if Gemini fails or its free daily quota runs out — no more "pipeline
+dead for the day" on a 429. To turn the fallback on:
+
+```bash
+# Windows: https://ollama.com/download
+ollama pull qwen2.5-coder:1.5b   # small enough for a 4GB-VRAM card; override with OLLAMA_MODEL
+ollama serve
+```
+
+Nothing else to configure — the gateway detects Ollama automatically when
+it's running. A third optional provider, OpenRouter, joins the rotation
+only if you set `OPENROUTER_API_KEY` in `.env` (get one free at
+https://openrouter.ai/keys).
+
 ### 3. Install Dependencies & Create the Schema
 
 ```bash
