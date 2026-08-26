@@ -118,11 +118,41 @@ export class GitManager {
 
   /**
    * Create and checkout a new branch
+   *
+   * Deliberately does not hard-code "main" or assume a reachable remote —
+   * this repo's own default branch is "master", and JARVIS Developer needs
+   * to work offline (no origin, no network) just as well as on a fully
+   * configured clone. Local branch creation must succeed either way; only
+   * the remote-sync step is allowed to fail soft.
    */
-  async createBranch(branchName: string, baseBranch = "main"): Promise<void> {
+  async createBranch(branchName: string, baseBranch?: string): Promise<void> {
     try {
-      this.exec(`checkout ${baseBranch}`);
-      this.exec(`pull origin ${baseBranch}`);
+      const base = baseBranch || this.exec("branch --show-current");
+      if (!base) {
+        throw new Error(
+          "Could not determine a base branch (not currently on a branch, e.g. detached HEAD) — pass baseBranch explicitly."
+        );
+      }
+
+      // Only switch base branches if we're not already on it — checking out
+      // a branch name that doesn't exist locally (e.g. caller passed "main"
+      // on a repo whose default is "master") would otherwise hard-fail the
+      // whole operation before any work starts.
+      const currentBranch = this.exec("branch --show-current");
+      if (currentBranch !== base) {
+        this.exec(`checkout ${base}`);
+      }
+
+      // Best-effort remote sync: a missing/unreachable origin (offline dev,
+      // fresh local-only repo) must not block local branch creation.
+      try {
+        this.exec(`pull origin ${base} --ff-only`);
+      } catch (pullError) {
+        console.warn(
+          `   ⚠️  Could not sync '${base}' with origin (offline, no remote, or diverged) — continuing with local state.`
+        );
+      }
+
       this.exec(`checkout -b ${branchName}`);
     } catch (error) {
       throw new Error(
@@ -305,5 +335,30 @@ export class GitManager {
     } catch {
       return true;
     }
+  }
+
+  /**
+   * Resolve the origin remote as an "owner/repo" GitHub slug, if one exists.
+   * Returns null for a local-only repo (no remote, or a non-GitHub remote) —
+   * callers must treat that as "no PR link available," not an error.
+   */
+  async getGitHubSlug(): Promise<string | null> {
+    try {
+      const url = this.exec("remote get-url origin");
+      const match = url.match(/github\.com[/:]([^/]+\/[^/.]+?)(\.git)?$/);
+      return match ? match[1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Best-effort manual compare/PR URL, used as a fallback when the `gh` CLI
+   * isn't installed or authenticated on the machine this runs on.
+   */
+  async getCompareUrl(baseBranch: string, headBranch: string): Promise<string | null> {
+    const slug = await this.getGitHubSlug();
+    if (!slug) return null;
+    return `https://github.com/${slug}/compare/${baseBranch}...${headBranch}?expand=1`;
   }
 }

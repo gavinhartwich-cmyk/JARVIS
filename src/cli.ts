@@ -10,6 +10,7 @@ import { presenceEngine } from "./core/presence";
 import { identityEngine } from "./core/identity";
 import { authorizationEngine } from "./core/authorization";
 import { ScreenControl } from "./phase3/screen-control";
+import { JARVISDeveloper } from "./phase1/developer";
 
 /**
  * JARVIS CLI - Entry point for the system
@@ -24,7 +25,7 @@ async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "test";
 
-  console.log("\n🤖 JARVIS PHASE 0 - FOUNDATION ONLY\n");
+  console.log("\n🤖 JARVIS — Phase 0 (verified) + Phase 1 (JARVIS Developer, real pipeline)\n");
 
   // Initialize database
   try {
@@ -154,30 +155,34 @@ async function main() {
         console.error("  - Check that GEMINI_API_KEY is set and valid (aistudio.google.com/apikey)");
         console.error("  - Check database schema was created (bun run db:push)");
       }
-    } else if (command === "phase1" || command === "developer") {
-      console.log("\n" + "=".repeat(70));
-      console.log("📖 PHASE 1: JARVIS DEVELOPER - PLANNING PHASE");
-      console.log("=".repeat(70));
-      console.log(
-        "\nPhase 1 implementation is starting. The system now has:"
-      );
-      console.log("  ✓ Repository understanding tools");
-      console.log("  ✓ Git integration");
-      console.log("  ✓ Developer agent roles and pipeline");
-      console.log("  ✓ Developer orchestrator framework");
-      console.log(
-        "\nNext steps to complete Phase 1:"
-      );
-      console.log("  1. Connect agent roles to actual LLM reasoning");
-      console.log("  2. Implement repository context passing");
-      console.log("  3. Build code modification tools");
-      console.log("  4. Integrate with test runners");
-      console.log("  5. Connect Git operations to PR creation");
-      console.log("  6. Build verification pipeline");
-      console.log("  7. End-to-end test on real repository");
-      console.log("\nPhase 1 status: FOUNDATION READY ✓");
-      console.log("Next: Full implementation and integration");
-      console.log("\n" + "=".repeat(70));
+    } else if (command === "phase1" || command === "phase1-status") {
+      JARVISDeveloper.printWorkflow();
+    } else if (command === "phase1-selftest") {
+      const result = await JARVISDeveloper.selfTest();
+      if (!result.success) process.exitCode = 1;
+    } else if (command === "developer") {
+      // bun run dev developer "<requirement>" [--repo path] [--approve] [--approved-by name] [--base branch]
+      const requirement = args[1];
+      if (!requirement) {
+        console.log("\n❌ Missing requirement.");
+        console.log('   Usage: bun run dev developer "<requirement>" [--repo path] [--approve] [--approved-by name] [--base branch]');
+      } else {
+        const repoFlagIdx = args.indexOf("--repo");
+        const baseFlagIdx = args.indexOf("--base");
+        const approvedByIdx = args.indexOf("--approved-by");
+        const repoPath = repoFlagIdx !== -1 ? args[repoFlagIdx + 1] : process.cwd();
+        const baseBranch = baseFlagIdx !== -1 ? args[baseFlagIdx + 1] : undefined;
+        const approved = args.includes("--approve");
+        const approvedBy = approvedByIdx !== -1 ? args[approvedByIdx + 1] : undefined;
+
+        const developer = new JARVISDeveloper(repoPath);
+        const result = await developer.developFeature(requirement, {
+          approved,
+          baseBranch,
+          approvedBy,
+        });
+        if (result.status === "failed") process.exitCode = 1;
+      }
     } else if (command === "whoami") {
       console.log("\n" + "=".repeat(70));
       console.log("🔐 PRESENCE / IDENTITY / AUTHORIZATION CHECK");
@@ -254,8 +259,10 @@ async function main() {
       console.log("\nAvailable commands:");
       console.log("  bun run dev               - Run Phase 0 vertical slice test");
       console.log("  bun run dev test          - Same as above");
-      console.log("  bun run dev phase1        - Show Phase 1 status (not yet wired to a real LLM)");
-      console.log("  bun run dev developer     - Same as phase1");
+      console.log("  bun run dev phase1        - Show Phase 1 pipeline/agent summary");
+      console.log('  bun run dev developer "<requirement>" [--repo path] [--approve] [--approved-by name] [--base branch]');
+      console.log("                            - Run the real Phase 1 pipeline against a requirement");
+      console.log("  bun run dev phase1-selftest - Compounding-loop test: JARVIS Developer works on its own repo");
       console.log("  bun run dev whoami        - Test Presence + Identity + Authorization end to end");
       console.log("  bun run dev whoami --pin PIN - Same, plus test Level 3 PIN verification");
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");

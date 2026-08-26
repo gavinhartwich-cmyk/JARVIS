@@ -6,11 +6,43 @@
  *
  * Requirement → Architect → Planner → Coder → Builder → Tester → Debugger →
  * Code Reviewer → Security Reviewer → Verifier → [Human Approval] → Deployer
+ *
+ * Every step below actually does the thing it claims. Build/test status is
+ * mechanically checked (not LLM-guessed). Human approval is a real gate:
+ * deployment never proceeds without an explicit `approved: true` passed in
+ * by the caller after a human has reviewed the branch/diff — there is no
+ * auto-approve path, by design (see master plan: "no unrestricted
+ * autonomous authority over dangerous systems").
  */
 
+import { execSync } from "child_process";
 import { RepositoryExplorer, CodeReader, DependencyAnalyzer } from "./repository";
+import { v4 as uuidv4 } from "uuid";
 import { GitManager } from "./git";
-import { PHASE_1_AGENT_PIPELINE } from "./agents";
+import {
+  ARCHITECT_ROLE,
+  PLANNER_ROLE,
+  CODER_ROLE,
+  DEBUGGER_ROLE,
+  CODE_REVIEWER_ROLE,
+  SECURITY_REVIEWER_ROLE,
+  VERIFIER_ROLE,
+  PHASE_1_AGENT_PIPELINE,
+} from "./agents";
+import { BaseAgent } from "../agents/agent";
+import type { Agent } from "../agents/types";
+import { GeminiProvider } from "../models/gemini-provider";
+import type { ModelProvider } from "../models/types";
+import {
+  parseFileBlocks,
+  applyFileBlocks,
+  isNoChangesResponse,
+  FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
+  type FileBlock,
+} from "./patch";
+import { runTypecheck, runTests, type BuildResult, type TestResult } from "./build-test";
+
+const MAX_DEBUG_ATTEMPTS = 2;
 
 export interface DeveloperTask {
   id: string;
@@ -41,6 +73,8 @@ export interface DeveloperResult {
   taskId: string;
   success: boolean;
   status: "completed" | "failed" | "needs_revision" | "awaiting_human_approval";
+  branchName: string;
+  baseBranch: string;
   architecture: string;
   taskPlan: string;
   implementation: Map<string, string>;
@@ -49,14 +83,14 @@ export interface DeveloperResult {
     errors: string[];
   };
   testResults: {
-    unit: { passed: number; failed: number };
-    integration: { passed: number; failed: number };
-    regression: { passed: number; failed: number };
-    coverage: number;
+    configured: boolean;
+    passed: number;
+    failed: number;
   };
   codeReviewResults: {
     quality: number;
     issues: string[];
+    approved: boolean;
   };
   securityReviewResults: {
     riskLevel: "critical" | "high" | "medium" | "low";
@@ -69,10 +103,24 @@ export interface DeveloperResult {
   };
   deploymentStatus?: {
     success: boolean;
-    releaseTag?: string;
+    prUrl?: string;
+    branchPushed?: boolean;
   };
   gitCommit?: string;
-  prLink?: string;
+}
+
+export interface DevelopFeatureOptions {
+  /**
+   * Explicit human authorization to deploy. Defaults to false — the
+   * pipeline always stops at "awaiting_human_approval" until a human sets
+   * this to true after reviewing the branch/diff. There is no code path
+   * that fabricates approval.
+   */
+  approved?: boolean;
+  /** Branch to base the feature branch on. Defaults to the current branch. */
+  baseBranch?: string;
+  /** Optional identity of the human granting approval, for the audit trail. */
+  approvedBy?: string;
 }
 
 /**
@@ -82,11 +130,81 @@ export class JARVISDeveloper {
   private repositoryPath: string;
   private gitManager: GitManager;
   private repositoryExplorer: RepositoryExplorer;
+  private modelProvider: ModelProvider;
+  private agents: Record<string, Agent>;
+  // A real UUID per developFeature() run — the audit_events.resource_id
+  // column is typed uuid, so the human-readable "task-<timestamp>" id
+  // used for branch naming/logging can't double as the agent taskId
+  // (found by actually running this against Postgres: it silently failed
+  // every audit insert with "invalid input syntax for type uuid").
+  // Set fresh at the start of each developFeature() call, not here, so
+  // concurrent/repeated runs on the same instance don't share one id.
+  private runId: string = "";
 
-  constructor(repositoryPath: string) {
+  constructor(repositoryPath: string, modelProvider?: ModelProvider) {
     this.repositoryPath = repositoryPath;
     this.gitManager = new GitManager(repositoryPath);
     this.repositoryExplorer = new RepositoryExplorer(repositoryPath);
+    this.modelProvider = modelProvider ?? new GeminiProvider();
+
+    const modelConfig = {
+      provider: this.modelProvider.name,
+      model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
+      temperature: 0.3, // lower than Phase 0's conversational default — code needs precision, not creativity
+      maxTokens: 8000, // Coder/Debugger need room for full file contents
+    };
+
+    this.agents = {
+      architect: new BaseAgent(
+        ARCHITECT_ROLE.name,
+        ARCHITECT_ROLE.role,
+        ARCHITECT_ROLE.instructions,
+        modelConfig,
+        this.modelProvider
+      ),
+      planner: new BaseAgent(
+        PLANNER_ROLE.name,
+        PLANNER_ROLE.role,
+        PLANNER_ROLE.instructions,
+        modelConfig,
+        this.modelProvider
+      ),
+      coder: new BaseAgent(
+        CODER_ROLE.name,
+        CODER_ROLE.role,
+        CODER_ROLE.instructions + "\n\n" + FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
+        modelConfig,
+        this.modelProvider
+      ),
+      debugger: new BaseAgent(
+        DEBUGGER_ROLE.name,
+        DEBUGGER_ROLE.role,
+        DEBUGGER_ROLE.instructions + "\n\n" + FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
+        modelConfig,
+        this.modelProvider
+      ),
+      codeReviewer: new BaseAgent(
+        CODE_REVIEWER_ROLE.name,
+        CODE_REVIEWER_ROLE.role,
+        CODE_REVIEWER_ROLE.instructions,
+        modelConfig,
+        this.modelProvider
+      ),
+      securityReviewer: new BaseAgent(
+        SECURITY_REVIEWER_ROLE.name,
+        SECURITY_REVIEWER_ROLE.role,
+        SECURITY_REVIEWER_ROLE.instructions,
+        modelConfig,
+        this.modelProvider
+      ),
+      verifier: new BaseAgent(
+        VERIFIER_ROLE.name,
+        VERIFIER_ROLE.role,
+        VERIFIER_ROLE.instructions,
+        modelConfig,
+        this.modelProvider
+      ),
+    };
   }
 
   /**
@@ -114,7 +232,201 @@ export class JARVISDeveloper {
   }
 
   /**
-   * Phase 1 Step 1: Analyze requirement
+   * Main development pipeline
+   */
+  async developFeature(
+    requirement: string,
+    options: DevelopFeatureOptions = {}
+  ): Promise<DeveloperResult> {
+    const taskId = `task-${Date.now()}`;
+    const branchName = `feature/${taskId}`;
+    this.runId = uuidv4();
+
+    console.log("\n" + "=".repeat(70));
+    console.log("🚀 JARVIS DEVELOPER - PHASE 1 - COMPLETE PIPELINE");
+    console.log("=".repeat(70));
+    console.log(`\nRequirement: ${requirement}`);
+    console.log(`Task ID: ${taskId}`);
+    console.log(`Branch: ${branchName}`);
+
+    const startStatus = await this.gitManager.getStatus();
+    const baseBranch = options.baseBranch || startStatus.branch;
+
+    const result: DeveloperResult = {
+      taskId,
+      success: false,
+      status: "failed",
+      branchName,
+      baseBranch,
+      architecture: "",
+      taskPlan: "",
+      implementation: new Map(),
+      buildStatus: { success: false, errors: [] },
+      testResults: { configured: false, passed: 0, failed: 0 },
+      codeReviewResults: { quality: 0, issues: [], approved: false },
+      securityReviewResults: { riskLevel: "low", issues: [], approved: false },
+      verificationResults: { recommendation: "needs_fixes", issues: [] },
+    };
+
+    try {
+      // Guard: don't start autonomous work on top of a dirty working tree —
+      // that would mix the human's in-progress changes with the agent's,
+      // making the eventual diff unreviewable.
+      const dirty =
+        startStatus.modified.length > 0 ||
+        startStatus.added.length > 0 ||
+        startStatus.deleted.length > 0 ||
+        startStatus.untracked.length > 0;
+      if (dirty) {
+        throw new Error(
+          `Repository has uncommitted changes on '${startStatus.branch}' — commit or stash them before starting a new JARVIS Developer task.`
+        );
+      }
+
+      // Step 1: Analyze requirement + repository
+      const analysis = await this.step1_AnalyzeRequirement(requirement);
+
+      // Real branch creation (previously computed but never checked out)
+      console.log(`\n🌿 Creating branch '${branchName}' from '${baseBranch}'...`);
+      await this.gitManager.createBranch(branchName, baseBranch);
+
+      // Step 2: Design architecture
+      const design = await this.step2_DesignArchitecture(requirement, analysis.context);
+      result.architecture = design.design;
+
+      // Step 3: Plan tasks
+      const plan = await this.step3_PlanTasks(requirement, design.design);
+      result.taskPlan = plan.roadmap;
+
+      // Step 4: Implement code
+      const implementation = await this.step4_ImplementCode(requirement, design.design, plan.roadmap);
+      if (!implementation.success) {
+        throw new Error(implementation.reason);
+      }
+      result.implementation = implementation.files;
+
+      // Step 5: Build
+      let buildResult = await this.step5_BuildCode();
+      result.buildStatus = { success: buildResult.success, errors: buildResult.errors };
+
+      // Step 6: Run tests
+      let testResult = await this.step6_RunTests();
+      result.testResults = {
+        configured: testResult.configured,
+        passed: testResult.passed,
+        failed: testResult.failed,
+      };
+
+      // Step 7: Debug if the build failed or tests failed — bounded retry
+      // loop, not unlimited, so a persistently broken change fails loudly
+      // instead of burning API calls forever.
+      let debugAttempts = 0;
+      while (
+        (!buildResult.success || testResult.failed > 0) &&
+        debugAttempts < MAX_DEBUG_ATTEMPTS
+      ) {
+        debugAttempts++;
+        console.log(`\n🐛 Build/test failures detected — debug attempt ${debugAttempts}/${MAX_DEBUG_ATTEMPTS}`);
+        const debugResult = await this.step7_DebugFailures(buildResult, testResult, result.implementation);
+        if (debugResult.filesChanged === 0) {
+          console.log("   ⚠️  Debugger produced no file changes — stopping retry loop.");
+          break;
+        }
+        for (const [path, content] of debugResult.files) {
+          result.implementation.set(path, content);
+        }
+
+        buildResult = await this.step5_BuildCode();
+        result.buildStatus = { success: buildResult.success, errors: buildResult.errors };
+        testResult = await this.step6_RunTests();
+        result.testResults = {
+          configured: testResult.configured,
+          passed: testResult.passed,
+          failed: testResult.failed,
+        };
+      }
+
+      if (!buildResult.success) {
+        throw new Error(
+          `Build still failing after ${debugAttempts} debug attempt(s):\n${buildResult.errors.slice(0, 10).join("\n")}`
+        );
+      }
+      if (testResult.failed > 0) {
+        throw new Error(
+          `${testResult.failed} test(s) still failing after ${debugAttempts} debug attempt(s).`
+        );
+      }
+
+      // Step 8: Code review (against the real diff)
+      const diff = await this.gitManager.getDiff(baseBranch);
+      const codeReview = await this.step8_ReviewCode(diff);
+      result.codeReviewResults = codeReview;
+
+      // Step 9: Security review (against the real diff)
+      const securityReview = await this.step9_SecurityReview(diff);
+      result.securityReviewResults = securityReview;
+
+      // Step 10: Verify
+      const verification = await this.step10_Verify(
+        codeReview.approved,
+        securityReview.approved,
+        buildResult.success,
+        testResult.failed === 0
+      );
+      result.verificationResults = {
+        recommendation: verification.recommendation,
+        issues: verification.issues,
+      };
+
+      // Step 11: Human approval gate — real, not simulated
+      result.status = "awaiting_human_approval";
+      const approval = await this.step11_RequestHumanApproval(
+        verification.recommendation,
+        options
+      );
+
+      if (approval.approved && verification.recommendation === "approved_for_deployment") {
+        // Step 12: Deploy (open a PR for human review — never auto-merges)
+        const deployment = await this.step12_Deploy(branchName, baseBranch, taskId, requirement);
+        result.deploymentStatus = deployment;
+        result.gitCommit = deployment.commitHash;
+
+        if (deployment.success) {
+          result.success = true;
+          result.status = "completed";
+        } else {
+          result.status = "needs_revision";
+        }
+      } else if (verification.recommendation !== "approved_for_deployment") {
+        result.status = "needs_revision";
+      }
+      // else: stays "awaiting_human_approval" — this is the expected,
+      // common end state, not a failure.
+
+      console.log("\n" + "=".repeat(70));
+      console.log("📊 DEVELOPMENT PIPELINE COMPLETE");
+      console.log("=".repeat(70));
+      console.log(`Status: ${result.status}`);
+      console.log(`Branch: ${branchName} (base: ${baseBranch})`);
+      console.log(`Success: ${result.success}`);
+
+      return result;
+    } catch (error) {
+      console.error("\n❌ DEVELOPMENT PIPELINE FAILED");
+      console.error(error instanceof Error ? error.message : String(error));
+      result.status = "failed";
+      result.verificationResults.issues.push(
+        error instanceof Error ? error.message : String(error)
+      );
+      console.log(
+        `\n   Repository is left on branch '${branchName}' for inspection (not switched back automatically).`
+      );
+      return result;
+    }
+  }
+
+  /**
+   * Step 1: Analyze requirement
    */
   private async step1_AnalyzeRequirement(requirement: string): Promise<{
     understood: boolean;
@@ -127,404 +439,347 @@ export class JARVISDeveloper {
     return {
       understood: true,
       summary: requirement,
-      context: JSON.stringify(repositoryContext),
+      context: JSON.stringify({
+        ...repositoryContext,
+        dependencies: Array.from(repositoryContext.dependencies),
+      }),
     };
   }
 
   /**
-   * Phase 1 Step 2: Design architecture
+   * Step 2: Design architecture (real Architect agent call)
    */
   private async step2_DesignArchitecture(
     requirement: string,
     context: string
-  ): Promise<{
-    design: string;
-    components: string[];
-    taskBreakdown: string[];
-  }> {
+  ): Promise<{ design: string; confidence: number }> {
     console.log("\n🏗️  STEP 2: Designing Architecture (Architect Agent)");
-    console.log("   Analyzing patterns and existing code...");
-    console.log("   Designing solution architecture...");
-    console.log("   Identifying components...");
-    return {
-      design: "Architecture designed",
-      components: [],
-      taskBreakdown: [],
-    };
+    const output = await this.agents.architect.execute({
+      taskId: this.runId,
+      task: `Requirement:\n${requirement}\n\nRepository context (structure, primary language, dependencies, metadata):\n${truncate(context, 6000)}`,
+      context: {},
+    });
+    console.log(`   Confidence: ${(output.confidence * 100).toFixed(0)}%`);
+    return { design: output.content, confidence: output.confidence };
   }
 
   /**
-   * Phase 1 Step 3: Create task plan
+   * Step 3: Create task plan (real Planner agent call)
    */
   private async step3_PlanTasks(
-    design: string,
-    taskBreakdown: string[]
-  ): Promise<{
-    tasks: Array<{
-      id: string;
-      name: string;
-      description: string;
-      dependencies: string[];
-    }>;
-    roadmap: string;
-  }> {
+    requirement: string,
+    design: string
+  ): Promise<{ roadmap: string; confidence: number }> {
     console.log("\n📝 STEP 3: Planning Tasks (Planner Agent)");
-    console.log("   Breaking architecture into executable tasks...");
-    console.log("   Sequencing tasks by dependency...");
-    console.log("   Identifying blockers and risks...");
-    return {
-      tasks: [],
-      roadmap: "Task plan created",
-    };
+    const output = await this.agents.planner.execute({
+      taskId: this.runId,
+      task: `Requirement:\n${requirement}\n\nArchitecture design from the Architect agent:\n${design}`,
+      context: {},
+    });
+    console.log(`   Confidence: ${(output.confidence * 100).toFixed(0)}%`);
+    return { roadmap: output.content, confidence: output.confidence };
   }
 
   /**
-   * Phase 1 Step 4: Implement code
+   * Step 4: Implement code (real Coder agent call, real disk writes)
    */
   private async step4_ImplementCode(
+    requirement: string,
     design: string,
-    tasks: any[]
-  ): Promise<{
-    files: Map<string, string>;
-    success: boolean;
-  }> {
+    plan: string
+  ): Promise<{ files: Map<string, string>; success: boolean; reason?: string }> {
     console.log("\n💻 STEP 4: Implementing Code (Coder Agent)");
-    console.log("   Writing production-ready code...");
-    console.log("   Creating files...");
-    console.log("   Following architecture patterns...");
-    return {
-      files: new Map(),
-      success: false,
-    };
+    const output = await this.agents.coder.execute({
+      taskId: this.runId,
+      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.`,
+      context: {},
+    });
+
+    if (isNoChangesResponse(output.content)) {
+      return { files: new Map(), success: false, reason: "Coder agent determined no file changes were needed for this requirement." };
+    }
+
+    const blocks: FileBlock[] = parseFileBlocks(output.content);
+    if (blocks.length === 0) {
+      return {
+        files: new Map(),
+        success: false,
+        reason: `Coder agent response did not use the required ===FILE:===...===END FILE=== format. Raw response (truncated): ${truncate(output.content, 500)}`,
+      };
+    }
+
+    console.log(`   Writing ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
+    const written = applyFileBlocks(this.repositoryPath, blocks);
+    console.log(`   Confidence: ${(output.confidence * 100).toFixed(0)}%`);
+    return { files: written, success: true };
   }
 
   /**
-   * Phase 1 Step 5: Build/compile verification
+   * Step 5: Build/compile verification — real, not LLM-guessed
    */
-  private async step5_BuildCode(): Promise<{
-    success: boolean;
-    errors: string[];
-    warnings: string[];
-  }> {
-    console.log("\n🔨 STEP 5: Building Code (Builder Agent)");
-    console.log("   Running build process...");
-    console.log("   Checking for compilation errors...");
-    console.log("   Verifying all dependencies resolve...");
-    return {
-      success: false,
-      errors: [],
-      warnings: [],
-    };
+  private async step5_BuildCode(): Promise<BuildResult> {
+    console.log("\n🔨 STEP 5: Building Code (typecheck)");
+    const result = runTypecheck(this.repositoryPath);
+    console.log(`   ${result.success ? "✅ Build succeeded" : "❌ Build failed"} (${result.durationMs}ms)`);
+    if (!result.success) {
+      console.log(`   Errors:\n${result.errors.slice(0, 10).join("\n")}`);
+    }
+    return result;
   }
 
   /**
-   * Phase 1 Step 6: Run comprehensive tests
+   * Step 6: Run tests — real, not LLM-guessed
    */
-  private async step6_RunTests(): Promise<{
-    unitTests: { passed: number; failed: number };
-    integrationTests: { passed: number; failed: number };
-    regressionTests: { passed: number; failed: number };
-    coverage: number;
-    failures: string[];
-  }> {
-    console.log("\n🧪 STEP 6: Running Tests (Tester Agent)");
-    console.log("   Running unit tests...");
-    console.log("   Running integration tests...");
-    console.log("   Running regression tests...");
-    console.log("   Measuring coverage...");
-    return {
-      unitTests: { passed: 0, failed: 0 },
-      integrationTests: { passed: 0, failed: 0 },
-      regressionTests: { passed: 0, failed: 0 },
-      coverage: 0,
-      failures: [],
-    };
+  private async step6_RunTests(): Promise<TestResult> {
+    console.log("\n🧪 STEP 6: Running Tests");
+    const result = runTests(this.repositoryPath);
+    if (!result.configured) {
+      console.log("   ℹ️  No test files found in repository — not treated as a failure.");
+    } else {
+      console.log(`   ${result.passed} passed, ${result.failed} failed (${result.durationMs}ms)`);
+    }
+    return result;
   }
 
   /**
-   * Phase 1 Step 7: Debug failures
+   * Step 7: Debug failures (real Debugger agent call, real disk writes)
    */
   private async step7_DebugFailures(
-    failures: string[]
-  ): Promise<{
-    fixed: number;
-    remaining: number;
-    fixes: string[];
-  }> {
+    buildResult: BuildResult,
+    testResult: TestResult,
+    currentFiles: Map<string, string>
+  ): Promise<{ filesChanged: number; files: Map<string, string> }> {
     console.log("\n🐛 STEP 7: Debugging Failures (Debugger Agent)");
-    console.log(`   Found ${failures.length} test failures`);
-    console.log("   Analyzing error messages...");
-    console.log("   Identifying root causes...");
-    console.log("   Implementing fixes...");
-    return {
-      fixed: 0,
-      remaining: failures.length,
-      fixes: [],
-    };
+
+    const currentFilesText = Array.from(currentFiles.entries())
+      .map(([path, content]) => `--- ${path} ---\n${content}`)
+      .join("\n\n");
+
+    const failureText = [
+      !buildResult.success ? `Build errors:\n${buildResult.errors.join("\n")}` : "",
+      testResult.failed > 0 ? `Test output:\n${truncate(testResult.output, 4000)}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const output = await this.agents.debugger.execute({
+      taskId: this.runId,
+      task: `The following files were just changed and are failing:\n\n${truncate(currentFilesText, 8000)}\n\n${failureText}\n\nFix the failure(s). Repository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.`,
+      context: {},
+    });
+
+    if (isNoChangesResponse(output.content)) {
+      return { filesChanged: 0, files: new Map() };
+    }
+
+    const blocks = parseFileBlocks(output.content);
+    if (blocks.length === 0) {
+      console.log("   ⚠️  Debugger response did not use the required file-block format.");
+      return { filesChanged: 0, files: new Map() };
+    }
+
+    console.log(`   Rewriting ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
+    const written = applyFileBlocks(this.repositoryPath, blocks);
+    return { filesChanged: written.size, files: written };
   }
 
   /**
-   * Phase 1 Step 8: Code review
+   * Step 8: Code review (real Code Reviewer agent call against the diff)
    */
-  private async step8_ReviewCode(): Promise<{
+  private async step8_ReviewCode(diff: string): Promise<{
     quality: number;
     issues: string[];
     approved: boolean;
   }> {
     console.log("\n👀 STEP 8: Code Review (Code Reviewer Agent)");
-    console.log("   Checking code quality...");
-    console.log("   Identifying potential bugs...");
-    console.log("   Verifying test coverage...");
-    console.log("   Checking documentation...");
-    return {
-      quality: 0,
-      issues: [],
-      approved: false,
-    };
+    const output = await this.agents.codeReviewer.execute({
+      taskId: this.runId,
+      task: `Review this diff:\n\n${truncate(diff, 12000)}`,
+      context: {},
+    });
+
+    const quality = extractScore(output.content, /Rating[:\s]+(\d+)/i, Math.round(output.confidence * 100));
+    const issues = extractBulletSection(output.content, "Issues");
+    // Approved on quality alone — critical-issue gating is the Security
+    // Reviewer's job (step 9), which runs independently on the same diff.
+    const approved = quality >= 60;
+
+    console.log(`   Quality: ${quality}/100 — ${approved ? "approved" : "not approved"}`);
+    return { quality, issues, approved };
   }
 
   /**
-   * Phase 1 Step 9: Security review
+   * Step 9: Security review (real Security Reviewer agent call against the diff)
    */
-  private async step9_SecurityReview(): Promise<{
+  private async step9_SecurityReview(diff: string): Promise<{
     riskLevel: "critical" | "high" | "medium" | "low";
     issues: string[];
     approved: boolean;
   }> {
     console.log("\n🔒 STEP 9: Security Review (Security Reviewer Agent)");
-    console.log("   Checking for injection vulnerabilities...");
-    console.log("   Verifying authentication/authorization...");
-    console.log("   Reviewing data protection...");
-    console.log("   Checking for hardcoded secrets...");
-    return {
-      riskLevel: "low",
-      issues: [],
-      approved: false,
-    };
+    const output = await this.agents.securityReviewer.execute({
+      taskId: this.runId,
+      task: `Review this diff for security implications:\n\n${truncate(diff, 12000)}`,
+      context: {},
+    });
+
+    const riskMatch = output.content.match(/Risk Level[:\s]+(critical|high|medium|low)/i);
+    const riskLevel = (riskMatch?.[1].toLowerCase() as "critical" | "high" | "medium" | "low") ?? "high"; // unrecognized output defaults to the conservative side
+    const issues = extractBulletSection(output.content, "Critical Issues");
+    // Never auto-approve critical/high risk without an explicit "Approved: yes"
+    // from the reviewer — low/medium can pass on risk level alone.
+    const explicitApproval = /Approved[:\s]+yes/i.test(output.content);
+    const approved = explicitApproval || riskLevel === "low" || riskLevel === "medium";
+
+    console.log(`   Risk level: ${riskLevel} — ${approved ? "approved" : "not approved"}`);
+    return { riskLevel, issues, approved };
   }
 
   /**
-   * Phase 1 Step 10: Final verification
+   * Step 10: Final verification (deterministic gate — combines the real
+   * signals from steps 5/6/8/9, no LLM call needed for this decision)
    */
   private async step10_Verify(
     codeQualityApproved: boolean,
     securityApproved: boolean,
+    buildSucceeded: boolean,
     testsPass: boolean
   ): Promise<{
     recommendation: "approved_for_deployment" | "needs_fixes";
     issues: string[];
     requiresHumanApproval: boolean;
   }> {
-    console.log("\n✅ STEP 10: Final Verification (Verifier Agent)");
-    console.log("   Verifying all requirements met...");
-    console.log("   Checking all tests passing...");
-    console.log("   Verifying code and security reviews...");
-    console.log("   Compiling verification report...");
+    console.log("\n✅ STEP 10: Final Verification");
+    const issues: string[] = [];
+    if (!buildSucceeded) issues.push("Build is not passing.");
+    if (!testsPass) issues.push("Tests are not passing.");
+    if (!codeQualityApproved) issues.push("Code review did not approve.");
+    if (!securityApproved) issues.push("Security review did not approve.");
 
-    if (!codeQualityApproved || !securityApproved || !testsPass) {
+    const recommendation =
+      buildSucceeded && testsPass && codeQualityApproved && securityApproved
+        ? "approved_for_deployment"
+        : "needs_fixes";
+
+    console.log(`   Recommendation: ${recommendation}`);
+    // Deployment always requires a human, even when every automated check
+    // passes — this is a fixed policy, not a per-task judgment call.
+    return { recommendation, issues, requiresHumanApproval: true };
+  }
+
+  /**
+   * Step 11: Human approval gate — real. No code path here fabricates
+   * approval; it only reflects what the caller explicitly passed in.
+   */
+  private async step11_RequestHumanApproval(
+    recommendation: string,
+    options: DevelopFeatureOptions
+  ): Promise<{ approved: boolean; approver?: string; notes: string }> {
+    console.log("\n🔑 STEP 11: Human Approval Gate");
+    console.log(`   Recommendation: ${recommendation}`);
+
+    if (options.approved === true) {
+      console.log(`   ✅ Approved by: ${options.approvedBy ?? "unspecified"}`);
       return {
-        recommendation: "needs_fixes",
-        issues: [],
-        requiresHumanApproval: false,
+        approved: true,
+        approver: options.approvedBy ?? "unspecified",
+        notes: "Approved via explicit `approved: true` option.",
       };
     }
 
+    console.log("   ⏸️  AWAITING HUMAN APPROVAL — deployment will not proceed.");
+    console.log("   Review the branch/diff, then re-run with `{ approved: true }` to deploy.");
     return {
-      recommendation: "approved_for_deployment",
-      issues: [],
-      requiresHumanApproval: true, // Always require human approval
+      approved: false,
+      notes: "No explicit approval was given — this is the expected default, not an error.",
     };
   }
 
   /**
-   * Phase 1 Step 11: Human approval gate
-   */
-  private async step11_RequestHumanApproval(
-    recommendation: string
-  ): Promise<{
-    approved: boolean;
-    approver?: string;
-    notes?: string;
-  }> {
-    console.log("\n🔑 STEP 11: Human Approval Gate");
-    console.log(`   Recommendation: ${recommendation}`);
-    console.log("   ⏸️  AWAITING HUMAN APPROVAL");
-    console.log("   System cannot continue without explicit human authorization");
-    console.log("   In production, this would require reviewer confirmation...");
-
-    // For now, simulate approval
-    return {
-      approved: true,
-      approver: "human-reviewer",
-      notes: "Approved after review",
-    };
-  }
-
-  /**
-   * Phase 1 Step 12: Deploy
+   * Step 12: Deploy — commits, pushes the feature branch, and opens a PR
+   * for human review. Never merges to the base branch directly; "deploy"
+   * here means "put the change somewhere a human can merge it."
    */
   private async step12_Deploy(
     branchName: string,
-    approved: boolean
-  ): Promise<{
-    success: boolean;
-    releaseTag?: string;
-    deploymentTime?: number;
-  }> {
-    console.log("\n🚀 STEP 12: Deploy (Deployer Agent)");
-    if (!approved) {
-      console.log("   ❌ Skipped: No human approval");
+    baseBranch: string,
+    taskId: string,
+    requirement: string
+  ): Promise<{ success: boolean; prUrl?: string; branchPushed?: boolean; commitHash?: string }> {
+    console.log("\n🚀 STEP 12: Deploy (open PR for human merge)");
+
+    try {
+      await this.gitManager.stageAll();
+      const hasChanges = await this.gitManager.hasUncommittedChanges();
+      if (hasChanges) {
+        const commit = await this.gitManager.commit(
+          `JARVIS Developer: ${requirement.slice(0, 72)}\n\nTask: ${taskId}`
+        );
+        console.log(`   Committed: ${commit.hash}`);
+      } else {
+        console.log("   Nothing new to commit (already committed).");
+      }
+
+      let branchPushed = false;
+      try {
+        await this.gitManager.push(branchName);
+        branchPushed = true;
+        console.log(`   Pushed branch '${branchName}' to origin.`);
+      } catch (pushError) {
+        console.log(`   ⚠️  Could not push branch (offline or no remote): ${pushError instanceof Error ? pushError.message : pushError}`);
+      }
+
+      let prUrl: string | undefined;
+      if (branchPushed) {
+        prUrl = this.tryCreatePR(branchName, baseBranch, requirement, taskId);
+        if (!prUrl) {
+          prUrl = (await this.gitManager.getCompareUrl(baseBranch, branchName)) ?? undefined;
+        }
+      }
+
+      const status = await this.gitManager.getStatus();
+      console.log(prUrl ? `   PR: ${prUrl}` : "   No remote available — branch is local-only; review it directly on this machine.");
+
+      return { success: true, prUrl, branchPushed, commitHash: undefined };
+    } catch (error) {
+      console.error(`   ❌ Deploy step failed: ${error instanceof Error ? error.message : error}`);
       return { success: false };
     }
-
-    console.log("   Merging changes to main...");
-    console.log("   Creating release tag...");
-    console.log("   Deploying to production...");
-    console.log("   Running smoke tests...");
-
-    return {
-      success: false,
-      releaseTag: undefined,
-    };
   }
 
   /**
-   * Main development pipeline
+   * Best-effort `gh pr create` — many machines this runs on (e.g. a fresh
+   * Windows install) won't have the GitHub CLI set up, so failure here
+   * falls back to a manual compare URL rather than blocking deployment.
    */
-  async developFeature(requirement: string): Promise<DeveloperResult> {
-    const taskId = `task-${Date.now()}`;
-    const branchName = `feature/${taskId}`;
-
-    console.log("\n" + "=".repeat(70));
-    console.log("🚀 JARVIS DEVELOPER - PHASE 1 - COMPLETE PIPELINE");
-    console.log("=".repeat(70));
-    console.log(`\nRequirement: ${requirement}`);
-    console.log(`Task ID: ${taskId}`);
-    console.log(`Branch: ${branchName}`);
-
-    const result: DeveloperResult = {
-      taskId,
-      success: false,
-      status: "failed",
-      architecture: "",
-      taskPlan: "",
-      implementation: new Map(),
-      buildStatus: { success: false, errors: [] },
-      testResults: {
-        unit: { passed: 0, failed: 0 },
-        integration: { passed: 0, failed: 0 },
-        regression: { passed: 0, failed: 0 },
-        coverage: 0,
-      },
-      codeReviewResults: { quality: 0, issues: [] },
-      securityReviewResults: { riskLevel: "low", issues: [], approved: false },
-      verificationResults: { recommendation: "needs_fixes", issues: [] },
-    };
-
+  private tryCreatePR(
+    branchName: string,
+    baseBranch: string,
+    requirement: string,
+    taskId: string
+  ): string | undefined {
     try {
-      // Step 1: Analyze requirement
-      const analysis = await this.step1_AnalyzeRequirement(requirement);
-      if (!analysis.understood) throw new Error("Failed to understand requirement");
-
-      // Step 2: Design architecture
-      const design = await this.step2_DesignArchitecture(requirement, analysis.context);
-      result.architecture = design.design;
-
-      // Step 3: Plan tasks
-      const plan = await this.step3_PlanTasks(design.design, design.taskBreakdown);
-      result.taskPlan = plan.roadmap;
-
-      // Step 4: Implement code
-      const implementation = await this.step4_ImplementCode(design.design, plan.tasks);
-      if (!implementation.success) throw new Error("Code implementation failed");
-      result.implementation = implementation.files;
-
-      // Step 5: Build
-      const buildResult = await this.step5_BuildCode();
-      result.buildStatus = { success: buildResult.success, errors: buildResult.errors };
-      if (!buildResult.success) throw new Error("Build failed");
-
-      // Step 6: Run tests
-      const testResults = await this.step6_RunTests();
-      result.testResults = {
-        unit: testResults.unitTests,
-        integration: testResults.integrationTests,
-        regression: testResults.regressionTests,
-        coverage: testResults.coverage,
-      };
-
-      // Step 7: Debug if needed
-      if (testResults.unitTests.failed > 0 || testResults.integrationTests.failed > 0) {
-        const debugResults = await this.step7_DebugFailures(testResults.failures);
-        if (debugResults.remaining > 0) {
-          throw new Error(`${debugResults.remaining} test failures remain after debugging`);
-        }
-      }
-
-      // Step 8: Code review
-      const codeReview = await this.step8_ReviewCode();
-      result.codeReviewResults = { quality: codeReview.quality, issues: codeReview.issues };
-
-      // Step 9: Security review
-      const securityReview = await this.step9_SecurityReview();
-      result.securityReviewResults = {
-        riskLevel: securityReview.riskLevel,
-        issues: securityReview.issues,
-        approved: securityReview.approved,
-      };
-
-      // Step 10: Verify
-      const verification = await this.step10_Verify(
-        codeReview.approved,
-        securityReview.approved,
-        testResults.unitTests.failed === 0 && testResults.integrationTests.failed === 0
+      const title = `JARVIS Developer: ${requirement.slice(0, 72)}`.replace(/"/g, '\\"');
+      const body = `Automated change from JARVIS Developer (Phase 1).\n\nTask: ${taskId}\nRequirement: ${requirement}\n\nThis PR was opened automatically after all automated checks passed and a human explicitly approved deployment. Review before merging.`;
+      const output = execSync(
+        `gh pr create --base "${baseBranch}" --head "${branchName}" --title "${title}" --body "${body.replace(/"/g, '\\"')}"`,
+        { cwd: this.repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
       );
-      result.verificationResults = {
-        recommendation: verification.recommendation,
-        issues: verification.issues,
-      };
-
-      // Step 11: Request human approval
-      if (verification.requiresHumanApproval) {
-        result.status = "awaiting_human_approval";
-        const approval = await this.step11_RequestHumanApproval(verification.recommendation);
-
-        // Step 12: Deploy (only if approved)
-        if (approval.approved) {
-          const deployment = await this.step12_Deploy(branchName, true);
-          result.deploymentStatus = {
-            success: deployment.success,
-            releaseTag: deployment.releaseTag,
-          };
-
-          if (deployment.success) {
-            result.success = true;
-            result.status = "completed";
-          }
-        }
-      }
-
-      console.log("\n" + "=".repeat(70));
-      console.log("📊 DEVELOPMENT PIPELINE COMPLETE");
-      console.log("=".repeat(70));
-      console.log(`Status: ${result.status}`);
-      console.log(`Success: ${result.success}`);
-
-      return result;
-    } catch (error) {
-      console.error("\n❌ DEVELOPMENT PIPELINE FAILED");
-      console.error(error instanceof Error ? error.message : String(error));
-      result.status = "failed";
-      result.verificationResults.issues.push(
-        error instanceof Error ? error.message : String(error)
-      );
-      return result;
+      const urlMatch = output.match(/https:\/\/github\.com\/\S+/);
+      return urlMatch?.[0];
+    } catch {
+      return undefined;
     }
   }
 
   /**
    * Self-test: JARVIS Developer works on JARVIS codebase
-   * This implements the compounding loop verification
+   * This implements the compounding loop verification.
+   *
+   * Runs the real pipeline (no approval passed in, so it will stop at
+   * "awaiting_human_approval" and never push/open a PR on its own) against
+   * this repository. Requires GEMINI_API_KEY to be set — this is a live
+   * LLM call, not a mock.
    */
   static async selfTest(): Promise<{
     success: boolean;
@@ -538,36 +793,28 @@ export class JARVISDeveloper {
 
     try {
       console.log("\n📍 Self-Test Scenario:");
-      console.log("   Requirement: Add new error handling utility to JARVIS Phase 1");
+      console.log("   Requirement: Add a small, self-contained utility to JARVIS Phase 1");
       console.log("   Repository: JARVIS codebase (/home/workspace/JARVIS)");
-      console.log("   Target: Implement robust error handling layer\n");
 
       const developer = new JARVISDeveloper("/home/workspace/JARVIS");
 
       const result = await developer.developFeature(
-        "Create ErrorHandler utility class that provides standardized error handling " +
-        "with retry logic, error categorization, and logging for Phase 1 agents"
+        "Add a `formatDuration(ms: number): string` utility function to src/phase1/ " +
+        "(new file, e.g. src/phase1/format.ts) that formats a millisecond duration as " +
+        "a human-readable string (e.g. '1.2s', '3m 4s'). Export it. Do not modify any other files."
       );
 
       console.log("\n" + "=".repeat(70));
       console.log("📋 SELF-TEST RESULTS");
       console.log("=".repeat(70));
 
-      if (result.status === "completed") {
+      if (result.status === "awaiting_human_approval" || result.status === "completed") {
         console.log("\n✅ COMPOUNDING LOOP VERIFIED");
-        console.log("   JARVIS successfully developed code for JARVIS");
-        console.log("   Pipeline completed successfully through deployment");
+        console.log("   JARVIS ran the real pipeline against its own codebase end to end.");
+        console.log(`   Branch: ${result.branchName} — review this before approving deployment.`);
         return {
           success: true,
-          report: `Self-test PASSED. JARVIS built feature for JARVIS. Task: ${result.taskId}`,
-        };
-      } else if (result.status === "awaiting_human_approval") {
-        console.log("\n⏸️  AWAITING HUMAN APPROVAL");
-        console.log("   JARVIS completed development and verification");
-        console.log("   Feature ready for human review and deployment approval");
-        return {
-          success: true,
-          report: `Self-test PASSED through verification. Task: ${result.taskId}. Status: ${result.status}`,
+          report: `Self-test PASSED. Task: ${result.taskId}. Status: ${result.status}. Branch: ${result.branchName}`,
         };
       } else {
         console.log("\n⚠️  SELF-TEST DID NOT COMPLETE");
@@ -575,7 +822,7 @@ export class JARVISDeveloper {
         console.log(`   Issues: ${result.verificationResults.issues.join(", ")}`);
         return {
           success: false,
-          report: `Self-test incomplete. Task: ${result.taskId}. Status: ${result.status}`,
+          report: `Self-test incomplete. Task: ${result.taskId}. Status: ${result.status}. Issues: ${result.verificationResults.issues.join("; ")}`,
         };
       }
     } catch (error) {
@@ -594,36 +841,56 @@ export class JARVISDeveloper {
   static printWorkflow() {
     console.log("\n🚀 JARVIS DEVELOPER - PHASE 1 COMPLETE PIPELINE");
     console.log("=".repeat(70));
-    console.log("\nFull Pipeline (10 agents + human approval gate):");
+    console.log("\nFull Pipeline (agents + human approval gate):");
 
     PHASE_1_AGENT_PIPELINE.forEach((agent, index) => {
       console.log(`  ${index + 1}. ${agent.role} (${agent.name})`);
     });
 
-    console.log("\nAgent Responsibilities:");
-    console.log("  1. Architect → High-level design and task breakdown");
-    console.log("  2. Planner → Sequencing and task dependencies");
-    console.log("  3. Coder → Implementation of production code");
-    console.log("  4. Builder → Compilation/build verification");
-    console.log("  5. Tester → Unit/integration/regression testing");
-    console.log("  6. Debugger → Fix test failures and issues");
-    console.log("  7. Code Reviewer → Quality and maintainability review");
-    console.log("  8. Security Reviewer → Security analysis");
-    console.log("  9. Verifier → Final verification + approval recommendation");
-    console.log("  [HUMAN APPROVAL GATE]");
-    console.log("  10. Deployer → Deployment to production");
-
     console.log("\nKey Features:");
-    console.log("  ✓ Full autonomous development pipeline");
-    console.log("  ✓ Multiple specialized agents (10 roles)");
-    console.log("  ✓ Comprehensive test coverage (unit/integration/regression)");
-    console.log("  ✓ Security-first approach");
-    console.log("  ✓ Human approval gate (always required before deploy)");
+    console.log("  ✓ Full autonomous development pipeline, wired to a real LLM (Gemini)");
+    console.log("  ✓ Real build verification (bun run typecheck)");
+    console.log("  ✓ Real test execution (bun test) — honestly reports 'no tests' rather than faking a pass");
+    console.log("  ✓ Bounded auto-debug loop (max " + MAX_DEBUG_ATTEMPTS + " attempts) on build/test failure");
+    console.log("  ✓ Code review + security review against the real git diff");
+    console.log("  ✓ Human approval gate — never auto-approved, no simulated deploy");
+    console.log("  ✓ Real git integration: branch, commit, push, PR (or compare-URL fallback)");
     console.log("  ✓ Self-test capability (compounding loop verification)");
-    console.log("  ✓ Git integration (branches, commits, PRs, deployment)");
-    console.log("  ✓ Repository understanding and analysis");
-    console.log("  ✓ Automatic debugging and recovery");
 
     console.log("\n" + "=".repeat(70));
   }
+}
+
+function truncate(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength) + `\n...[truncated, ${text.length - maxLength} more characters]`;
+}
+
+/**
+ * Extract a numeric score from agent prose via a labeled-field regex, with
+ * a documented fallback (the agent's own self-reported confidence) rather
+ * than a silent hardcoded number — mirrors the confidence-parsing pattern
+ * already established in BaseAgent.execute().
+ */
+function extractScore(text: string, pattern: RegExp, fallback: number): number {
+  const match = text.match(pattern);
+  if (match) {
+    const val = parseInt(match[1], 10);
+    if (!Number.isNaN(val)) return Math.min(Math.max(val, 0), 100);
+  }
+  return fallback;
+}
+
+/**
+ * Best-effort extraction of a labeled bullet section (e.g. "Issues:\n- a\n- b")
+ * from free-form agent prose. Returns an empty array, not a guess, when the
+ * section isn't found.
+ */
+function extractBulletSection(text: string, label: string): string[] {
+  const sectionMatch = text.match(new RegExp(`${label}[:\\s]*\\n((?:[-*].*\\n?)+)`, "i"));
+  if (!sectionMatch) return [];
+  return sectionMatch[1]
+    .split("\n")
+    .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .filter(Boolean);
 }
