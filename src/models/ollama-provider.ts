@@ -71,6 +71,25 @@ export class OllamaProvider implements ModelProvider {
    * score" bug this codebase has fixed once already for Gemini). Now it
    * retries once with a larger token budget before giving up honestly.
    */
+  // Ollama defaults num_ctx to 4096 regardless of what the model can
+  // actually support (qwen2.5-coder:1.5b goes up to 32768) — found by a
+  // real Coder-step failure: a large requirement+design+plan prompt plus
+  // an 8000-token completion budget blew past 4096, forcing llama.cpp to
+  // silently discard half its context ("context shift") twice mid-generation
+  // and eventually get cut off. ~4 chars/token is a rough but safe-enough
+  // estimate to size the window without a real tokenizer.
+  private static readonly MAX_CTX = 32768;
+
+  private estimateContextNeeded(
+    chatMessages: Array<{ role: string; content: string }>,
+    numPredict: number
+  ): number {
+    const promptChars = chatMessages.reduce((sum, m) => sum + m.content.length, 0);
+    const promptTokensEstimate = Math.ceil(promptChars / 4);
+    const needed = promptTokensEstimate + numPredict + 512; // headroom for role/format overhead
+    return Math.min(OllamaProvider.MAX_CTX, Math.max(4096, needed));
+  }
+
   private async requestOnce(
     chatMessages: Array<{ role: string; content: string }>,
     temperature: number,
@@ -81,10 +100,19 @@ export class OllamaProvider implements ModelProvider {
     promptEvalCount: number;
     evalCount: number;
   }> {
+    // Real bug found via a live run on this box (a gVisor-sandboxed
+    // container): with stream:false, Ollama buffers the whole response and
+    // sends nothing until generation finishes — zero bytes on the wire for
+    // minutes on end. Two live Coder/Architect calls were both severed by
+    // something below the app (sandbox/network idle-connection tracking,
+    // not any timeout in this file) right around the 5-minute mark, logged
+    // server-side as "cancel task". Streaming keeps bytes flowing the whole
+    // time so nothing ever sees an idle connection, while this method still
+    // hands back one assembled response to its callers exactly as before.
     const body = {
       model: this.model,
       messages: chatMessages,
-      stream: false,
+      stream: true,
       format: {
         type: "object",
         properties: {
@@ -96,6 +124,7 @@ export class OllamaProvider implements ModelProvider {
       options: {
         temperature,
         num_predict: numPredict,
+        num_ctx: this.estimateContextNeeded(chatMessages, numPredict),
       },
     };
 
@@ -105,32 +134,66 @@ export class OllamaProvider implements ModelProvider {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        // Belt-and-suspenders cap so a truly stuck request still fails with
+        // a clear message instead of hanging forever, even though streaming
+        // should keep the idle-connection issue above from firing at all.
+        signal: AbortSignal.timeout(600_000),
       });
     } catch (error) {
+      const isTimeout = error instanceof Error && error.name === "TimeoutError";
       throw new Error(
-        `Could not reach Ollama at ${this.host} — is "ollama serve" running? (${error instanceof Error ? error.message : error})`
+        isTimeout
+          ? `Ollama request timed out after 10 minutes (model: ${this.model}) — the server may be overloaded or the prompt too large.`
+          : `Could not reach Ollama at ${this.host} — is "ollama serve" running? (${error instanceof Error ? error.message : error})`
       );
     }
 
-    if (!response.ok) {
+    if (!response.ok || !response.body) {
       const errText = await response.text().catch(() => "");
       throw new Error(`Ollama API error: ${response.status} ${response.statusText} — ${errText}`);
     }
 
-    const data = (await response.json()) as {
-      message?: { content?: string };
-      done?: boolean;
-      done_reason?: string;
-      prompt_eval_count?: number;
-      eval_count?: number;
-    };
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let rawText = "";
+    let doneReason: string | undefined;
+    let promptEvalCount = 0;
+    let evalCount = 0;
 
-    return {
-      rawText: data.message?.content ?? "",
-      doneReason: data.done_reason,
-      promptEvalCount: data.prompt_eval_count ?? 0,
-      evalCount: data.eval_count ?? 0,
-    };
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let chunk: {
+            message?: { content?: string };
+            done?: boolean;
+            done_reason?: string;
+            prompt_eval_count?: number;
+            eval_count?: number;
+          };
+          try {
+            chunk = JSON.parse(trimmed);
+          } catch {
+            continue;
+          }
+          rawText += chunk.message?.content ?? "";
+          if (chunk.prompt_eval_count !== undefined) promptEvalCount = chunk.prompt_eval_count;
+          if (chunk.eval_count !== undefined) evalCount = chunk.eval_count;
+          if (chunk.done) doneReason = chunk.done_reason;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return { rawText, doneReason, promptEvalCount, evalCount };
   }
 
   async complete(

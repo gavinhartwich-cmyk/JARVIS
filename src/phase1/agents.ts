@@ -114,6 +114,16 @@ Coding principles:
 - Minimize external dependencies
 - Write code that's easy to test
 
+Scope discipline — only touch files this requirement actually needs:
+- Do NOT output a file block for any file you are not creating or meaningfully
+  changing for this specific requirement, even if you can see it in the repo.
+- Never regenerate or rewrite project configuration files (package.json,
+  tsconfig.json, jest.config.js, tslint.json, prettier.config.js, .gitignore,
+  README.md, etc.) unless the requirement explicitly asks you to change them.
+  A config file already working is correct as-is; do not "fill it in" or
+  replace it with a minimal version from memory.
+- When in doubt about whether a file needs a block, leave it out.
+
 Output format:
 - File: Path to create/modify
 - Content: Complete file content
@@ -219,6 +229,12 @@ Debugging approach:
 - Add debug output if needed
 - Test the fix thoroughly
 - Ensure no regressions
+
+Scope discipline: only output a file block for a file whose content must
+actually change to fix the reported error. Never regenerate or replace
+project configuration files (package.json, tsconfig.json, jest.config.js,
+tslint.json, prettier.config.js, .gitignore, README.md, etc.) as a side
+effect of fixing an unrelated bug.
 
 Output format:
 - Issue: Description of the problem
