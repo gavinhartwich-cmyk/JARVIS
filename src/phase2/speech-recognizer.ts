@@ -1,9 +1,20 @@
 /**
  * Phase 2: Speech Recognition
  *
- * Converts speech to text using Whisper
- * Supports streaming and batch processing
+ * Converts speech to text using a real local Whisper model (faster-whisper,
+ * via scripts/whisper_transcribe.py — see recognizeAudio()), not a
+ * simulation. "Streaming" here means audio chunks are buffered as they
+ * arrive and the whole buffer is transcribed once recognition stops —
+ * there is no true incremental/partial transcription yet, so
+ * processStreamingChunk() does not emit fabricated partial-result text
+ * anymore; that's a real follow-up, not built here.
  */
+
+import { spawn } from "node:child_process";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 export interface RecognitionResult {
   text: string;
@@ -21,6 +32,49 @@ export interface SpeechRecognizerConfig {
   streaming: boolean;
   responseFormat: "text" | "json" | "verbose_json";
   sampleRate: number;
+  pythonPath?: string; // Path to the venv python with faster-whisper installed
+  scriptPath?: string; // Path to scripts/whisper_transcribe.py
+}
+
+function resolveWhisperPaths(config: { pythonPath?: string; scriptPath?: string }) {
+  const pythonPath =
+    config.pythonPath || process.env.WHISPER_PYTHON_PATH || "tools/whisper/venv/bin/python";
+  const scriptPath =
+    config.scriptPath || process.env.WHISPER_SCRIPT_PATH || "scripts/whisper_transcribe.py";
+  return { pythonPath, scriptPath };
+}
+
+/**
+ * Wrap raw 16-bit mono PCM in a minimal WAV container so whisper (via
+ * ffmpeg/av under the hood) can decode it — recognizeAudio() receives raw
+ * PCM chunks, not a file, so this has to happen before every transcription.
+ */
+function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
+  const header = Buffer.alloc(44);
+  const dataSize = pcm.length;
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16); // fmt chunk size
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28); // byte rate (16-bit mono)
+  header.writeUInt16LE(2, 32); // block align
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(dataSize, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+interface WhisperScriptResult {
+  text: string;
+  language: string;
+  language_probability: number;
+  duration: number;
+  segments: { start: number; end: number; text: string; avg_logprob: number }[];
+  error?: string;
 }
 
 /**
@@ -132,26 +186,14 @@ export class SpeechRecognizer {
 
   /**
    * Process a streaming audio chunk (internal)
+   *
+   * Real incremental/partial transcription isn't built — this just buffers
+   * (processAudioChunk already appended the chunk before calling this).
+   * No partial-result event is emitted per chunk anymore, since the old
+   * behavior fabricated a fixed placeholder string on every call.
    */
   private async processStreamingChunk(chunk: Buffer): Promise<void> {
-    // In real implementation:
-    // - Convert chunk to the right format for Whisper
-    // - Send to streaming endpoint
-    // - Get partial result
-    // - Emit partial-result event
-
-    // Simulated partial result
-    const simulatedPartialText = "I'm listening to your speech...";
-    const partialResult: RecognitionResult = {
-      text: simulatedPartialText,
-      confidence: 0.85,
-      language: this.language,
-      isFinal: false,
-      timestamp: new Date(),
-      duration: (new Date().getTime() - this.startTime.getTime()),
-    };
-
-    this.emit("partial-result", partialResult);
+    // Real per-chunk incremental decoding would go here; not implemented.
   }
 
   /**
@@ -161,27 +203,25 @@ export class SpeechRecognizer {
    */
   private async recognizeAudio(audio: Buffer): Promise<RecognitionResult> {
     console.log("\n📝 Processing audio with Whisper...");
-    console.log(`   Duration: ${(audio.length / (this.sampleRate * 2 / 1000)).toFixed(1)}s`);
+    console.log(`   Duration: ${(audio.length / (this.sampleRate * 2)).toFixed(2)}s`);
 
     try {
-      // In real implementation:
-      // 1. Send audio to Whisper (via whisper.cpp, Python API, or remote)
-      // 2. Parse response based on responseFormat
-      // 3. Extract confidence if available
-      // 4. Return structured result
-
+      const whisperResult = await this.runWhisper(audio);
       const duration = new Date().getTime() - this.startTime.getTime();
 
-      // Simulated result
+      // avg_logprob is a per-token log-likelihood (<=0); exp() turns it into
+      // a rough 0-1 confidence proxy. Not calibrated against ground truth,
+      // but it's a real model signal, not a hardcoded number.
+      const avgLogprob =
+        whisperResult.segments.length > 0
+          ? whisperResult.segments.reduce((sum, s) => sum + s.avg_logprob, 0) / whisperResult.segments.length
+          : -1;
+
       const result: RecognitionResult = {
-        text: "This would be the transcribed text from Whisper",
-        confidence: 0.95,
-        language: this.language,
+        text: whisperResult.text,
+        confidence: Math.exp(avgLogprob),
+        language: whisperResult.language,
         isFinal: true,
-        alternatives: [
-          "This would be alternative transcription one",
-          "This would be alternative transcription two",
-        ],
         timestamp: new Date(),
         duration,
       };
@@ -208,6 +248,53 @@ export class SpeechRecognizer {
   async recognize(audioBuffer: Buffer): Promise<RecognitionResult> {
     console.log("🎤 Recognizing audio (batch mode)");
     return this.recognizeAudio(audioBuffer);
+  }
+
+  /**
+   * Write the raw PCM buffer to a temp WAV file and run the real
+   * faster-whisper subprocess against it.
+   */
+  private async runWhisper(pcm: Buffer): Promise<WhisperScriptResult> {
+    const { pythonPath, scriptPath } = resolveWhisperPaths({});
+    const wav = pcmToWav(pcm, this.sampleRate);
+    const tempPath = join(tmpdir(), `jarvis-stt-${randomUUID()}.wav`);
+    writeFileSync(tempPath, wav);
+
+    try {
+      return await new Promise<WhisperScriptResult>((resolve, reject) => {
+        const proc = spawn(pythonPath, [scriptPath, this.model, tempPath, this.language]);
+        const stdoutChunks: Buffer[] = [];
+        const stderrChunks: Buffer[] = [];
+        proc.stdout.on("data", (c: Buffer) => stdoutChunks.push(c));
+        proc.stderr.on("data", (c: Buffer) => stderrChunks.push(c));
+
+        proc.on("error", (err) => {
+          reject(new Error(`Failed to launch whisper at "${pythonPath}": ${err.message}. Run scripts/setup-voice.sh first.`));
+        });
+
+        proc.on("close", () => {
+          const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
+          let parsed: WhisperScriptResult;
+          try {
+            parsed = JSON.parse(stdout);
+          } catch {
+            reject(new Error(`whisper_transcribe.py produced non-JSON output: ${stdout || Buffer.concat(stderrChunks).toString("utf-8")}`));
+            return;
+          }
+          if (parsed.error) {
+            reject(new Error(`whisper_transcribe.py error: ${parsed.error}`));
+            return;
+          }
+          resolve(parsed);
+        });
+      });
+    } finally {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        // best-effort cleanup
+      }
+    }
   }
 
   /**

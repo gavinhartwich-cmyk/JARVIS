@@ -12,3 +12,9 @@ dist/
 *~
 .bun/
 bun.lockb
+
+# Phase 2 voice: downloaded binaries/models (large, fetched by scripts/setup-voice.sh)
+tools/piper/
+tools/whisper/
+models/piper/
+models/whisper/
