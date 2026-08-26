@@ -215,14 +215,40 @@ async function main() {
 
       const identity = await identityEngine.resolveFromDeviceSession();
       const screenControl = new ScreenControl();
-      const result = await screenControl.openApp("notepad", identity, 1500);
+      const openResult = await screenControl.openApp("notepad", identity, 1500);
 
-      if (result.success) {
-        console.log(`\n✅ Real computer control confirmed working: ${result.output}`);
+      if (openResult.success) {
+        console.log(`\n✅ Open/wait confirmed working: ${openResult.output}`);
       } else {
-        console.log(`\n❌ Computer control failed: ${result.error}`);
+        console.log(`\n❌ Computer control failed: ${openResult.error}`);
       }
+
+      // Second pass: exercise type/key/close — none of these have ever run
+      // before either, and open/wait alone doesn't prove they work.
+      console.log("\n" + "-".repeat(70));
+      console.log("Now testing type / key / close on the Notepad window that's open...");
+      const seq = screenControl.buildSequence("Type into Notepad, select-all, force-close it");
+      screenControl.type(seq, "JARVIS control-test — real PowerShell automation, not simulated.");
+      screenControl.wait(seq, 400);
+      screenControl.key(seq, "ctrl+a"); // select-all — visible, non-destructive
+      screenControl.wait(seq, 400);
+      screenControl.close(seq, "notepad"); // force-kills the process, no save-dialog risk
+      const typeCloseResult = await screenControl.executeSequence(seq, identity);
+
+      if (typeCloseResult.success) {
+        console.log(`\n✅ Type/key/close confirmed working: ${typeCloseResult.output}`);
+      } else {
+        console.log(`\n❌ Type/key/close failed: ${typeCloseResult.error}`);
+      }
+
       console.log("\n" + "=".repeat(70));
+      console.log(
+        openResult.success && typeCloseResult.success
+          ? "✅ CONTROL PRIMITIVES VERIFIED: open, wait, type, key, close"
+          : "⚠️  Not all primitives verified — see errors above"
+      );
+      console.log("Still unverified: click, focus, scroll (need real screen coordinates/window titles — not exercised by this test).");
+      console.log("=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
