@@ -269,13 +269,13 @@ export class ScreenCapture {
    */
   async describeScreen(screenshot: Screenshot): Promise<string> {
     // In real implementation:
-    // - Send screenshot to Claude/Gemini vision API
+    // - Send screenshot to Gemini's vision API
     // - Get description of UI elements, content, state
     // - Return natural language description
 
     console.log("🤖 Analyzing screen content with vision AI...");
     console.log(
-      "   (In real implementation: Claude/Gemini vision API would analyze)"
+      "   (In real implementation: Gemini's vision API would analyze)"
     );
 
     return "The screen shows Visual Studio Code with JARVIS Phase 3 code. Active window displays screen-capture.ts file. Chrome browser window with Gmail is visible in background.";

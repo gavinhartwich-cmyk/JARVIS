@@ -1,8 +1,17 @@
 # PHASE 1: LLM STRATEGY - PROVIDER-AGNOSTIC & $0-FIRST
 
-**Date:** August 25, 2026  
+**Date:** August 25, 2026, corrected further August 26, 2026  
 **Correction:** Reworked to align with $0-first principle  
 **Status:** Foundation rework in progress
+
+**2026-08-26 correction:** the "keep Claude as an optional paid provider"
+plan below was itself wrong and has since been overruled — this project is
+standalone and must never depend on Claude, Anthropic, or Zo in any form,
+not even as an opt-in extra. `src/models/claude-provider.ts` has been
+deleted from the codebase outright. Anywhere below that lists Claude as an
+option, read it as historical (what was once planned) rather than current
+direction — the real plan is Gemini (built) + Ollama (not yet built), full
+stop.
 
 ---
 

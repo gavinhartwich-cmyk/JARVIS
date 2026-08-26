@@ -4,6 +4,12 @@
 **Time:** Built while you were at work  
 **Status:** Ready for hardware integration
 
+**Superseded 2026-08-26:** this doc's Claude/Zo references below are
+stale — `ZO_API_KEY` and the Claude provider have been removed from the
+codebase entirely; Gemini is the sole provider now. For current status,
+use `JARVIS-MASTER-ARCHITECTURE-UPDATED.md`'s ground-truth table instead
+of this doc.
+
 ---
 
 ## What's Done ✅
@@ -12,7 +18,7 @@
 - ✅ Multi-agent orchestration
 - ✅ PostgreSQL memory layer
 - ✅ Audit trail & verification tracking
-- ✅ Model-agnostic provider (Claude via Zo API)
+- ✅ Model-agnostic provider (Gemini — standalone, never Claude or Zo)
 - ✅ Vertical slice test proven working
 
 ### Phase 1: Smart Routing (Complete)
@@ -136,7 +142,7 @@ This will:
 4. Run a test task through the full pipeline
 5. Show confidence score and verification status
 
-(It will fail on the actual agent execution because ZO_API_KEY isn't set in Zo secrets yet, but everything else works.)
+(It will fail on the actual agent execution because `GEMINI_API_KEY` isn't set yet, but everything else works.)
 
 ---
 
@@ -232,9 +238,9 @@ JARVIS is:
    bun run db:push
    ```
 
-4. **Add Zo API Key**
-   - Settings > Advanced > Secrets
-   - Add: `ZO_API_KEY=<your_token>`
+4. **Add Gemini API Key**
+   - Free at https://aistudio.google.com/apikey
+   - Add to `.env`: `GEMINI_API_KEY=<your_key>`
 
 5. **Run Phase 2.1: Whisper**
    - Follow instructions in `PHASE-2-3-ROADMAP.md`
@@ -251,6 +257,6 @@ Go get your movie-grade JARVIS working. 🚀
 
 ---
 
-**Built with:** Bun, TypeScript, PostgreSQL, Claude, Zo  
+**Built with:** Bun, TypeScript, PostgreSQL, Gemini  
 **Cost:** $0  
 **Status:** Ready for the next phase

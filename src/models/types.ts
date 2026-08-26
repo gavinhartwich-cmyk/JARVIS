@@ -1,7 +1,8 @@
 /**
  * Model provider abstraction layer
- * Allows JARVIS to work with different model providers (Claude, local models, etc)
- * without depending on any single one.
+ * Allows JARVIS to work with different model providers (Gemini, Ollama/local, etc)
+ * without depending on any single one — and never on Claude or Zo, which
+ * this project is intentionally standalone from.
  */
 
 export interface ModelMessage {

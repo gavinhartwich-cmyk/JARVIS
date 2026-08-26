@@ -80,15 +80,15 @@ Create a `.env` file in the JARVIS root directory:
 
 ```
 DATABASE_URL=postgresql://jarvis:jarvis@localhost:5432/jarvis
-ZO_API_KEY=your_zo_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-**To get your Zo API key:**
+**To get your Gemini API key (free, no Zo/Claude/Anthropic account needed):**
 
-1. Sign in at https://ev0.zo.computer
-2. Go to Settings > Advanced
-3. Create an Access Token in the "Access Tokens" section
-4. Copy the token and paste it into `.env` as `ZO_API_KEY`
+1. Go to https://aistudio.google.com/apikey
+2. Sign in with any Google account
+3. Click "Create API key"
+4. Copy the key and paste it into `.env` as `GEMINI_API_KEY`
 
 ### 3. Install Dependencies & Create the Schema
 
@@ -142,9 +142,9 @@ You should see output like:
 
 ### Layer 1: Brain (Model Abstraction)
 
-JARVIS is model-agnostic. Currently using Claude via Zo API, but can swap in:
-- Local models (Ollama, llama.cpp)
-- Other providers (OpenAI, Anthropic direct, etc)
+JARVIS is model-agnostic, standalone, and never depends on Claude or Zo in any form. Currently using Gemini (Google's free tier, direct REST call), with room to swap in:
+- Local models (Ollama, llama.cpp) — planned, not yet built
+- Other providers, if ever wanted — but never as a required dependency
 
 ### Layer 2: Verification & Multi-Agent
 
@@ -201,7 +201,7 @@ JARVIS/
 │   │   └── agent.ts           # Base agent
 │   ├── models/
 │   │   ├── types.ts           # Model provider interface
-│   │   └── claude-provider.ts # Claude implementation
+│   │   └── gemini-provider.ts # Gemini implementation (sole active provider)
 │   ├── db/
 │   │   ├── schema.ts          # Drizzle schema
 │   │   └── client.ts          # Database connection
@@ -242,16 +242,16 @@ Error: database "jarvis" does not exist
 - Run the PostgreSQL setup commands in "Install PostgreSQL" section above
 - Verify: `psql -U postgres -l` should list "jarvis"
 
-### Zo API key not working
+### Gemini API key not working
 
 ```
-⚠ Claude provider not available
+⚠ Gemini provider not available. Check its API key env var is set.
 ```
 
 **Solution:**
-- Verify your `ZO_API_KEY` is set in `.env`
-- Get a new token from https://ev0.zo.computer > Settings > Advanced > Access Tokens
-- Ensure `DATABASE_URL` is correct (Zo API requires valid DB connection for Zo agent context)
+- Verify your `GEMINI_API_KEY` is set in `.env`
+- Get a new key (free) from https://aistudio.google.com/apikey
+- Ensure `DATABASE_URL` is correct — the vertical slice test needs a working Postgres connection independent of the model provider
 
 ## Development
 
@@ -276,7 +276,7 @@ bun run test:live
 - ✅ No paid cloud hosting required
 - ✅ No subscription dependencies
 - ✅ Runs entirely locally on Windows PC
-- ✅ Claude/Zo is optional — can be replaced with local models
+- ✅ Standalone — zero Claude, Anthropic, or Zo dependency anywhere in the codebase; Gemini's free tier is the only active cloud path, and local models (Ollama) are the planned $0-with-no-API-key path
 
 ## Project log
 
@@ -320,6 +320,23 @@ bun run test:live
   still needs `DATABASE_URL` and `ZO_API_KEY` added as Zo secrets (Settings
   > Advanced). Running it on an actual Windows PC instead/as well still
   works exactly as documented above if that's ever wanted.
+
+- **2026-08-26 — All Claude/Zo dependencies removed; project is now genuinely standalone.**
+  `src/models/claude-provider.ts` deleted outright (it made `ZO_API_KEY`
+  calls to `api.zo.computer/zo/ask`). `cli.ts` no longer imports or can
+  fall back to it — Gemini is the only provider, unconditionally.
+  `core/model-router.ts` had "claude"/`claude-haiku-4-5`/`claude-opus-5`
+  hardcoded into every routing tier even though nothing ever selected
+  Claude at runtime — replaced with Gemini throughout. `phase3/vision-system.ts`
+  had two near-duplicate vision-provider stubs, one named `ClaudeVisionProvider`
+  — merged into a single `GeminiVisionProvider` stub. Full-source grep for
+  `zo|claude|anthropic` now returns zero dependency references (only
+  explanatory comments stating the *absence* of a dependency). Confirmed
+  `bun run typecheck` and `bun run dev test` both still run clean afterward.
+  This README, the master architecture doc, and the active home-setup guides
+  were corrected to match — `ZO_API_KEY`/Anthropic-key setup steps replaced
+  with `GEMINI_API_KEY` (free at aistudio.google.com/apikey, no Zo or
+  Anthropic account needed).
 
 ---
 

@@ -21,7 +21,6 @@ export {
 
 export {
   VisionSystem,
-  ClaudeVisionProvider,
   GeminiVisionProvider,
   type VisualAnalysis,
   type VisionProvider,
@@ -65,7 +64,7 @@ export {
  *    - Text extraction (OCR)
  *    - Visual question answering
  *    - Image comparison
- *    - Provider-agnostic (Claude/Gemini ready)
+ *    - Vision via Gemini (same provider as text)
  *
  * 3. Context Routing
  *    - Query analysis

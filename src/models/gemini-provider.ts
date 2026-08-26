@@ -6,7 +6,7 @@ import { ModelProvider, ModelMessage, ModelResponse } from "./types";
  * aspirational: it's a second real path that doesn't depend on a Zo key.
  *
  * Free tier: aistudio.google.com/apikey. No SDK dependency — a raw fetch
- * call, same style as claude-provider.ts, to avoid adding a package.
+ * call, to avoid adding a package.
  *
  * NOTE: written and typechecked without a live API key to test against
  * (none available in this sandbox). The request/response shape matches

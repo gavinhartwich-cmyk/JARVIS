@@ -4,16 +4,16 @@
 **Status:** Phase 0 verified real. Everything else below was previously marked "complete" without ever being executed — corrected here after actually reading the source, not the prior status reports.  
 **Core Principle:** One persistent intelligence with multiple interfaces, devices, memories, and capabilities
 
-**Ground-truth status (verified by reading code — last updated 2026-08-26, after building Part 3):**
-- ✅ **Phase 0** — real. 5-agent orchestrator, memory, verification, audit trail. Proven end-to-end against live Postgres + Claude.
+**Ground-truth status (verified by reading code — last updated 2026-08-26, after removing all Claude/Zo dependencies):**
+- ✅ **Phase 0** — real. 5-agent orchestrator, memory, verification, audit trail. Originally proven end-to-end against live Postgres + Claude-via-Zo, before the standalone pivot; the code path that made that possible (`models/claude-provider.ts`, all `ZO_API_KEY`/`ClaudeProvider` wiring) has since been deleted outright. The system now runs on Gemini only — needs one fresh live run with a real `GEMINI_API_KEY` to reconfirm the vertical slice end-to-end on the new sole provider (not yet done in this pass; blocked on a live key).
 - ✅ **Phase 1.5 (Conversational Intelligence)** — real. Actually imported and called from `orchestrator.ts` (`processWithStreaming`, `completeTurn`, memory methods), not just sitting unused.
 - ✅ **Part 3 Foundational Subsystems** — real, built 2026-08-26. Presence & Device Awareness (`core/presence.ts`), Identity Recognition (`core/identity.ts`), Authorization Engine (`core/authorization.ts`, 4 levels), and Security Layer are wired into actual tool execution (`tools/manager.ts`, `phase3/screen-control.ts`) — not documentation, actually enforced: `bun run dev whoami` exercises the full chain. Computer Control (`phase3/windows-control.ts`) is real PowerShell/Win32 automation, but **unverified** — written and typechecked on a Linux sandbox that cannot run it; must be confirmed with `bun run dev control-test` on the actual Windows PC before it's trusted.
-- ✅ **Second LLM provider (Gemini)** — real (`models/gemini-provider.ts`), direct REST call to Google's API, no Zo dependency. Select with `JARVIS_PROVIDER=gemini`. Also unverified against a live key — needs `GEMINI_API_KEY` and a real run to confirm the model name/response shape still match Google's API.
+- ✅ **Sole LLM provider (Gemini)** — real (`models/gemini-provider.ts`), direct REST call to Google's API, zero Zo/Claude/Anthropic dependency anywhere in the codebase (confirmed by a full-source grep). Also unverified against a live key — needs `GEMINI_API_KEY` and a real run to confirm the model name/response shape still match Google's API.
 - ❌ **Phase 1 (JARVIS Developer)** — NOT real. `developer.ts`'s 10-agent pipeline has zero calls to any LLM provider; it's console.log simulation. `bun run dev phase1` doesn't even invoke it — prints a static status message and exits.
 - ❌ **Phase 2 (Voice)** — NOT real. `speech-recognizer.ts`, `speech-synthesizer.ts`, `wake-word-detector.ts` have zero external imports (no Whisper, no Piper, no wake-word library). No CLI command reaches any of it.
 - ⚠️ **Phase 3 (Vision/Screen)** — screen control is now real (see above); `GeminiVisionProvider` still throws "not yet implemented" on every method — vision itself (not control) remains unbuilt. No CLI command reaches vision or the rest of Perception.
 - ❌ **Phase 5 (Visual HUD)** — doesn't exist. No `desktop/` folder. Never got past a chat message.
-- ⚠️ **Provider-agnostic / $0-first** — closer to true. Claude via Zo (`ZO_API_KEY`) still works and is the default; Gemini (`GEMINI_API_KEY`, free tier) is now a real second path with zero Zo dependency. No Ollama/local model yet — that piece of "$0 without any API key at all" is still not built.
+- ✅ **Standalone / provider-agnostic / $0-first** — true now, not aspirational. Every Claude/Zo/Anthropic reference (`claude-provider.ts`, `ZO_API_KEY`, `ClaudeVisionProvider`, hardcoded `"claude"` entries in `model-router.ts`) has been removed from the codebase; Gemini (`GEMINI_API_KEY`, free tier) is the only active cloud path and does not touch Zo in any form. Ollama/local still isn't built — that's the remaining gap for "$0 without any API key at all," not a Claude/Zo remnant.
 
 ---
 
@@ -60,7 +60,7 @@ Every capability must have a free or local path.
 
 No LLM becomes "JARVIS."
 
-Claude, Gemini, local models, or future models are **providers** that JARVIS can use through a standardized interface.
+Gemini, Ollama/local models, or future models are **providers** that JARVIS can use through a standardized interface — never Claude or Zo, which this project is intentionally standalone from.
 
 Changing providers must not change JARVIS's behavior, memory, or identity.
 
@@ -1216,8 +1216,8 @@ Add to existing subsystems:
 | STT | Whisper / faster-whisper | Local, accurate, free |
 | TTS | Piper | Local, natural, free |
 | Wake word | openWakeWord | Local, efficient, free |
-| LLM (primary) | Claude (Anthropic) | During development |
-| LLM (local) | Llama 2 or similar | $0 fallback path |
+| LLM (primary) | Gemini (Google, free tier) | Standalone — zero Claude/Zo dependency |
+| LLM (local) | Ollama (Llama or similar) | $0 fallback path, not yet built |
 | Vision | Local model | When needed |
 | GUI | Tauri (future) | Native + web for desktop |
 

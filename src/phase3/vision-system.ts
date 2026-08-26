@@ -26,7 +26,8 @@ export interface VisionProvider {
  * Vision System
  *
  * Understands images and answers visual questions
- * Uses Claude/Gemini vision APIs
+ * Uses Gemini's multimodal API (same provider as text — no separate
+ * Claude/Zo dependency; this project is standalone).
  */
 export class VisionSystem {
   private provider?: VisionProvider;
@@ -38,8 +39,6 @@ export class VisionSystem {
 
   /**
    * Set vision provider
-   *
-   * Can be Claude, Gemini, or other vision API
    */
   setProvider(provider: VisionProvider) {
     this.provider = provider;
@@ -50,7 +49,7 @@ export class VisionSystem {
    * Analyze image
    *
    * In real implementation:
-   * - Send image to Claude/Gemini vision API
+   * - Send image to Gemini's vision API
    * - Get comprehensive analysis
    * - Extract objects, scenes, text
    */
@@ -229,64 +228,32 @@ export class VisionSystem {
 }
 
 /**
- * Claude Vision Provider (implementation template)
- *
- * Would be implemented when Claude API vision is connected
- */
-export class ClaudeVisionProvider implements VisionProvider {
-  async analyzeImage(imageBuffer: Buffer): Promise<VisualAnalysis> {
-    // Implementation: Call Claude vision API
-    // claude.messages.create({
-    //   model: "claude-3-5-sonnet-20241022",
-    //   max_tokens: 1024,
-    //   messages: [{
-    //     role: "user",
-    //     content: [{
-    //       type: "image",
-    //       source: { type: "base64", media_type: "image/png", data: imageBuffer.toString("base64") }
-    //     }, {
-    //       type: "text",
-    //       text: "Analyze this image. Describe what you see, list objects with confidence scores, identify scenes, and extract any text."
-    //     }]
-    //   }]
-    // })
-
-    throw new Error("Claude Vision Provider not yet implemented");
-  }
-
-  async answerQuestion(imageBuffer: Buffer, question: string): Promise<string> {
-    // Implementation: Call Claude vision API with question
-    throw new Error("Claude Vision Provider not yet implemented");
-  }
-
-  async detectObjects(
-    imageBuffer: Buffer
-  ): Promise<Array<{ label: string; confidence: number }>> {
-    // Implementation: Call Claude vision API
-    throw new Error("Claude Vision Provider not yet implemented");
-  }
-}
-
-/**
  * Gemini Vision Provider (implementation template)
  *
- * Would be implemented when Gemini API vision is connected
+ * Would be implemented when Gemini's vision API is wired in here — same
+ * generativelanguage.googleapis.com endpoint as src/models/gemini-provider.ts,
+ * just with an inline_data image part added to the request body.
  */
 export class GeminiVisionProvider implements VisionProvider {
   async analyzeImage(imageBuffer: Buffer): Promise<VisualAnalysis> {
-    // Implementation: Call Gemini vision API
+    // Implementation: POST to generativelanguage.googleapis.com with
+    // contents: [{ role: "user", parts: [
+    //   { inline_data: { mime_type: "image/png", data: imageBuffer.toString("base64") } },
+    //   { text: "Analyze this image. Describe what you see, list objects with confidence scores, identify scenes, and extract any text." }
+    // ]}]
+
     throw new Error("Gemini Vision Provider not yet implemented");
   }
 
   async answerQuestion(imageBuffer: Buffer, question: string): Promise<string> {
-    // Implementation: Call Gemini vision API with question
+    // Implementation: same endpoint, with `question` as the text part
     throw new Error("Gemini Vision Provider not yet implemented");
   }
 
   async detectObjects(
     imageBuffer: Buffer
   ): Promise<Array<{ label: string; confidence: number }>> {
-    // Implementation: Call Gemini vision API
+    // Implementation: same endpoint, object-detection-focused prompt
     throw new Error("Gemini Vision Provider not yet implemented");
   }
 }

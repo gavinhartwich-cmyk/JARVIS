@@ -14,7 +14,7 @@
 - ✅ Memory system that persists conversations and decisions
 - ✅ PostgreSQL database integration with Drizzle ORM
 - ✅ Audit trail of all actions
-- ✅ Provider abstraction (works with Claude, Gemini, local models)
+- ✅ Provider abstraction (Gemini today; Ollama/local planned — standalone, never Claude or Zo)
 - ✅ Verification pipeline (agents check each other's work)
 
 **What it does:** JARVIS can reason through complex problems by breaking them into tasks, assigning them to specialized agents, verifying the results, and remembering what happened.
@@ -68,7 +68,7 @@
    ```
 6. **Integrate Phase 1.5** (small code change in orchestrator)
 7. **Run tests** to verify everything works
-8. **Get API keys** (Claude, optionally Gemini)
+8. **Get API key** (Gemini — free, required; GitHub token optional for Phase 1 features)
 
 **Total time:** 2-3 hours first time
 
@@ -112,7 +112,7 @@ JARVIS/
 ### Before You Start
 - [ ] Have PostgreSQL installer ready
 - [ ] Have USB microphone ready (needed for Phase 2)
-- [ ] Have Claude API key ready (get from https://console.anthropic.com/)
+- [ ] Have Gemini API key ready (free, get from https://aistudio.google.com/apikey — no Claude/Anthropic/Zo account needed)
 - [ ] Have 2-3 hours available
 - [ ] No interruptions
 
@@ -160,10 +160,10 @@ JARVIS/
 - [ ] Should show Phase 1.5 is working ✓
 
 ### Section I: Add API Keys (5 min)
-- [ ] Get Claude API key
-- [ ] Add to `.env` as CLAUDE_API_KEY
-- [ ] Optionally get Gemini and GitHub keys
-- [ ] Test with `bun run dev test:providers`
+- [ ] Get Gemini API key (required, free)
+- [ ] Add to `.env` as GEMINI_API_KEY
+- [ ] Optionally get a GitHub token for Phase 1 features
+- [ ] Test with `bun run dev test`
 
 ### Section J: Full Test (20 min)
 - [ ] Run `bun run dev full-test`
@@ -219,7 +219,7 @@ You'll add:
 ## KEY ARCHITECTURAL PRINCIPLES TO REMEMBER
 
 1. **JARVIS is not one LLM**
-   - It can use Claude, Gemini, local models interchangeably
+   - It uses Gemini today, with Ollama/local planned — never Claude or Zo
    - Changing providers doesn't break JARVIS
 
 2. **JARVIS has persistent memory**

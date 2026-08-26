@@ -2,7 +2,6 @@ import { initializeDatabase, closeDatabase } from "./db/client";
 import { Orchestrator } from "./core/orchestrator";
 import { BaseAgent } from "./agents/agent";
 import { AGENT_ROLES } from "./agents/types";
-import { ClaudeProvider } from "./models/claude-provider";
 import { GeminiProvider } from "./models/gemini-provider";
 import type { ModelProvider } from "./models/types";
 import { toolManager } from "./tools/manager";
@@ -43,14 +42,14 @@ async function main() {
 
   try {
     // Initialize model provider — provider-agnostic per invariant #3.
-    // Defaults to Gemini (free, zero Zo dependency) since that's the $0-first,
-    // local-first path this project is actually supposed to run on.
-    // JARVIS_PROVIDER=claude switches to Claude-via-Zo if you ever want it
-    // (e.g. higher-quality reasoning during dev), but it's opt-in, not default.
-    const providerName = (process.env.JARVIS_PROVIDER || "gemini").toLowerCase();
+    // Gemini is the only wired-up cloud provider: free tier, direct to
+    // Google, zero dependency on Claude/Anthropic/Zo (this project is
+    // standalone — it does not run through or depend on Zo in any form).
+    // Ollama/local is the planned $0-with-no-API-key-at-all path but isn't
+    // implemented yet — see JARVIS-MASTER-ARCHITECTURE-UPDATED.md status table.
+    const providerName = "gemini";
     console.log(`🧠 Initializing model provider (${providerName})...`);
-    const modelProvider: ModelProvider =
-      providerName === "gemini" ? new GeminiProvider() : new ClaudeProvider();
+    const modelProvider: ModelProvider = new GeminiProvider();
 
     // Initialize tools
     console.log("🔧 Initializing tools...");
@@ -84,7 +83,7 @@ async function main() {
         roleConfig.instructions,
         {
           provider: modelProvider.name,
-          model: providerName === "gemini" ? (process.env.GEMINI_MODEL || "gemini-3.6-flash") : "claude-haiku-4-5",
+          model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
           temperature: 0.7,
           maxTokens: 2000,
         },
@@ -152,11 +151,7 @@ async function main() {
         console.error(error instanceof Error ? error.message : String(error));
         console.error("\nDebugging info:");
         console.error("  - Check that PostgreSQL is running");
-        console.error(
-          providerName === "gemini"
-            ? "  - Check that GEMINI_API_KEY is set and valid (aistudio.google.com/apikey)"
-            : "  - Check that ZO_API_KEY is set (Settings > Advanced > Access Tokens)"
-        );
+        console.error("  - Check that GEMINI_API_KEY is set and valid (aistudio.google.com/apikey)");
         console.error("  - Check database schema was created (bun run db:push)");
       }
     } else if (command === "phase1" || command === "developer") {

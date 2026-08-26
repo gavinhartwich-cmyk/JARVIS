@@ -58,7 +58,7 @@ export const agentRuns = pgTable("agent_runs", {
   status: agentStatusEnum("status").default("pending"),
   input: jsonb("input").notNull(),
   output: jsonb("output"),
-  modelProvider: varchar("model_provider", { length: 255 }).notNull(), // claude, local-model, etc
+  modelProvider: varchar("model_provider", { length: 255 }).notNull(), // gemini, ollama, etc
   modelName: varchar("model_name", { length: 255 }).notNull(),
   confidence: numeric("confidence", { precision: 3, scale: 2 }).default("0.00"),
   verificationStatus: verificationStatusEnum("verification_status").default("unverified"),

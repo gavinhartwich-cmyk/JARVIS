@@ -178,8 +178,8 @@ In the JARVIS folder, create `.env` file:
 # Database
 DATABASE_URL="postgresql://postgres:YOUR_PASSWORD@localhost:5432/jarvis"
 
-# LLM Providers
-CLAUDE_API_KEY="your-anthropic-key-here"
+# LLM Provider — Gemini is the only one JARVIS uses. Standalone project:
+# no Claude, no Anthropic key, no Zo account, ever.
 GEMINI_API_KEY="your-google-key-here"
 
 # Hardware
@@ -188,13 +188,12 @@ CAMERA_DEVICE="default"
 SPEAKER_DEVICE="default"
 
 # Settings
-JARVIS_PROVIDER="auto"
 LOG_LEVEL="info"
 ```
 
 **Replace:**
 - `YOUR_PASSWORD` = postgres password you set
-- Leave API keys empty for now (we'll add them later)
+- Leave `GEMINI_API_KEY` empty for now (Section I covers getting it — free, from aistudio.google.com, no account beyond a Google login)
 - Hardware devices can stay "default" for now
 
 ### Step D.4: Initialize Database Schema
@@ -253,28 +252,12 @@ Create `config/hardware.json`:
 
 ### Step E.3: Provider Config
 
-Create `config/providers.json`:
-
-```json
-{
-  "defaultProvider": "auto",
-  "providers": {
-    "claude": {
-      "enabled": true,
-      "model": "claude-opus-5"
-    },
-    "gemini": {
-      "enabled": false,
-      "model": "gemini-2.0-flash"
-    },
-    "ollama": {
-      "enabled": false,
-      "baseUrl": "http://localhost:11434",
-      "model": "llama2"
-    }
-  }
-}
-```
+**Correction:** there is no `config/providers.json` — the code never reads
+one. Provider selection is entirely env-driven: `GEMINI_API_KEY` (and
+optionally `GEMINI_MODEL`, default `gemini-3.6-flash`) in `.env`, set in
+Step D.3. Gemini is the only provider JARVIS uses; there's nothing to
+configure here beyond that key. (Ollama/local is planned but has no
+provider implementation yet — nothing to enable today.)
 
 ### Step E.4: JARVIS Identity Config
 
@@ -496,18 +479,14 @@ If you see this, Phase 1.5 is working ✓
 
 ## SECTION I: API Keys Setup (20 minutes)
 
-### Step I.1: Get Claude API Key (Required for Phases 0-1.5)
+### Step I.1: (Removed) — this project never uses Claude or an Anthropic key
 
-1. Go to: https://console.anthropic.com/
-2. Sign in with your account
-3. Create new API key
-4. Copy it
-5. In your `.env` file, set:
-   ```
-   CLAUDE_API_KEY="sk-ant-..."
-   ```
+An earlier version of this guide told you to sign up at
+console.anthropic.com for a `CLAUDE_API_KEY`. That was wrong — JARVIS is
+standalone and has never depended on Claude, Anthropic, or Zo in any form.
+There's nothing to do here; go straight to Step I.2.
 
-### Step I.2: Get Gemini API Key (Optional, Free Tier)
+### Step I.2: Get Gemini API Key (Required — this is the only provider)
 
 1. Go to: https://makersuite.google.com/app/apikey
 2. Create new API key (free)
@@ -531,18 +510,18 @@ If you see this, Phase 1.5 is working ✓
 ### Step I.4: Verify API Keys Work
 
 ```powershell
-bun run dev test:providers
+bun run dev test
 ```
 
-Should show:
+Look for this line near the top:
 
 ```
-✓ Claude provider: OK
-✓ Gemini provider: (not configured)
-✓ Ollama provider: (not running)
+🧠 Initializing model provider (gemini)...
 ```
 
-If Claude shows OK, you're good.
+If it's followed by a warning (`Gemini provider initialized without API
+key`), the key isn't picked up — double check `GEMINI_API_KEY` in `.env`.
+If there's no warning, the key is loaded correctly.
 
 ---
 
@@ -649,8 +628,8 @@ After completing all sections, verify:
 
 ### Core Systems
 - [ ] PostgreSQL is running and `jarvis` database exists
-- [ ] `.env` file has DATABASE_URL and CLAUDE_API_KEY set
-- [ ] `config/` folder has hardware.json, providers.json, identity.json
+- [ ] `.env` file has DATABASE_URL and GEMINI_API_KEY set
+- [ ] `config/` folder has hardware.json, identity.json (no providers.json — provider config is env-only, see Section E.3)
 - [ ] `bun run typecheck` shows no errors
 
 ### Phase 0

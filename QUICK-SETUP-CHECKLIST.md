@@ -2,6 +2,17 @@
 
 **Print this and check off as you go**
 
+**Known issue (2026-08-26):** several commands referenced below
+(`phase0:test`, `phase1:test`, `phase1.5:test`, `full-test`,
+`test:providers`, `test:db`, `conversation`, `task`, `phase2:test-stt`,
+`phase2:test-tts`) don't exist in `cli.ts` — the real commands are
+`bun run dev`, `bun run dev test`, `bun run dev phase1`, `bun run dev
+whoami`, and `bun run dev control-test`. This checklist needs a fuller
+pass to match the real CLI; today's fix only corrected the Claude/Zo
+references (below), which were also wrong. Use `README.md` and
+`SETUP-AT-HOME.md` Section I.4 for verified-accurate commands in the
+meantime.
+
 ---
 
 ## QUICK REFERENCE COMMANDS
@@ -44,15 +55,16 @@ Save as `.env` in JARVIS root folder:
 
 ```
 DATABASE_URL="postgresql://postgres:YOUR_PASSWORD@localhost:5432/jarvis"
-CLAUDE_API_KEY="sk-ant-..."
 GEMINI_API_KEY="AIzaSy..."
 GITHUB_TOKEN="ghp_..."
-JARVIS_PROVIDER="auto"
 LOG_LEVEL="info"
 MICROPHONE_DEVICE="default"
 CAMERA_DEVICE="default"
 SPEAKER_DEVICE="default"
 ```
+
+No `CLAUDE_API_KEY` and no `JARVIS_PROVIDER` — JARVIS is standalone (never
+Claude/Anthropic/Zo) and Gemini is the only, unconditional provider.
 
 ---
 
@@ -79,25 +91,11 @@ SPEAKER_DEVICE="default"
 }
 ```
 
-### config/providers.json
-```json
-{
-  "defaultProvider": "auto",
-  "providers": {
-    "claude": {
-      "enabled": true,
-      "model": "claude-opus-5"
-    },
-    "gemini": {
-      "enabled": false
-    },
-    "ollama": {
-      "enabled": false,
-      "baseUrl": "http://localhost:11434"
-    }
-  }
-}
-```
+### config/providers.json — doesn't exist, skip this
+
+The code doesn't read a `config/providers.json` file at all — provider
+config is just the `GEMINI_API_KEY` env var above. There's no Claude entry
+to configure because Claude was never a real code path.
 
 ### config/identity.json
 ```json
@@ -142,8 +140,7 @@ SPEAKER_DEVICE="default"
 
 ### ✓ Section E: Configuration
 - [ ] Created `config/hardware.json`
-- [ ] Created `config/providers.json`
-- [ ] Created `config/identity.json`
+- [ ] Created `config/identity.json` (no `config/providers.json` — see above)
 
 ### ✓ Section F: Phase 0 Test
 - [ ] Run `bun run test`
@@ -164,11 +161,9 @@ SPEAKER_DEVICE="default"
 - [ ] Phase 1.5 shows as working
 
 ### ✓ Section I: API Keys
-- [ ] Added CLAUDE_API_KEY to `.env`
-- [ ] Optionally added GEMINI_API_KEY
+- [ ] Added GEMINI_API_KEY to `.env` (required — the only provider)
 - [ ] Added GITHUB_TOKEN for Phase 1 features
-- [ ] Run `bun run dev test:providers`
-- [ ] Claude shows as OK
+- [ ] Run `bun run dev test` and confirm no "Gemini provider not available" warning
 
 ### ✓ Section J: Full Integration Test
 - [ ] Run `bun run dev full-test`

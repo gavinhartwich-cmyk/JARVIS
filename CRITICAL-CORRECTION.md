@@ -4,6 +4,14 @@
 **Status:** CORRECTED  
 **Severity:** Critical architectural fix
 
+**Further correction, 2026-08-26:** this doc still treated Claude/Zo as an
+acceptable optional fallback ("may be used during development because
+access already exists") — that was also wrong. This project is standalone
+and must never depend on Claude, Anthropic, or Zo, including during
+development. `src/models/claude-provider.ts` has been deleted from the
+codebase; every `ZO_API_KEY`/`ClaudeProvider` reference below is
+historical, not current direction.
+
 ---
 
 ## WHAT I GOT WRONG

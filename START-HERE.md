@@ -2,6 +2,16 @@
 
 **You have 3 hours at home to set this up. Here's your path.**
 
+**Known issue (2026-08-26):** this doc's Phase 1 "✅" claim (coding,
+self-improvement) and several commands (`phase0:test`, `full-test`,
+`conversation`, `task "..."`, etc.) don't match reality — see
+`JARVIS-MASTER-ARCHITECTURE-UPDATED.md`'s ground-truth status table for
+what's actually real (short version: Phase 0 and the Phase 1.5 core wiring
+are real; Phase 1's "JARVIS Developer" pipeline is not — it's console.log
+simulation with zero LLM calls). Today's fix only corrected this doc's
+Claude/Zo references, which were also wrong (see below) — a fuller
+accuracy pass on the rest is still needed.
+
 ---
 
 ## READ THESE IN ORDER
@@ -37,7 +47,7 @@ OUTCOME: Conversational JARVIS ready to go
 
 ✓ PostgreSQL 16 or newer (download if needed)  
 ✓ USB microphone (optional but recommended)  
-✓ Claude API key (get from https://console.anthropic.com/)  
+✓ Gemini API key (free, get from https://aistudio.google.com/apikey — no Claude/Anthropic/Zo account needed, this project is standalone)  
 ✓ 2-3 hours uninterrupted time  
 ✓ Admin access to your PC  
 
@@ -114,17 +124,11 @@ All go in `config/` folder at project root.
 }
 ```
 
-### 2. config/providers.json
-```json
-{
-  "defaultProvider": "auto",
-  "providers": {
-    "claude": {"enabled": true, "model": "claude-opus-5"},
-    "gemini": {"enabled": false},
-    "ollama": {"enabled": false}
-  }
-}
-```
+### 2. config/providers.json — doesn't exist, skip it
+
+The code never reads a `config/providers.json` file. Provider config is
+just `GEMINI_API_KEY` in `.env` below — Gemini is the only provider,
+unconditionally, with zero Claude/Zo dependency.
 
 ### 3. config/identity.json
 ```json
@@ -148,10 +152,8 @@ Save as `.env` in project root (DO NOT COMMIT THIS):
 
 ```
 DATABASE_URL="postgresql://postgres:YOUR_PASSWORD@localhost:5432/jarvis"
-CLAUDE_API_KEY="sk-ant-..."
 GEMINI_API_KEY=""
 GITHUB_TOKEN=""
-JARVIS_PROVIDER="auto"
 LOG_LEVEL="info"
 ```
 
@@ -356,7 +358,7 @@ All you need to do is:
 - [ ] Read START-HERE.md (this file)
 - [ ] Read HOME-SETUP-SUMMARY.md
 - [ ] Have PostgreSQL ready (or installed)
-- [ ] Have Claude API key ready
+- [ ] Have Gemini API key ready (free, aistudio.google.com/apikey)
 - [ ] Have 2-3 hours available
 - [ ] Print QUICK-SETUP-CHECKLIST.md
 - [ ] Open SETUP-AT-HOME.md on your screen

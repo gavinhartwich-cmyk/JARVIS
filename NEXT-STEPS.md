@@ -4,6 +4,13 @@
 **Next:** Begin Week 1 - LLM Integration  
 **Timeline:** 4 weeks to full Phase 1  
 
+**2026-08-26 correction:** every plan below that keeps Claude as an
+"optional paid" provider is superseded — this project is standalone and
+must never depend on Claude, Anthropic, or Zo, not even as an opt-in
+extra. `src/models/claude-provider.ts` has been deleted from the codebase.
+Treat all "Claude" mentions below as historical planning, not current
+direction — the real plan is Gemini (built) + Ollama (not yet built).
+
 ---
 
 ## QUICK REFERENCE
