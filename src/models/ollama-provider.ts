@@ -58,28 +58,29 @@ export class OllamaProvider implements ModelProvider {
     }
   }
 
-  async complete(
-    messages: ModelMessage[],
-    options?: {
-      temperature?: number;
-      maxTokens?: number;
-      systemPrompt?: string;
-    }
-  ): Promise<ModelResponse> {
-    const systemText = options?.systemPrompt ?? messages.find((m) => m.role === "system")?.content;
-    const structuredSystemText =
-      (systemText ? systemText + "\n\n" : "") +
-      "Respond with a JSON object matching the given schema: `content` holds your " +
-      "full answer (markdown is fine inside the string), and `confidence` is your " +
-      "genuine self-assessed confidence in that answer, from 0.0 to 1.0.";
-
-    const chatMessages = [
-      { role: "system", content: structuredSystemText },
-      ...messages
-        .filter((m) => m.role !== "system")
-        .map((m) => ({ role: m.role, content: m.content })),
-    ];
-
+  /**
+   * Real bug found via a live end-to-end run (not just typecheck): with
+   * `qwen2.5-coder:1.5b` at temperature 0.7, this small model occasionally
+   * rambles in its `content` field long enough to hit `num_predict` before
+   * closing the JSON object. Ollama's `format` schema constrains *valid*
+   * tokens but can't force completion within a hard token cutoff, so the
+   * result is truncated, invalid JSON — confirmed via the audit log of a
+   * real run: `done_reason: "length"`, `eval_count` pinned at the
+   * `num_predict` ceiling, `JSON.parse` throwing. That used to silently
+   * fall through to a hardcoded 70% confidence (the exact "fake-looking
+   * score" bug this codebase has fixed once already for Gemini). Now it
+   * retries once with a larger token budget before giving up honestly.
+   */
+  private async requestOnce(
+    chatMessages: Array<{ role: string; content: string }>,
+    temperature: number,
+    numPredict: number
+  ): Promise<{
+    rawText: string;
+    doneReason?: string;
+    promptEvalCount: number;
+    evalCount: number;
+  }> {
     const body = {
       model: this.model,
       messages: chatMessages,
@@ -93,8 +94,8 @@ export class OllamaProvider implements ModelProvider {
         required: ["content", "confidence"],
       },
       options: {
-        temperature: options?.temperature ?? 0.7,
-        num_predict: options?.maxTokens ?? 2000,
+        temperature,
+        num_predict: numPredict,
       },
     };
 
@@ -124,31 +125,82 @@ export class OllamaProvider implements ModelProvider {
       eval_count?: number;
     };
 
-    const rawText = data.message?.content ?? "";
-    if (!rawText) {
-      throw new Error(
-        `Ollama returned no content (done_reason: ${data.done_reason ?? "unknown"}).`
-      );
+    return {
+      rawText: data.message?.content ?? "",
+      doneReason: data.done_reason,
+      promptEvalCount: data.prompt_eval_count ?? 0,
+      evalCount: data.eval_count ?? 0,
+    };
+  }
+
+  async complete(
+    messages: ModelMessage[],
+    options?: {
+      temperature?: number;
+      maxTokens?: number;
+      systemPrompt?: string;
+    }
+  ): Promise<ModelResponse> {
+    const systemText = options?.systemPrompt ?? messages.find((m) => m.role === "system")?.content;
+    const structuredSystemText =
+      (systemText ? systemText + "\n\n" : "") +
+      "Respond with a JSON object matching the given schema: `content` holds your " +
+      "full answer (markdown is fine inside the string), and `confidence` is your " +
+      "genuine self-assessed confidence in that answer, from 0.0 to 1.0. Keep " +
+      "`content` focused — do not pad it with repetition.";
+
+    const chatMessages = [
+      { role: "system", content: structuredSystemText },
+      ...messages
+        .filter((m) => m.role !== "system")
+        .map((m) => ({ role: m.role, content: m.content })),
+    ];
+
+    const temperature = options?.temperature ?? 0.7;
+    const baseTokens = options?.maxTokens ?? 2000;
+
+    let result = await this.requestOnce(chatMessages, temperature, baseTokens);
+
+    let parsed: { content?: string; confidence?: number } | undefined;
+    try {
+      parsed = JSON.parse(result.rawText);
+    } catch {
+      parsed = undefined;
+    }
+
+    // Truncated mid-JSON and it's cheap to try again with more headroom —
+    // do that once before falling back, rather than reporting a fake score.
+    if (!parsed && result.doneReason === "length") {
+      const retryTokens = Math.min(baseTokens * 2, 6000);
+      result = await this.requestOnce(chatMessages, temperature, retryTokens);
+      try {
+        parsed = JSON.parse(result.rawText);
+      } catch {
+        parsed = undefined;
+      }
+    }
+
+    if (!result.rawText) {
+      throw new Error(`Ollama returned no content (done_reason: ${result.doneReason ?? "unknown"}).`);
     }
 
     let content: string;
     let confidence: number | undefined;
-    try {
-      const parsed = JSON.parse(rawText) as { content?: string; confidence?: number };
-      content = parsed.content ?? rawText;
+    if (parsed) {
+      content = parsed.content ?? result.rawText;
       confidence =
         typeof parsed.confidence === "number" ? Math.min(Math.max(parsed.confidence, 0), 1) : undefined;
-    } catch {
+    } else {
       // A 1.5B model is far more likely than Gemini to occasionally break
-      // the schema — fall back to the raw text rather than throw, same as
-      // GeminiProvider's fallback path.
-      content = rawText;
+      // the schema even after the retry above — fall back to the raw text
+      // rather than throw, same as GeminiProvider's fallback path.
+      content = result.rawText;
       confidence = undefined;
     }
 
     return {
       content,
-      tokensUsed: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0),
+      tokensUsed: result.promptEvalCount + result.evalCount,
       provider: "ollama",
       model: this.model,
       confidence,
