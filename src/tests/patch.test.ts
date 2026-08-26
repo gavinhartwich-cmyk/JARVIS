@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { findDisallowedImports } from "../phase1/patch";
+import { findDisallowedImports, parseFileBlocks } from "../phase1/patch";
 
 describe("findDisallowedImports", () => {
   const allowed = new Set(["fs", "path", "uuid", "pg"]);
@@ -37,5 +37,33 @@ describe("findDisallowedImports", () => {
     const errors = findDisallowedImports(files, allowed);
     expect(errors.length).toBe(1);
     expect(errors[0]).toContain("express");
+  });
+});
+
+describe("parseFileBlocks", () => {
+  test("parses a plain ===FILE=== block", () => {
+    const text = `===FILE: src/a.ts===\nexport const x = 1;\n===END FILE===`;
+    const blocks = parseFileBlocks(text);
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].path).toBe("src/a.ts");
+    expect(blocks[0].content).toBe("export const x = 1;");
+  });
+
+  test("unwraps a response the model wrapped in an extra JSON content envelope", () => {
+    const inner = "===FILE: src/a.ts===\nexport const x = 1;\n===END FILE===";
+    const wrapped = JSON.stringify({ content: inner, confidence: 0.9 });
+    const blocks = parseFileBlocks(wrapped);
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].path).toBe("src/a.ts");
+    expect(blocks[0].content).toBe("export const x = 1;");
+  });
+
+  test("unwraps two levels of nested JSON content envelopes", () => {
+    const inner = "===FILE: src/a.ts===\nexport const x = 1;\n===END FILE===";
+    const wrappedOnce = JSON.stringify({ content: inner });
+    const wrappedTwice = JSON.stringify({ content: wrappedOnce, confidence: 0.5 });
+    const blocks = parseFileBlocks(wrappedTwice);
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].path).toBe("src/a.ts");
   });
 });

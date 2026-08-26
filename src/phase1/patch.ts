@@ -26,12 +26,37 @@ export interface FileBlock {
 
 const FILE_BLOCK_RE = /===FILE:\s*(.+?)\s*===\r?\n([\s\S]*?)\r?\n===END FILE===/g;
 
+/**
+ * Small local models asked for structured JSON (`{content, confidence}`)
+ * sometimes get confused between that outer envelope and the ===FILE===
+ * block format they're also required to produce, and echo an extra JSON
+ * layer inside `content` instead of the raw block text directly — e.g.
+ * `content` itself is the string `{"content": "===FILE: ...===\n..."}`.
+ * Unwrap that (recursively, in case it happens more than once) before
+ * regex-parsing so a confused-but-recoverable response isn't treated as
+ * "no file block found".
+ */
+function unwrapNestedContent(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return text;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed.content === "string") {
+      return unwrapNestedContent(parsed.content);
+    }
+  } catch {
+    // Not valid JSON — treat as plain text.
+  }
+  return text;
+}
+
 export function parseFileBlocks(text: string): FileBlock[] {
+  const unwrapped = unwrapNestedContent(text);
   const blocks: FileBlock[] = [];
   let match: RegExpExecArray | null;
   // Reset lastIndex in case the same regex object is reused across calls.
   FILE_BLOCK_RE.lastIndex = 0;
-  while ((match = FILE_BLOCK_RE.exec(text)) !== null) {
+  while ((match = FILE_BLOCK_RE.exec(unwrapped)) !== null) {
     const filePath = match[1].trim();
     const content = match[2];
     if (filePath) {

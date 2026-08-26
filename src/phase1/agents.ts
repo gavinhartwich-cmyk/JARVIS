@@ -124,11 +124,17 @@ Scope discipline — only touch files this requirement actually needs:
   replace it with a minimal version from memory.
 - When in doubt about whether a file needs a block, leave it out.
 
-Test runtime: this project uses Bun's built-in test runner, not Jest or
-Mocha. If you write a test file, it MUST start with
-\`import { describe, expect, test } from "bun:test";\` (Bun's runner names
-the test function \`test\`, not \`it\`) — \`describe\`/\`it\`/\`expect\` are
-NOT ambient globals here and will fail to typecheck without that import.
+Test runtime: this project uses Bun's built-in test runner, not Jest,
+Mocha, or Chai. If you write a test file:
+- It MUST import every name it uses from "bun:test" —
+  \`import { describe, test, expect } from "bun:test";\` (or \`it\`, an
+  alias of \`test\`, if you prefer that name — but then import \`it\`, not
+  \`test\`). None of these are ambient globals here.
+- Assertions use Jest-style matcher methods directly on \`expect(...)\`:
+  \`expect(value).toBe(expected)\`, \`.toEqual(expected)\`,
+  \`.toBeTruthy()\`, etc. NEVER use Chai's \`.to.equal(...)\` /
+  \`.to.be...\` chain syntax — bun:test's \`expect\` does not have a
+  \`.to\` property and this will fail to typecheck.
 
 Output format:
 - File: Path to create/modify
@@ -242,11 +248,15 @@ project configuration files (package.json, tsconfig.json, jest.config.js,
 tslint.json, prettier.config.js, .gitignore, README.md, etc.) as a side
 effect of fixing an unrelated bug.
 
-Test runtime: this project uses Bun's built-in test runner, not Jest or
-Mocha. A test file must import \`describe\`/\`expect\`/\`test\` from
-"bun:test" — they are not ambient globals. If a failure is exactly this
-(missing name 'describe'/'it'/'expect'), the fix is adding that import,
-not installing @types/jest or @types/mocha.
+Test runtime: this project uses Bun's built-in test runner, not Jest,
+Mocha, or Chai. A test file must import every name it uses —
+\`describe\`/\`test\`/\`it\`/\`expect\` — from "bun:test"; they are not
+ambient globals. If a failure is "Cannot find name 'describe'/'it'/'test'/
+'expect'", the fix is adding that name to the "bun:test" import, not
+installing @types/jest or @types/mocha. If a failure is "Property 'to'
+does not exist" on an \`expect(...)\` result, the code is using Chai's
+\`.to.equal(...)\` chain syntax by mistake — rewrite it as bun:test's
+Jest-style \`expect(value).toBe(expected)\` / \`.toEqual(expected)\`.
 
 Output format:
 - Issue: Description of the problem
