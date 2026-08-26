@@ -43,9 +43,11 @@ async function main() {
 
   try {
     // Initialize model provider — provider-agnostic per invariant #3.
-    // JARVIS_PROVIDER=gemini switches to Gemini's free tier (no Zo dependency);
-    // default stays Claude via Zo since that's what's been tested against live.
-    const providerName = (process.env.JARVIS_PROVIDER || "claude").toLowerCase();
+    // Defaults to Gemini (free, zero Zo dependency) since that's the $0-first,
+    // local-first path this project is actually supposed to run on.
+    // JARVIS_PROVIDER=claude switches to Claude-via-Zo if you ever want it
+    // (e.g. higher-quality reasoning during dev), but it's opt-in, not default.
+    const providerName = (process.env.JARVIS_PROVIDER || "gemini").toLowerCase();
     console.log(`🧠 Initializing model provider (${providerName})...`);
     const modelProvider: ModelProvider =
       providerName === "gemini" ? new GeminiProvider() : new ClaudeProvider();
