@@ -84,7 +84,7 @@ async function main() {
         roleConfig.instructions,
         {
           provider: modelProvider.name,
-          model: providerName === "gemini" ? (process.env.GEMINI_MODEL || "gemini-2.0-flash") : "claude-haiku-4-5",
+          model: providerName === "gemini" ? (process.env.GEMINI_MODEL || "gemini-3.6-flash") : "claude-haiku-4-5",
           temperature: 0.7,
           maxTokens: 2000,
         },
