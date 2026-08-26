@@ -71,13 +71,28 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
 
       const duration = Date.now() - startTime;
 
-      // Parse confidence from response (look for "confidence: X" or "confidence X%")
-      let confidence = 0.7;
-      const confidenceMatch = response.content.match(/confidence[:\s]+([0-9.]+)/i);
-      if (confidenceMatch) {
-        let val = parseFloat(confidenceMatch[1]);
-        if (val > 1) val = val / 100; // Handle percentages
-        confidence = Math.min(Math.max(val, 0), 1);
+      // Confidence should come from the provider's structured output
+      // (real, model-reported). Regex-parsing prose is a fallback for a
+      // provider that doesn't support structured output, not the primary
+      // path — that's what silently produced identical fake-looking 70%
+      // scores across every agent before this was fixed.
+      let confidence: number;
+      let confidenceSource: string;
+      if (typeof response.confidence === "number") {
+        confidence = response.confidence;
+        confidenceSource = "provider (structured output)";
+      } else {
+        const confidenceMatch = response.content.match(/confidence[:\s]+([0-9.]+)/i);
+        if (confidenceMatch) {
+          let val = parseFloat(confidenceMatch[1]);
+          if (val > 1) val = val / 100; // Handle percentages
+          confidence = Math.min(Math.max(val, 0), 1);
+          confidenceSource = "regex fallback (parsed from prose)";
+        } else {
+          confidence = 0.7;
+          confidenceSource = "hardcoded fallback — provider gave no structured confidence and prose parsing failed";
+          console.warn(`   ⚠️  ${this.name}: ${confidenceSource}. This is not a real score.`);
+        }
       }
 
       const output: AgentOutput = {
@@ -98,6 +113,7 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
         result: {
           agentName: this.name,
           confidence,
+          confidenceSource,
           tokensUsed: response.tokensUsed,
           duration,
         },

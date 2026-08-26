@@ -74,6 +74,11 @@ export class ClaudeProvider implements ModelProvider {
       }
     }
 
+    prompt +=
+      "Respond with a JSON object matching the given schema: `content` holds your " +
+      "full answer (markdown is fine inside the string), and `confidence` is your " +
+      "genuine self-assessed confidence in that answer, from 0.0 to 1.0.";
+
     const response = await fetch(`${this.baseUrl}/zo/ask`, {
       method: "POST",
       headers: {
@@ -83,6 +88,14 @@ export class ClaudeProvider implements ModelProvider {
       body: JSON.stringify({
         input: prompt,
         model_name: "byok:f7a8a82a-01c3-4bd5-bed4-88361685d27f",
+        output_format: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            confidence: { type: "number" },
+          },
+          required: ["content", "confidence"],
+        },
       }),
     });
 
@@ -93,15 +106,30 @@ export class ClaudeProvider implements ModelProvider {
     }
 
     const data = (await response.json()) as {
-      output: string;
+      output: string | { content?: string; confidence?: number };
       tokens_used?: number;
     };
 
+    let content: string;
+    let confidence: number | undefined;
+    if (typeof data.output === "string") {
+      // output_format wasn't honored for some reason — degrade gracefully.
+      content = data.output;
+      confidence = undefined;
+    } else {
+      content = data.output.content ?? "";
+      confidence =
+        typeof data.output.confidence === "number"
+          ? Math.min(Math.max(data.output.confidence, 0), 1)
+          : undefined;
+    }
+
     return {
-      content: data.output,
+      content,
       tokensUsed: data.tokens_used || 0,
       provider: "claude",
       model: "claude-haiku-4-5",
+      confidence,
     };
   }
 }

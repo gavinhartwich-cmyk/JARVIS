@@ -79,17 +79,31 @@ export class GeminiProvider implements ModelProvider {
       }));
 
     const systemText = options?.systemPrompt ?? messages.find((m) => m.role === "system")?.content;
+    // Structured system instruction telling the model exactly what to
+    // return, on top of whatever the caller's own system prompt says.
+    const structuredSystemText =
+      (systemText ? systemText + "\n\n" : "") +
+      "Respond with a JSON object matching the given schema: `content` holds your " +
+      "full answer (markdown is fine inside the string), and `confidence` is your " +
+      "genuine self-assessed confidence in that answer, from 0.0 to 1.0.";
 
     const body: Record<string, unknown> = {
       contents,
       generationConfig: {
         temperature: options?.temperature ?? 0.7,
         maxOutputTokens: options?.maxTokens ?? 2000,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            content: { type: "STRING" },
+            confidence: { type: "NUMBER" },
+          },
+          required: ["content", "confidence"],
+        },
       },
+      systemInstruction: { parts: [{ text: structuredSystemText }] },
     };
-    if (systemText) {
-      body.systemInstruction = { parts: [{ text: systemText }] };
-    }
 
     const response = await fetch(this.endpoint(), {
       method: "POST",
@@ -107,12 +121,26 @@ export class GeminiProvider implements ModelProvider {
       usageMetadata?: { totalTokenCount?: number };
     };
 
-    const content = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
-    if (!content) {
+    const rawText = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+    if (!rawText) {
       const finishReason = data.candidates?.[0]?.finishReason ?? "unknown";
       throw new Error(
         `Gemini returned no text (finishReason: ${finishReason}) — likely a safety block or empty response.`
       );
+    }
+
+    let content: string;
+    let confidence: number | undefined;
+    try {
+      const parsed = JSON.parse(rawText) as { content?: string; confidence?: number };
+      content = parsed.content ?? rawText;
+      confidence =
+        typeof parsed.confidence === "number" ? Math.min(Math.max(parsed.confidence, 0), 1) : undefined;
+    } catch {
+      // Structured mode failed to produce valid JSON (rare, but possible)
+      // — fall back to the raw text with no confidence rather than crash.
+      content = rawText;
+      confidence = undefined;
     }
 
     return {
@@ -120,6 +148,7 @@ export class GeminiProvider implements ModelProvider {
       tokensUsed: data.usageMetadata?.totalTokenCount ?? 0,
       provider: "gemini",
       model: this.model,
+      confidence,
     };
   }
 }
