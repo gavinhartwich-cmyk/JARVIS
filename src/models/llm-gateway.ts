@@ -62,13 +62,19 @@ export class LLMGateway {
       return response;
     } catch (error) {
       this.markFailure(provider.name);
-      const fallback = await this.selectProvider(request, provider.name);
-      if (fallback) {
-        const response = await fallback.complete(messages, request);
-        this.markSuccess(fallback.name);
-        return response;
+      // If no fallback provider is available, selectProvider() itself throws
+      // a generic "no provider available" error. That's misleading here —
+      // it masks the real cause (provider.complete() failing above) with an
+      // unrelated message. Surface the original error in that case instead.
+      let fallback: ModelProvider;
+      try {
+        fallback = await this.selectProvider(request, provider.name);
+      } catch {
+        throw error;
       }
-      throw error;
+      const response = await fallback.complete(messages, request);
+      this.markSuccess(fallback.name);
+      return response;
     }
   }
 
