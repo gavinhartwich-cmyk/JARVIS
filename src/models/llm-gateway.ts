@@ -8,6 +8,7 @@ import type {
 import { GeminiProvider } from "./gemini-provider";
 import { OllamaProvider } from "./ollama-provider";
 import { OpenRouterProvider } from "./openrouter-provider";
+import { OmniRouteProvider } from "./omniroute-provider";
 
 export type ModelTier = "fast" | "general" | "deep" | "coding";
 
@@ -147,17 +148,31 @@ export class GatewayModelProvider implements ModelProvider {
 }
 
 /**
- * Builds the standard JARVIS gateway: Gemini first (best quality within its
- * free daily quota), Ollama second (local, no API key, no quota at all —
- * the fallback that actually matters once Gemini's daily cap is hit),
- * OpenRouter third only if OPENROUTER_API_KEY is set (optional extra free
- * headroom, not required). Registration order is gateway preference order
- * when the caller doesn't request a specific provider via `request.provider`.
+ * Builds the standard JARVIS gateway. Preference order (2026-08-27, per
+ * Gavin's request to stop depending on any single provider's daily quota):
+ *
+ * 1. OmniRoute (if OMNIROUTE_API_KEY is set) — self-hosted gateway that
+ *    itself aggregates 300+ providers (90+ free) with its own auto-fallback,
+ *    so a single upstream running dry no longer surfaces as a JARVIS-level
+ *    failure at all; OmniRoute routes around it before we ever see an error.
+ * 2. Ollama — local, no API key, no quota, works even if OmniRoute's local
+ *    process isn't running. The zero-cost floor that never runs out.
+ * 3. Gemini (if GEMINI_API_KEY is set) — legacy direct provider, kept as an
+ *    extra rung since it costs nothing to leave registered.
+ * 4. OpenRouter (if OPENROUTER_API_KEY is set) — same reasoning as Gemini.
+ *
+ * Registration order is gateway preference order when the caller doesn't
+ * request a specific provider via `request.provider`.
  */
 export function createDefaultGateway(): LLMGateway {
   const gateway = new LLMGateway();
-  gateway.register(new GeminiProvider());
+  if (process.env.OMNIROUTE_API_KEY) {
+    gateway.register(new OmniRouteProvider());
+  }
   gateway.register(new OllamaProvider());
+  if (process.env.GEMINI_API_KEY) {
+    gateway.register(new GeminiProvider());
+  }
   if (process.env.OPENROUTER_API_KEY) {
     gateway.register(new OpenRouterProvider());
   }

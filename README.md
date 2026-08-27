@@ -80,21 +80,32 @@ Create a `.env` file in the JARVIS root directory:
 
 ```
 DATABASE_URL=postgresql://jarvis:jarvis@localhost:5432/jarvis
-GEMINI_API_KEY=your_gemini_api_key_here
+OMNIROUTE_API_KEY=your_omniroute_dashboard_key_here
 ```
 
-**To get your Gemini API key (free, no Zo/Claude/Anthropic account needed):**
+**Primary provider: OmniRoute (self-hosted, so a single provider's quota
+never stops JARVIS).** OmniRoute (https://github.com/diegosouzapw/OmniRoute,
+MIT-licensed) is a local gateway that aggregates 300+ LLM providers — 90+
+free — behind one endpoint, with its own automatic fallback across them.
+Instead of JARVIS betting on one provider's daily quota, it bets on
+OmniRoute's, which is much harder to exhaust:
 
-1. Go to https://aistudio.google.com/apikey
-2. Sign in with any Google account
-3. Click "Create API key"
-4. Copy the key and paste it into `.env` as `GEMINI_API_KEY`
+```bash
+npm install -g omniroute
+omniroute   # starts a local dashboard + API on http://localhost:20128
+```
 
-**Provider fallback (no `.env` changes needed to benefit from it):** JARVIS
-now routes every LLM call through a gateway (`src/models/llm-gateway.ts`)
-that tries Gemini first and automatically falls back to a local Ollama
-server if Gemini fails or its free daily quota runs out — no more "pipeline
-dead for the day" on a 429. To turn the fallback on:
+Open the dashboard it prints, connect one or more free providers (no
+credit card needed), and copy the API key it gives you into `.env` as
+`OMNIROUTE_API_KEY`. Leave `OMNIROUTE_BASE_URL`/`OMNIROUTE_MODEL` unset
+unless you want to override the defaults (`http://localhost:20128/v1` and
+`auto`, letting OmniRoute pick the best available model per request).
+
+**Provider fallback (no further `.env` changes needed to benefit from
+it):** every LLM call routes through a gateway (`src/models/llm-gateway.ts`)
+that tries OmniRoute first, then automatically falls back to a local
+Ollama server if OmniRoute itself isn't running or every upstream it has
+is down — genuinely zero-cost, no quota, no key:
 
 ```bash
 # Windows: https://ollama.com/download
@@ -103,9 +114,10 @@ ollama serve
 ```
 
 Nothing else to configure — the gateway detects Ollama automatically when
-it's running. A third optional provider, OpenRouter, joins the rotation
-only if you set `OPENROUTER_API_KEY` in `.env` (get one free at
-https://openrouter.ai/keys).
+it's running. Gemini and OpenRouter are now optional legacy providers,
+each joining the rotation only if you set `GEMINI_API_KEY` (free at
+https://aistudio.google.com/apikey) or `OPENROUTER_API_KEY` (free at
+https://openrouter.ai/keys) in `.env` — neither is required anymore.
 
 ### 3. Install Dependencies & Create the Schema
 
