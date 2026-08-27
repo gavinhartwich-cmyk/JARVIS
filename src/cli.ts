@@ -158,8 +158,9 @@ async function main() {
         console.error(error instanceof Error ? error.message : String(error));
         console.error("\nDebugging info:");
         console.error("  - Check that PostgreSQL is running");
-        console.error("  - Check that at least one provider is configured: GEMINI_API_KEY (aistudio.google.com/apikey)");
+        console.error("  - Check that at least one provider is configured: OMNIROUTE_API_KEY (from your OmniRoute dashboard)");
         console.error("    or a running local Ollama server (ollama serve + ollama pull qwen2.5-coder:1.5b)");
+        console.error("    or GEMINI_API_KEY (aistudio.google.com/apikey) as a legacy fallback");
         console.error("  - Check database schema was created (bun run db:push)");
       }
     } else if (command === "phase1" || command === "phase1-status") {
