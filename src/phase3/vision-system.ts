@@ -25,9 +25,14 @@ export interface VisionProvider {
 /**
  * Vision System
  *
- * Understands images and answers visual questions
- * Uses Gemini's multimodal API (same provider as text — no separate
- * Claude/Zo dependency; this project is standalone).
+ * Understands images and answers visual questions via a pluggable
+ * VisionProvider. `OllamaVisionProvider` (ollama-vision-provider.ts) is
+ * real and $0/local, verified against a live model; `GeminiVisionProvider`
+ * below is still an unimplemented stub (needs a live GEMINI_API_KEY to
+ * build against). With no provider connected, every method below falls
+ * back to a hardcoded simulated office-desk description — that fallback
+ * predates this file's real provider and is left in only for callers that
+ * haven't connected one yet; don't mistake its output for a real analysis.
  */
 export class VisionSystem {
   private provider?: VisionProvider;
@@ -156,9 +161,22 @@ export class VisionSystem {
   async recognizeScene(imageBuffer: Buffer): Promise<string[]> {
     console.log("\n🏢 Recognizing scene...");
 
-    // In real implementation: use vision API for scene classification
-    const scenes = ["office", "indoor", "workspace", "commercial"];
+    if (this.provider) {
+      const answer = await this.provider.answerQuestion(
+        imageBuffer,
+        "What type of scene or location is this? Reply with 2-5 short tags (one or two words each), comma-separated, nothing else."
+      );
+      const scenes = answer
+        .split(",")
+        .map((s) => s.trim().toLowerCase().replace(/\.$/, ""))
+        .filter(Boolean);
+      console.log(`✅ Scenes identified: ${scenes.join(", ")}`);
+      return scenes;
+    }
 
+    // Simulated fallback — no provider connected
+    console.log("   (Simulated: actual provider not yet connected)");
+    const scenes = ["office", "indoor", "workspace", "commercial"];
     console.log(`✅ Scenes identified: ${scenes.join(", ")}`);
     return scenes;
   }
@@ -169,13 +187,35 @@ export class VisionSystem {
   async extractText(imageBuffer: Buffer): Promise<string[]> {
     console.log("\n📝 Extracting text from image...");
 
-    // In real implementation: use OCR or vision API
-    console.log("   (Would extract any visible text)");
+    if (this.provider) {
+      const answer = await this.provider.answerQuestion(
+        imageBuffer,
+        "Transcribe any text visible in this image, exactly as written, one line per piece of text. If there is no visible text, reply with exactly: NONE"
+      );
+      if (answer.trim().toUpperCase() === "NONE") {
+        console.log("   No text detected");
+        return [];
+      }
+      const lines = answer.split("\n").map((l) => l.trim()).filter(Boolean);
+      console.log(`✅ Extracted ${lines.length} line(s) of text`);
+      return lines;
+    }
+
+    // Simulated fallback — no provider connected
+    console.log("   (Simulated: actual provider not yet connected)");
     return [];
   }
 
   /**
    * Compare two images
+   *
+   * NOT wired to the real provider — VisionProvider has no dedicated
+   * two-image comparison method, and computing a real similarity score
+   * from two independent text descriptions would mean inventing a number
+   * with no real meaning behind it (the same anti-pattern as Phase 0's
+   * hardcoded-confidence bug this project has already had to fix once).
+   * Left honestly simulated until a real approach exists (e.g. perceptual
+   * hashing, or a provider method that accepts both images at once).
    */
   async compareImages(
     imageBuffer1: Buffer,
@@ -185,8 +225,8 @@ export class VisionSystem {
     differences: string[];
   }> {
     console.log("\n🔄 Comparing images...");
+    console.log("   (Simulated: no real image-comparison method built yet)");
 
-    // In real implementation: compare visual similarity
     return {
       similarity: 0.85,
       differences: [

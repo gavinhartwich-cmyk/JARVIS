@@ -6,7 +6,8 @@
  */
 
 import { ScreenCapture, ScreenContext } from "./screen-capture";
-import { VisionSystem, VisualAnalysis } from "./vision-system";
+import { VisionSystem, VisualAnalysis, VisionProvider } from "./vision-system";
+import { OllamaVisionProvider } from "./ollama-vision-provider";
 import { ContextRouter, ContextType, RoutingDecision } from "./context-router";
 import { ScreenControl, ControlSequence, ControlResult } from "./screen-control";
 import { identityEngine, type IdentityResult } from "../core/identity";
@@ -52,7 +53,7 @@ export class Perception {
     return this.cachedIdentity;
   }
 
-  constructor() {
+  constructor(visionProvider?: VisionProvider) {
     console.log("\n🧠 Perception Module initialized");
     console.log("   Screen capture: ✓");
     console.log("   Vision system: ✓");
@@ -62,6 +63,12 @@ export class Perception {
 
     this.screenCapture = new ScreenCapture();
     this.visionSystem = new VisionSystem();
+    // Same "default-wire the real provider, allow override for tests"
+    // pattern Phase 2's VoiceInterface uses for its LLM gateway. Without
+    // this, VisionSystem's real OllamaVisionProvider (verified working in
+    // isolation) never actually got connected here — every real perceive()
+    // call was silently falling back to the hardcoded office-desk stub.
+    this.visionSystem.setProvider(visionProvider || new OllamaVisionProvider());
     this.contextRouter = new ContextRouter();
     this.screenControl = new ScreenControl();
   }

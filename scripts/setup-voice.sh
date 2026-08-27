@@ -5,9 +5,8 @@
 # API keys.
 #
 # Linux only as written (piper_linux_x86_64 release + apt). On Gavin's
-# Windows PC, swap the Piper download for piper_windows_amd64.zip from the
-# same GitHub release and use `py -m venv` / `.\venv\Scripts\python.exe`
-# instead of the python3/bin paths below.
+# Windows PC, use scripts/setup-voice.ps1 instead — same steps, Windows
+# paths/binaries (piper_windows_amd64.zip, venv\Scripts\python.exe).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
