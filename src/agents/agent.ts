@@ -102,6 +102,7 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
         reasoning: response.content, // Full response contains reasoning
         confidence,
         tokensUsed: response.tokensUsed,
+        finishReason: response.finishReason,
       };
 
       // Log the agent run

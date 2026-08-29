@@ -165,8 +165,21 @@ export class JARVISDeveloper {
       provider: this.modelProvider.name,
       model: process.env.OMNIROUTE_MODEL || "auto",
       temperature: 0.3, // lower than Phase 0's conversational default — code needs precision, not creativity
-      maxTokens: 8000, // Coder/Debugger need room for full file contents
+      maxTokens: 8000,
     };
+
+    // Coder/Debugger specifically have to reproduce an ENTIRE existing
+    // file verbatim plus their edit (see existingFileContext() /
+    // FILE_BLOCK_PROTOCOL_INSTRUCTIONS) - 8000 tokens sounded generous
+    // until a live run against a real 770-line/26KB file
+    // (conversation-intelligence.ts) got cut off mid-file with no
+    // ===END FILE=== marker, which parseFileBlocks then (misleadingly)
+    // reported as "didn't use the required format." A real file that size
+    // needs on the order of 7000-9000 output tokens for its content alone,
+    // leaving no room for anything else at an 8000 cap. Doubled here; see
+    // also the finishReason check below step4_ImplementCode for what
+    // happens if even this isn't enough.
+    const codeModelConfig = { ...modelConfig, maxTokens: 16000 };
 
     this.agents = {
       architect: new BaseAgent(
@@ -187,14 +200,14 @@ export class JARVISDeveloper {
         CODER_ROLE.name,
         CODER_ROLE.role,
         CODER_ROLE.instructions + "\n\n" + FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
-        modelConfig,
+        codeModelConfig,
         this.modelProvider
       ),
       debugger: new BaseAgent(
         DEBUGGER_ROLE.name,
         DEBUGGER_ROLE.role,
         DEBUGGER_ROLE.instructions + "\n\n" + FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
-        modelConfig,
+        codeModelConfig,
         this.modelProvider
       ),
       codeReviewer: new BaseAgent(
@@ -568,6 +581,25 @@ export class JARVISDeveloper {
 
     const blocks: FileBlock[] = parseFileBlocks(output.content);
     if (blocks.length === 0) {
+      // A response that opens a ===FILE:=== block but never reaches
+      // ===END FILE=== isn't malformed - it was cut off by maxTokens
+      // before it could finish. Distinguish that (actionable: the file is
+      // too large for the current cap) from genuinely malformed output
+      // (the model ignored the format entirely) instead of reporting both
+      // the same way. Found via a live run against a 26KB source file.
+      const looksTruncatedMidBlock = /===FILE:\s*.+?\s*===/.test(output.content) && !/===END FILE===/.test(output.content);
+      const wasLengthCapped = (output.finishReason ?? "").toLowerCase().includes("length");
+      if (looksTruncatedMidBlock || wasLengthCapped) {
+        return {
+          files: new Map(),
+          success: false,
+          reason:
+            `Coder agent's response was cut off before it finished (started a ===FILE:=== block but never reached ` +
+            `===END FILE===${wasLengthCapped ? "; provider reported finishReason=" + output.finishReason : ""}). ` +
+            `The file is likely too large for the current maxTokens cap (${output.tokensUsed} tokens used). ` +
+            `Raw response (last 500 chars): ${truncate(output.content.slice(-500), 500)}`,
+        };
+      }
       return {
         files: new Map(),
         success: false,

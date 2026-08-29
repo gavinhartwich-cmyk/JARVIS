@@ -23,6 +23,12 @@ export interface AgentOutput {
   tokensUsed: number;
   toolCalls?: ToolCall[]; // Agents can request tools
   metadata?: Record<string, unknown>;
+  // Real value from the provider (e.g. "stop", "length", "content_filter")
+  // when it reports one. "length" means the response was cut off by
+  // maxTokens mid-generation, not that the model chose to stop - callers
+  // parsing structured output (like the Coder's ===FILE:=== blocks) should
+  // check this before assuming a parse failure means malformed output.
+  finishReason?: string;
 }
 
 export interface Agent {
