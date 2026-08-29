@@ -567,58 +567,85 @@ export class JARVISDeveloper {
   ): Promise<{ files: Map<string, string>; success: boolean; reason?: string }> {
     console.log("\n💻 STEP 4: Implementing Code (Coder Agent)");
     const existingContent = this.existingFileContext(requirement, design, plan);
-    // This final reminder is deliberately placed after everything else,
-    // including the (potentially large) injected file content - found
-    // necessary via a live run where the Coder agent, given a real
-    // requirement plus a 770-line EXISTING CONTENT block, replied with a
-    // bare ```typescript comment and no ===FILE:=== markers at all. The
-    // real protocol instructions live in the system prompt, ahead of all
-    // of this; repeating the concrete requirement right before the model
-    // generates its answer keeps it from getting lost behind a large
-    // block of injected file content.
-    const finalReminder = `\n\nReminder: your response for this requirement must use the ===FILE:===...===END FILE=== format above for every file you touch, with that file's complete content (existing content plus your edit, if it already exists) - not a code fence, not a diff, not just the changed lines.`;
-    const output = await this.agents.coder.execute({
-      taskId: this.runId,
-      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}${existingContent}${finalReminder}`,
-      context: {},
-    });
 
-    if (isNoChangesResponse(output.content)) {
-      return { files: new Map(), success: false, reason: "Coder agent determined no file changes were needed for this requirement." };
-    }
+    // OmniRoute's "auto" routing picks a different underlying model per
+    // call with no guarantee of consistency - a live run saw three
+    // DIFFERENT failure modes across three separate attempts at the exact
+    // same trivial requirement (destroyed the file with no anchor; used no
+    // format at all; got truncated mid-file), which points at draw-to-draw
+    // model variability rather than a fixable prompt-wording issue. A
+    // weak/uncooperative draw on one attempt doesn't mean every attempt
+    // would fail the same way, so retry a few times before giving up -
+    // each retry gets a progressively more blunt reminder in case the
+    // model that answered ignored the first one.
+    const MAX_CODER_ATTEMPTS = 3;
+    let lastFailure: { files: Map<string, string>; success: false; reason: string } | null = null;
 
-    const blocks: FileBlock[] = parseFileBlocks(output.content);
-    if (blocks.length === 0) {
-      // A response that opens a ===FILE:=== block but never reaches
-      // ===END FILE=== isn't malformed - it was cut off by maxTokens
-      // before it could finish. Distinguish that (actionable: the file is
-      // too large for the current cap) from genuinely malformed output
-      // (the model ignored the format entirely) instead of reporting both
-      // the same way. Found via a live run against a 26KB source file.
-      const looksTruncatedMidBlock = /===FILE:\s*.+?\s*===/.test(output.content) && !/===END FILE===/.test(output.content);
-      const wasLengthCapped = (output.finishReason ?? "").toLowerCase().includes("length");
-      if (looksTruncatedMidBlock || wasLengthCapped) {
-        return {
-          files: new Map(),
-          success: false,
-          reason:
-            `Coder agent's response was cut off before it finished (started a ===FILE:=== block but never reached ` +
-            `===END FILE===${wasLengthCapped ? "; provider reported finishReason=" + output.finishReason : ""}). ` +
-            `The file is likely too large for the current maxTokens cap (${output.tokensUsed} tokens used). ` +
-            `Raw response (last 500 chars): ${truncate(output.content.slice(-500), 500)}`,
-        };
+    for (let attempt = 1; attempt <= MAX_CODER_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        console.log(`   Retrying Coder agent (attempt ${attempt}/${MAX_CODER_ATTEMPTS}) after: ${lastFailure?.reason?.slice(0, 150)}`);
       }
-      return {
-        files: new Map(),
-        success: false,
-        reason: `Coder agent response did not use the required ===FILE:===...===END FILE=== format. Raw response (truncated): ${truncate(output.content, 500)}`,
-      };
+      // This final reminder is deliberately placed after everything else,
+      // including the (potentially large) injected file content - found
+      // necessary via a live run where the Coder agent, given a real
+      // requirement plus a 770-line EXISTING CONTENT block, replied with a
+      // bare ```typescript comment and no ===FILE:=== markers at all. The
+      // real protocol instructions live in the system prompt, ahead of all
+      // of this; repeating the concrete requirement right before the model
+      // generates its answer keeps it from getting lost behind a large
+      // block of injected file content. On a retry this gets blunter still.
+      const finalReminder =
+        attempt === 1
+          ? `\n\nReminder: your response for this requirement must use the ===FILE:===...===END FILE=== format above for every file you touch, with that file's complete content (existing content plus your edit, if it already exists) - not a code fence, not a diff, not just the changed lines.`
+          : `\n\nYour previous attempt at this exact requirement was rejected: ${lastFailure?.reason?.slice(0, 300)}\nTry again. Output ONLY ===FILE: <path>===, then the complete file content, then ===END FILE=== - nothing else, no markdown code fence, no explanation before or after.`;
+
+      const output = await this.agents.coder.execute({
+        taskId: this.runId,
+        task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}${existingContent}${finalReminder}`,
+        context: {},
+      });
+
+      if (isNoChangesResponse(output.content)) {
+        return { files: new Map(), success: false, reason: "Coder agent determined no file changes were needed for this requirement." };
+      }
+
+      const blocks: FileBlock[] = parseFileBlocks(output.content);
+      if (blocks.length === 0) {
+        // A response that opens a ===FILE:=== block but never reaches
+        // ===END FILE=== isn't malformed - it was cut off by maxTokens
+        // before it could finish. Distinguish that (actionable: the file is
+        // too large for the current cap) from genuinely malformed output
+        // (the model ignored the format entirely) instead of reporting both
+        // the same way. Found via a live run against a 26KB source file.
+        const looksTruncatedMidBlock = /===FILE:\s*.+?\s*===/.test(output.content) && !/===END FILE===/.test(output.content);
+        const wasLengthCapped = (output.finishReason ?? "").toLowerCase().includes("length");
+        if (looksTruncatedMidBlock || wasLengthCapped) {
+          lastFailure = {
+            files: new Map(),
+            success: false,
+            reason:
+              `Coder agent's response was cut off before it finished (started a ===FILE:=== block but never reached ` +
+              `===END FILE===${wasLengthCapped ? "; provider reported finishReason=" + output.finishReason : ""}). ` +
+              `The file is likely too large for the current maxTokens cap (${output.tokensUsed} tokens used). ` +
+              `Raw response (last 500 chars): ${truncate(output.content.slice(-500), 500)}`,
+          };
+        } else {
+          lastFailure = {
+            files: new Map(),
+            success: false,
+            reason: `Coder agent response did not use the required ===FILE:===...===END FILE=== format. Raw response (truncated): ${truncate(output.content, 500)}`,
+          };
+        }
+        continue;
+      }
+
+      console.log(`   Writing ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
+      const written = applyFileBlocks(this.repositoryPath, blocks);
+      console.log(`   Confidence: ${(output.confidence * 100).toFixed(0)}%`);
+      return { files: written, success: true };
     }
 
-    console.log(`   Writing ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
-    const written = applyFileBlocks(this.repositoryPath, blocks);
-    console.log(`   Confidence: ${(output.confidence * 100).toFixed(0)}%`);
-    return { files: written, success: true };
+    return lastFailure ?? { files: new Map(), success: false, reason: "Coder agent failed for an unknown reason after all retries." };
   }
 
   /**
