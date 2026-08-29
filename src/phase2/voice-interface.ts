@@ -273,6 +273,16 @@ export class VoiceInterface {
    * context, which is the right shape for "answer what was just said."
    */
   private async generateResponse(userInput: string): Promise<string> {
+    // Honest gap, noted 2026-08-27: unlike `Orchestrator.processConversation()`
+    // (core/orchestrator.ts), this path does NOT detect/execute app-control
+    // intents ("open Spotify") — it's a deliberately lighter, identity-less
+    // call (see this method's doc comment above), and wiring real execution
+    // in here would need the same identity/authorization resolution the
+    // orchestrator path already has. Not built here yet because voice-reply
+    // has no microphone input anyway (text-in/audio-out only, per this
+    // file's header) — worth revisiting once real mic capture makes this
+    // the primary interactive surface, at which point it should probably
+    // route through the orchestrator path instead of duplicating the logic.
     this.emit("jarvis-responding", { input: userInput });
 
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);

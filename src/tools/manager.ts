@@ -50,9 +50,37 @@ export class ToolManager {
     return this.tools.get(name);
   }
 
-  /** Tools flagged requiresApproval are admin-tier (need Level 3/verified); everything else is normal-tier (needs Level 2/gavin). */
+  /**
+   * Tools flagged requiresApproval are admin-tier (need Level 3/verified);
+   * everything else is normal-tier (needs Level 2/gavin) — UNLESS
+   * authorizationEngine's own name-based classifier (ADMIN_ACTIONS /
+   * LOW_RISK_ACTIONS in authorization.ts, meant to cover master plan Part
+   * 3.3's explicit high-risk-action list) says otherwise, in which case
+   * the more restrictive of the two wins.
+   *
+   * BUG FIX (2026-08-28, full-codebase review): every real call site in
+   * the codebase passes an explicit `riskTierOverride` into
+   * authorizationEngine.authorize() — this method was the one doing that
+   * for every tool call — which means `inferRiskTier()`'s name-based
+   * classifier was DEAD CODE: it never actually ran, for any tool, ever.
+   * The safety net that looks like it protects actions named
+   * "access_credentials", "modify_security_settings", etc. by name
+   * provided zero real enforcement; protection depended entirely on every
+   * tool author remembering to set `requiresApproval` correctly (which
+   * happens to be right for the tools that exist today, but a future tool
+   * whose author forgets it — reasonably assuming the name-based list
+   * already covers it — would have silently run at normal/Level 2 with no
+   * PIN). Now both signals are consulted and the stricter one wins,
+   * changing nothing for any tool that was already classified correctly
+   * (bash/write_file/delete_file still resolve to "admin", read_file/
+   * list_files still resolve to "normal") while actually closing the gap
+   * for one that isn't.
+   */
   private riskTierFor(tool: Tool): RiskTier {
-    return tool.requiresApproval ? "admin" : "normal";
+    const RANK: Record<RiskTier, number> = { low: 0, normal: 1, admin: 2 };
+    const declared: RiskTier = tool.requiresApproval ? "admin" : "normal";
+    const inferred = authorizationEngine.inferRiskTier(tool.name);
+    return RANK[inferred] > RANK[declared] ? inferred : declared;
   }
 
   /**

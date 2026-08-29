@@ -15,7 +15,7 @@ import type { ConversationContext, ReasoningPath } from "../phase2/conversation-
 import type { ModelRouter as IModelRouter } from "./conversation-intelligence.ts";
 
 export interface LLMConfig {
-  provider: "gemini" | "ollama";
+  provider: "omniroute" | "ollama" | "gemini" | "openrouter";
   model: string;
   temperature: number;
   maxTokens: number;
@@ -50,23 +50,25 @@ export class IntelligentModelRouter implements IModelRouter {
   /**
    * Get default model configuration.
    *
-   * Provider is Gemini everywhere — it's the only wired-up, verified cloud
-   * provider (src/models/gemini-provider.ts), zero dependency on Zo/Claude.
-   * Ollama is the planned local/free tier (see PHASE-1-LLM-STRATEGY.md) but
-   * has no provider implementation yet, so it isn't assigned here — adding
-   * it as a live tier before there's real code behind it would repeat the
-   * exact "claude" mistake this replaces. Tiers stay flat on one model
-   * (env-overridable via GEMINI_MODEL) until a second verified Gemini tier
-   * or the Ollama provider actually exists.
+   * Provider is OmniRoute everywhere (2026-08-27, matches the gateway's
+   * registration order in src/models/llm-gateway.ts — per Gavin's request
+   * to stop depending on any single provider's daily quota). OmniRoute is
+   * a self-hosted aggregator across 300+ providers with its own
+   * auto-fallback, so it absorbs a single upstream's quota exhaustion
+   * before JARVIS ever sees an error. "auto" (env-overridable via
+   * OMNIROUTE_MODEL) lets OmniRoute pick the best available model per its
+   * own routing strategy rather than JARVIS hardcoding one. Gemini is kept
+   * only as the `LLMConfig.provider` union member for the legacy fallback
+   * rung — it is no longer assigned to any tier here.
    */
   private getDefaultModels(): Map<string, LLMConfig> {
     const models = new Map<string, LLMConfig>();
-    const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    const omnirouteModel = process.env.OMNIROUTE_MODEL || "auto";
 
     // Fast - quick response for simple tasks
     models.set("fast-reasoning", {
-      provider: "gemini",
-      model: geminiModel,
+      provider: "omniroute",
+      model: omnirouteModel,
       temperature: 0.3,
       maxTokens: 500,
       stream: true,
@@ -74,8 +76,8 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // Main - balanced performance
     models.set("main-reasoning", {
-      provider: "gemini",
-      model: geminiModel,
+      provider: "omniroute",
+      model: omnirouteModel,
       temperature: 0.7,
       maxTokens: 2000,
       stream: true,
@@ -83,8 +85,8 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // Deep reasoning - complex analysis
     models.set("deep-reasoning", {
-      provider: "gemini",
-      model: geminiModel,
+      provider: "omniroute",
+      model: omnirouteModel,
       temperature: 0.5,
       maxTokens: 4000,
       stream: true,
@@ -92,8 +94,8 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // Deterministic - system operations
     models.set("deterministic", {
-      provider: "gemini",
-      model: geminiModel,
+      provider: "omniroute",
+      model: omnirouteModel,
       temperature: 0.0,
       maxTokens: 1000,
       stream: false,
@@ -101,8 +103,8 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // Creative - brainstorming
     models.set("creative", {
-      provider: "gemini",
-      model: geminiModel,
+      provider: "omniroute",
+      model: omnirouteModel,
       temperature: 1.0,
       maxTokens: 2000,
       stream: true,
@@ -220,7 +222,7 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // If user has limited budget, use faster model
     if (this.userPreferences.budget === "free") {
-      adjusted.model = process.env.GEMINI_MODEL || "gemini-2.5-flash"; // Cheapest option
+      adjusted.model = process.env.OMNIROUTE_MODEL || "auto"; // Let OmniRoute pick a free-tier option
       adjusted.maxTokens = Math.min(adjusted.maxTokens, 1000);
     }
 
@@ -233,7 +235,7 @@ export class IntelligentModelRouter implements IModelRouter {
 
     // Preferred provider override
     if (this.userPreferences.preferredProvider) {
-      adjusted.provider = this.userPreferences.preferredProvider as "gemini" | "ollama";
+      adjusted.provider = this.userPreferences.preferredProvider as LLMConfig["provider"];
     }
 
     return adjusted;

@@ -29,10 +29,11 @@ export interface VisionProvider {
  * VisionProvider. `OllamaVisionProvider` (ollama-vision-provider.ts) is
  * real and $0/local, verified against a live model; `GeminiVisionProvider`
  * below is still an unimplemented stub (needs a live GEMINI_API_KEY to
- * build against). With no provider connected, every method below falls
- * back to a hardcoded simulated office-desk description — that fallback
- * predates this file's real provider and is left in only for callers that
- * haven't connected one yet; don't mistake its output for a real analysis.
+ * build against). With no provider connected, analyzeImage/
+ * answerVisualQuestion/detectObjects/recognizeScene now throw a clear
+ * error instead of returning fabricated data (fixed 2026-08-27 — see each
+ * method). Reachable from the CLI via `bun run dev vision-test <path>`
+ * (cli.ts), which wires `setProvider(new OllamaVisionProvider())`.
  */
 export class VisionSystem {
   private provider?: VisionProvider;
@@ -66,30 +67,18 @@ export class VisionSystem {
       return this.provider.analyzeImage(imageBuffer);
     }
 
-    // Simulated analysis
-    console.log("   (Simulated: actual provider not yet connected)");
-
-    const analysis: VisualAnalysis = {
-      text: "A well-organized office desk with computer monitor, keyboard, and mouse. Papers and pen visible. Window in background shows outdoor scenery. Desk lamp provides lighting. Modern office chair partially visible.",
-      objects: [
-        { label: "computer monitor", confidence: 0.98 },
-        { label: "keyboard", confidence: 0.95 },
-        { label: "mouse", confidence: 0.92 },
-        { label: "desk lamp", confidence: 0.87 },
-        { label: "office chair", confidence: 0.85 },
-        { label: "papers", confidence: 0.80 },
-        { label: "window", confidence: 0.93 },
-      ],
-      scenes: ["office", "indoors", "workspace", "modern"],
-      textDetected: [],
-    };
-
-    console.log(`✅ Analysis complete`);
-    console.log(
-      `   Objects detected: ${analysis.objects.length}, Scenes: ${analysis.scenes.length}`
+    // No provider connected. This used to return a hardcoded, always-
+    // identical "office desk" analysis here regardless of the actual
+    // image — fabricated sensor data presented as a real result, which is
+    // exactly the anti-pattern the rest of this codebase's confidence/
+    // audit-trail work exists to prevent (see BaseAgent.execute()'s
+    // honestly-labeled confidence fallback for the established pattern).
+    // Fixed 2026-08-27: fail clearly instead. Wire a real provider first,
+    // e.g. `visionSystem.setProvider(new OllamaVisionProvider())` (local,
+    // $0, verified — see ollama-vision-provider.ts).
+    throw new Error(
+      "VisionSystem has no provider connected — call setProvider(new OllamaVisionProvider()) (or a real GeminiVisionProvider, once implemented) before analyzing images."
     );
-
-    return analysis;
   }
 
   /**
@@ -108,24 +97,10 @@ export class VisionSystem {
       return this.provider.answerQuestion(imageBuffer, question);
     }
 
-    // Simulated QA
-    console.log("   (Simulated: actual provider not yet connected)");
-
-    const responses: Record<string, string> = {
-      "what's on the desk?":
-        "On the desk, there is a computer monitor, keyboard, mouse, desk lamp, papers, and a pen. Everything is neatly organized.",
-      "is the window open?":
-        "The window appears to be closed. You can see outdoor scenery through it, but the glass is intact.",
-      "what do you see?":
-        "I see a modern office workspace with a computer setup, desk lamp, and papers. There's a window showing an outdoor view, and an office chair is partially visible.",
-    };
-
-    const answer =
-      responses[question.toLowerCase()] ||
-      "I can see an office environment with various work items.";
-
-    console.log(`✅ Answer: "${answer}"`);
-    return answer;
+    // See analyzeImage() above — no fabricated answer, fail clearly instead.
+    throw new Error(
+      "VisionSystem has no provider connected — call setProvider(new OllamaVisionProvider()) before asking visual questions."
+    );
   }
 
   /**
@@ -140,19 +115,10 @@ export class VisionSystem {
       return this.provider.detectObjects(imageBuffer);
     }
 
-    // Simulated detection
-    const objects = [
-      { label: "monitor", confidence: 0.98 },
-      { label: "keyboard", confidence: 0.96 },
-      { label: "mouse", confidence: 0.94 },
-      { label: "desk", confidence: 0.99 },
-      { label: "chair", confidence: 0.88 },
-      { label: "lamp", confidence: 0.91 },
-      { label: "window", confidence: 0.93 },
-    ];
-
-    console.log(`✅ Found ${objects.length} objects`);
-    return objects;
+    // See analyzeImage() above — no fabricated objects, fail clearly instead.
+    throw new Error(
+      "VisionSystem has no provider connected — call setProvider(new OllamaVisionProvider()) before detecting objects."
+    );
   }
 
   /**
@@ -174,11 +140,10 @@ export class VisionSystem {
       return scenes;
     }
 
-    // Simulated fallback — no provider connected
-    console.log("   (Simulated: actual provider not yet connected)");
-    const scenes = ["office", "indoor", "workspace", "commercial"];
-    console.log(`✅ Scenes identified: ${scenes.join(", ")}`);
-    return scenes;
+    // See analyzeImage() above — no fabricated scenes, fail clearly instead.
+    throw new Error(
+      "VisionSystem has no provider connected — call setProvider(new OllamaVisionProvider()) before recognizing scenes."
+    );
   }
 
   /**

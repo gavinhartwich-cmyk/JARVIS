@@ -93,7 +93,9 @@ export class OllamaProvider implements ModelProvider {
   private async requestOnce(
     chatMessages: Array<{ role: string; content: string }>,
     temperature: number,
-    numPredict: number
+    numPredict: number,
+    timeoutMs: number,
+    signal?: AbortSignal
   ): Promise<{
     rawText: string;
     doneReason?: string;
@@ -134,16 +136,31 @@ export class OllamaProvider implements ModelProvider {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        // Belt-and-suspenders cap so a truly stuck request still fails with
-        // a clear message instead of hanging forever, even though streaming
-        // should keep the idle-connection issue above from firing at all.
-        signal: AbortSignal.timeout(600_000),
+        // BUG FIX (2026-08-28, full-codebase review): this used to be a
+        // hardcoded `AbortSignal.timeout(600_000)` (10 minutes) with no way
+        // for any caller to override it downward — complete() never
+        // forwarded options.timeoutMs/options.signal here at all, unlike
+        // stream() in this same file (which correctly respects both) and
+        // unlike every other provider's default of 60s. Ollama is
+        // registered unconditionally (no API key needed) and sits right
+        // behind OmniRoute in preference order, so whenever OmniRoute is
+        // down it becomes the effective primary provider for every
+        // sequential orchestrator call. With the automatic retry below
+        // (doubled token budget on a truncated response) also going
+        // through this same hardcoded 600s path, a single BaseAgent.
+        // execute() call could take up to 1200s — 6.7x past the 180s
+        // outer timeout this was blowing in production — before the
+        // gateway ever got a chance to fall back to Gemini/OpenRouter.
+        // Now threaded through from complete() (default 60s, matching
+        // every other provider, still overridable by a caller-supplied
+        // signal/timeoutMs) instead of hardcoded here.
+        signal: signal || AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       const isTimeout = error instanceof Error && error.name === "TimeoutError";
       throw new Error(
         isTimeout
-          ? `Ollama request timed out after 10 minutes (model: ${this.model}) — the server may be overloaded or the prompt too large.`
+          ? `Ollama request timed out after ${Math.round(timeoutMs / 1000)}s (model: ${this.model}) — the server may be overloaded or the prompt too large.`
           : `Could not reach Ollama at ${this.host} — is "ollama serve" running? (${error instanceof Error ? error.message : error})`
       );
     }
@@ -202,6 +219,8 @@ export class OllamaProvider implements ModelProvider {
       temperature?: number;
       maxTokens?: number;
       systemPrompt?: string;
+      timeoutMs?: number;
+      signal?: AbortSignal;
     }
   ): Promise<ModelResponse> {
     const systemText = options?.systemPrompt ?? messages.find((m) => m.role === "system")?.content;
@@ -221,8 +240,14 @@ export class OllamaProvider implements ModelProvider {
 
     const temperature = options?.temperature ?? 0.7;
     const baseTokens = options?.maxTokens ?? 2000;
+    // Default matches every other provider (OpenRouter/OmniRoute/Gemini
+    // all default to 60s) instead of the old hardcoded 600s — still
+    // overridable upward by a caller that knows it's sending a slow local
+    // model a genuinely large prompt.
+    const timeoutMs = options?.timeoutMs ?? 60_000;
+    const signal = options?.signal;
 
-    let result = await this.requestOnce(chatMessages, temperature, baseTokens);
+    let result = await this.requestOnce(chatMessages, temperature, baseTokens, timeoutMs, signal);
 
     let parsed: { content?: string; confidence?: number } | undefined;
     try {
@@ -235,7 +260,7 @@ export class OllamaProvider implements ModelProvider {
     // do that once before falling back, rather than reporting a fake score.
     if (!parsed && result.doneReason === "length") {
       const retryTokens = Math.min(baseTokens * 2, 6000);
-      result = await this.requestOnce(chatMessages, temperature, retryTokens);
+      result = await this.requestOnce(chatMessages, temperature, retryTokens, timeoutMs, signal);
       try {
         parsed = JSON.parse(result.rawText);
       } catch {

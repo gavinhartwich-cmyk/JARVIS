@@ -12,6 +12,19 @@ import { OmniRouteProvider } from "./omniroute-provider";
 
 export type ModelTier = "fast" | "general" | "deep" | "coding";
 
+/**
+ * `tier` is declared but not yet read anywhere in this file — flagged
+ * honestly 2026-08-27 rather than left silently unused. Capability-aware
+ * routing today happens two levels up: `IntelligentModelRouter` already
+ * picks a temperature/token profile per reasoning path (fast/main/deep/
+ * deterministic/creative — see model-router.ts), and OmniRoute's own
+ * `model: "auto"` does capability-aware model selection across its 300+
+ * upstreams by default. A per-provider `tier` → specific-model mapping
+ * here would only matter for the fallback rungs (Ollama/Gemini/OpenRouter,
+ * each fixed to one configured model), and guessing at that mapping
+ * without a way to test it against a live provider isn't worth the risk —
+ * left as a documented extension point, not built speculatively.
+ */
 export interface GatewayRequest extends ModelRequestOptions {
   tier?: ModelTier;
 }
@@ -54,48 +67,87 @@ export class LLMGateway {
     return [...this.health.values()].map((entry) => ({ ...entry }));
   }
 
+  /**
+   * Cascades through every registered provider in preference order, not
+   * just one fallback hop. Previously this tried the preferred provider,
+   * then exactly one alternate, then gave up — so with all four providers
+   * configured (OmniRoute, Ollama, Gemini, OpenRouter), an OmniRoute *and*
+   * Ollama outage would surface as a failure even though Gemini/OpenRouter
+   * were still reachable. Fixed 2026-08-27 per Gavin's OmniRoute Routing
+   * Directive ("Provider failure, timeout, quota exhaustion, or rate
+   * limiting → automatically fall back" / "never expose provider-specific
+   * failures to the user unless every available provider has failed") —
+   * now every registered provider gets a real attempt before this throws,
+   * and the thrown error only surfaces once all of them have failed.
+   */
   async generate(messages: ModelMessage[], request: GatewayRequest = {}): Promise<ModelResponse> {
-    const provider = await this.selectProvider(request);
-    try {
-      const response = await provider.complete(messages, request);
-      this.markSuccess(provider.name);
-      return response;
-    } catch (error) {
-      this.markFailure(provider.name);
-      // If no fallback provider is available, selectProvider() itself throws
-      // a generic "no provider available" error. That's misleading here —
-      // it masks the real cause (provider.complete() failing above) with an
-      // unrelated message. Surface the original error in that case instead.
-      let fallback: ModelProvider;
+    const attempted = new Set<string>();
+    let lastError: unknown;
+
+    for (let i = 0; i < this.providers.size; i++) {
+      let provider: ModelProvider;
       try {
-        fallback = await this.selectProvider(request, provider.name);
-      } catch {
-        throw error;
+        provider = await this.selectProvider(request, attempted);
+      } catch (error) {
+        // No more providers left to try. Surface the last real failure
+        // (e.g. an actual 401/timeout) rather than the generic
+        // "no provider available" message, when we have one.
+        throw lastError ?? error;
       }
-      const response = await fallback.complete(messages, request);
-      this.markSuccess(fallback.name);
-      return response;
+      attempted.add(provider.name);
+      try {
+        const response = await provider.complete(messages, request);
+        this.markSuccess(provider.name);
+        return response;
+      } catch (error) {
+        this.markFailure(provider.name);
+        lastError = error;
+        // continue to the next provider
+      }
     }
+
+    throw lastError ?? new Error("No configured LLM provider is available. Configure OPENROUTER_API_KEY or another gateway provider.");
   }
 
+  /**
+   * Same full-cascade fallback as generate() above (fixed 2026-08-27) —
+   * previously stream() had zero fallback at all: any error from the first
+   * selected provider was thrown straight through, even with other healthy
+   * providers registered.
+   */
   async *stream(messages: ModelMessage[], request: GatewayRequest = {}): AsyncIterable<ModelStreamChunk> {
-    const provider = await this.selectProvider(request);
-    try {
-      for await (const chunk of provider.stream(messages, request)) {
-        yield chunk;
+    const attempted = new Set<string>();
+    let lastError: unknown;
+
+    for (let i = 0; i < this.providers.size; i++) {
+      let provider: ModelProvider;
+      try {
+        provider = await this.selectProvider(request, attempted);
+      } catch (error) {
+        throw lastError ?? error;
       }
-      this.markSuccess(provider.name);
-    } catch (error) {
-      this.markFailure(provider.name);
-      throw error;
+      attempted.add(provider.name);
+      try {
+        for await (const chunk of provider.stream(messages, request)) {
+          yield chunk;
+        }
+        this.markSuccess(provider.name);
+        return;
+      } catch (error) {
+        this.markFailure(provider.name);
+        lastError = error;
+        // continue to the next provider
+      }
     }
+
+    throw lastError ?? new Error("No configured LLM provider is available. Configure OPENROUTER_API_KEY or another gateway provider.");
   }
 
-  private async selectProvider(request: GatewayRequest, exclude?: string): Promise<ModelProvider> {
+  private async selectProvider(request: GatewayRequest, excluded: Set<string> = new Set()): Promise<ModelProvider> {
     const preferred = request.provider ? this.providers.get(request.provider) : undefined;
     const ordered = [preferred, ...this.providers.values()].filter(
       (candidate, index, list): candidate is ModelProvider =>
-        candidate !== undefined && candidate.name !== exclude && list.indexOf(candidate) === index
+        candidate !== undefined && !excluded.has(candidate.name) && list.indexOf(candidate) === index
     );
     for (const provider of ordered) {
       const status = this.health.get(provider.name);

@@ -21,6 +21,49 @@ function toBufferEncoding(value: unknown): BufferEncoding {
   throw new Error(`Unsupported encoding: ${encoding}`);
 }
 
+/**
+ * SECURITY FIX (2026-08-28, full-codebase review per Gavin's "spare no
+ * line of code" request): the previous guard on all three tools below was
+ * `filePath.includes("/etc") || filePath.includes("/sys")` (plus
+ * `.includes(".env")` for delete only) — a raw substring check on the
+ * UNRESOLVED path string. That's trivially bypassed: `/home/gavin/.ssh/
+ * id_rsa`, `~/.aws/credentials`, `C:\Users\gavin\.env`, or
+ * `/home/gavin/../../etc/shadow` (until resolved, the literal string
+ * still contains "/etc" here, but a caller could just as easily reach
+ * `/etc` via a symlink or a differently-spelled equivalent path that
+ * doesn't) all pass straight through — once a caller clears the
+ * `"normal"`-tier authorization gate (no PIN required, just the
+ * device-session-recognized user), read_file could pull SSH private
+ * keys, cloud credentials, or JARVIS's own .env (containing
+ * OMNIROUTE_API_KEY) outright, and write/delete had the identical gap
+ * for anything not literally containing "/etc" or "/sys".
+ *
+ * This does NOT restrict these tools to one sandboxed root directory —
+ * that would be a much bigger, more disruptive design change (JARVIS is
+ * meant to read arbitrary files on the user's machine as a personal
+ * assistant, not just files inside its own repo) and isn't this review's
+ * call to make unilaterally. What it does do: resolve+normalize the path
+ * first (so `..` traversal and case/separator differences can't slip
+ * past the check the way a raw substring match can), and match against a
+ * real, meaningfully wider set of credential/secret locations by path
+ * SEGMENT rather than raw substring (so `/etcetera/notes.txt` isn't a
+ * false positive the way naive substring matching would also get wrong
+ * in the other direction).
+ */
+const SENSITIVE_SEGMENTS = new Set([
+  ".ssh", ".aws", ".azure", ".gcloud", ".kube", ".gnupg", ".docker",
+  "etc", "sys", "proc", "windows", "system32", "programdata",
+]);
+const SENSITIVE_FILENAME_PATTERN = /^(id_rsa|id_ed25519|id_ecdsa|id_dsa.*|.*\.pem|.*\.pfx|.*\.ppk|credentials|\.env(\..*)?|\.npmrc|\.netrc)$/i;
+
+function isSensitivePath(rawPath: string): boolean {
+  const resolved = path.resolve(rawPath);
+  const segments = resolved.split(/[\\/]+/).filter(Boolean);
+  const filename = segments[segments.length - 1] ?? "";
+  if (SENSITIVE_FILENAME_PATTERN.test(filename)) return true;
+  return segments.some((seg) => SENSITIVE_SEGMENTS.has(seg.toLowerCase()));
+}
+
 export class ReadFileTool implements Tool {
   name = "read_file";
   description = "Read the contents of a file";
@@ -46,11 +89,12 @@ export class ReadFileTool implements Tool {
       const filePath = String(parameters.path);
       const encoding = toBufferEncoding(parameters.encoding);
 
-      // Safety check: prevent reading system files
-      if (filePath.includes("/etc") || filePath.includes("/sys")) {
+      // Safety check: prevent reading system/credential files (real
+      // resolved-path + segment check — see isSensitivePath() above)
+      if (isSensitivePath(filePath)) {
         return {
           success: false,
-          error: "Access denied: Cannot read system files",
+          error: "Access denied: Cannot read system or credential files",
           executionTime: Date.now() - startTime,
         };
       }
@@ -103,11 +147,12 @@ export class WriteFileTool implements Tool {
       const content = String(parameters.content);
       const append = Boolean(parameters.append || false);
 
-      // Safety check: prevent writing to system areas
-      if (filePath.includes("/etc") || filePath.includes("/sys")) {
+      // Safety check: prevent writing to system/credential locations (real
+      // resolved-path + segment check — see isSensitivePath() above)
+      if (isSensitivePath(filePath)) {
         return {
           success: false,
-          error: "Access denied: Cannot write to system directories",
+          error: "Access denied: Cannot write to system or credential files",
           executionTime: Date.now() - startTime,
         };
       }
@@ -197,12 +242,9 @@ export class DeleteFileTool implements Tool {
     try {
       const filePath = String(parameters.path);
 
-      // Safety check: prevent deleting critical files
-      if (
-        filePath.includes(".env") ||
-        filePath.includes("/etc") ||
-        filePath.includes("/sys")
-      ) {
+      // Safety check: prevent deleting critical files (real resolved-path +
+      // segment check — see isSensitivePath() above)
+      if (isSensitivePath(filePath)) {
         return {
           success: false,
           error: "Access denied: Cannot delete protected files",

@@ -15,6 +15,7 @@
  */
 
 import type { ConversationEngine, ConversationContext, ReasoningPath } from "../phase2/conversation-engine.ts";
+import type { ModelProvider } from "../models/types";
 
 export interface ConversationMemory {
   // Long-term episodic memory
@@ -76,6 +77,24 @@ export interface InterruptionContext {
 }
 
 /**
+ * The real, already-happened result of an action JARVIS took before
+ * generating this reply — e.g. `Orchestrator.parseAppControlIntent()`
+ * detecting "open Spotify" and actually calling `ScreenControl.openApp()`
+ * ahead of the LLM call. Added 2026-08-27 (Gavin: "when something like
+ * that is asked it [should] complete the task and stay conversational...
+ * it needs to be proactive not reactive"). The point of passing this in
+ * as *outcome*, not *intent* — the action has already run by the time the
+ * LLM sees it — is so the reply is grounded in what genuinely happened
+ * (including a genuine failure) instead of the model guessing or, worse,
+ * confidently claiming success it never verified.
+ */
+export interface ActionOutcome {
+  description: string; // e.g. `Open "Spotify"`
+  success: boolean;
+  detail: string; // human-readable result text, or the error if it failed
+}
+
+/**
  * Conversational Intelligence Layer
  *
  * Orchestrates all conversation-related behavior independent of backend.
@@ -85,15 +104,17 @@ export class ConversationalIntelligence {
   private memory: ConversationMemory;
   private currentStream?: StreamingResponse;
   private modelRouter: ModelRouter;
+  private modelProvider: ModelProvider;
   private interruptionBuffer: InterruptionContext[] = [];
 
   // Proactive monitoring
   private proactiveMonitors: Map<string, () => Promise<string | null>> = new Map();
   private lastProactiveCheck: Date = new Date();
 
-  constructor(engine: ConversationEngine, router: ModelRouter) {
+  constructor(engine: ConversationEngine, router: ModelRouter, modelProvider: ModelProvider) {
     this.conversationEngine = engine;
     this.modelRouter = router;
+    this.modelProvider = modelProvider;
     this.memory = this.initializeMemory();
 
     console.log("\n🧠 Conversational Intelligence initialized");
@@ -127,7 +148,8 @@ export class ConversationalIntelligence {
    * Returns streaming response that can start TTS immediately
    */
   async processWithStreaming(
-    utterance: string
+    utterance: string,
+    actionOutcome?: ActionOutcome
   ): Promise<StreamingResponse> {
     // Phase 1: Conversation Engine preprocessing
     const { intention, reasoningPath } = await this.conversationEngine.processUserUtterance(
@@ -139,10 +161,13 @@ export class ConversationalIntelligence {
     const model = this.modelRouter.selectModel(intention, reasoningPath, context);
 
     // Phase 3: Assemble complete prompt with memory
-    const prompt = this.assemblePrompt(utterance, intention, context);
+    const prompt = this.assemblePrompt(utterance, intention, context, actionOutcome);
 
     // Phase 4: Check if we can use cached response
-    if (this.modelRouter.shouldUseCache(context)) {
+    // Never serve a cached reply when a real action was just taken — a
+    // stale cached line has no idea Spotify just opened (or failed to),
+    // and would contradict what actually happened.
+    if (!actionOutcome && this.modelRouter.shouldUseCache(context)) {
       const cached = this.checkMemoryCache(utterance);
       if (cached) {
         return this.createStreamFromText(cached, "memory");
@@ -166,13 +191,44 @@ export class ConversationalIntelligence {
   private assemblePrompt(
     utterance: string,
     intention: string,
-    context: ConversationContext
+    context: ConversationContext,
+    actionOutcome?: ActionOutcome
   ): string {
     const components: string[] = [];
 
     // System prompt segment
     components.push(`You are JARVIS, a persistent conversational AI assistant.`);
     components.push(`You maintain continuous conversation state across interactions.`);
+
+    // Real action outcome, if one was taken before this reply was
+    // generated (e.g. "open Spotify" → ScreenControl actually ran it).
+    // This section exists specifically so JARVIS reports what genuinely
+    // happened instead of guessing or promising to do something it
+    // already either did or failed to do.
+    if (actionOutcome) {
+      if (actionOutcome.success) {
+        components.push(
+          `\nYou just took a real action, before generating this reply: ${actionOutcome.description} — it succeeded.`
+        );
+        components.push(
+          `Confirm this briefly and naturally in past/present tense (it's already done, don't say "I will..."). ` +
+            `Be proactive, not just reactive: if there's an obvious, natural next question for this kind of app or ` +
+            `action (e.g. a music app → what to play; a browser → what to search; a document/notes app → what to ` +
+            `write or open), ask it in the same reply. If there's no obvious follow-up, just confirm naturally — ` +
+            `don't force one.`
+        );
+      } else {
+        components.push(
+          `\nYou just attempted a real action, before generating this reply: ${actionOutcome.description} — it FAILED. ` +
+            `Reason: ${actionOutcome.detail}`
+        );
+        components.push(
+          `Be honest about this. Do not claim it succeeded or that you're doing it now. Briefly say it didn't work, ` +
+            `and if the reason suggests something the user could fix (e.g. the app isn't installed, or isn't a ` +
+            `recognized name), mention that naturally.`
+        );
+      }
+    }
 
     // Personality segment
     const prefs = this.memory.preferences;
@@ -299,7 +355,88 @@ export class ConversationalIntelligence {
   }
 
   /**
-   * Stream response from model (placeholder for real streaming)
+   * Call the real model provider (same LLMGateway everything else in
+   * JARVIS uses — OmniRoute → Ollama → Gemini → OpenRouter, per
+   * src/models/llm-gateway.ts) with the assembled conversational prompt.
+   *
+   * Previously this whole layer returned hardcoded strings like "I
+   * understand you'd like to <first 20 chars>..." regardless of what was
+   * actually said — meaning Phase 1.5 was wired up (constructed, methods
+   * called from orchestrator.ts) but not functionally real: no reasoning,
+   * no LLM call, ever. Fixed 2026-08-27 to match how Phase 0 (BaseAgent)
+   * and Phase 2 (voice-interface.ts) already call the real gateway.
+   *
+   * Two more real bugs fixed 2026-08-27 per Gavin's OmniRoute Routing
+   * Directive:
+   * 1. `model` — the tier `IntelligentModelRouter.selectModel()` already
+   *    picked (fast/main/deep/deterministic/creative, each with its own
+   *    temperature/maxTokens) — was passed into this call chain from
+   *    `processWithStreaming()` but silently discarded here in favor of a
+   *    single hardcoded {temperature: 0.7, maxTokens: 800} for every
+   *    request. That's the opposite of "capability-aware": a "fast" reply
+   *    and a "deep reasoning" one got identical model settings. Now the
+   *    selected config is actually used.
+   * 2. No try/catch here meant that once the gateway exhausted every
+   *    provider (see llm-gateway.ts's generate() cascade), the raw error
+   *    propagated straight up through processWithStreaming() →
+   *    processConversation() → cli.ts's "conversation" command with no
+   *    handler in between — a raw stack trace instead of JARVIS staying
+   *    conversational. Now caught here and turned into the same clean,
+   *    honest fallback line voice-interface.ts already uses.
+   */
+  private async callModel(
+    prompt: string,
+    originalUtterance: string,
+    model: { model: string; provider: string; config: Record<string, unknown> }
+  ): Promise<{ text: string; tokensUsed: number }> {
+    const config = model.config as { temperature?: number; maxTokens?: number };
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: prompt },
+          { role: "user", content: originalUtterance },
+        ],
+        {
+          temperature: config.temperature ?? 0.7,
+          maxTokens: config.maxTokens ?? 800,
+          provider: model.provider,
+          model: model.model,
+        }
+      );
+      return { text: response.content, tokensUsed: response.tokensUsed };
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      console.error("❌ Conversational model call failed (all providers exhausted):", err);
+      return { text: "Sorry, I couldn't reach any model provider to answer that.", tokensUsed: 0 };
+    }
+  }
+
+  /**
+   * Stream response from model.
+   *
+   * Honestly labeled like Phase 2's TTS/STT classes: this drips out an
+   * already-complete real response token-by-token for a natural-feeling
+   * cadence, rather than true incremental generation — a persistent-stream
+   * rework (consuming ModelProvider.stream()) is the next step once
+   * real-time latency actually matters, same as noted for Phase 2.
+   *
+   * REAL BUG, found and fixed 2026-08-27 (Gavin: "I want it to work
+   * fully"): this function used to return `response` right after starting
+   * the drip-out `setInterval`, while `response.text` was still `""` —
+   * nothing awaited the drip finishing. Its only real caller today,
+   * `Orchestrator.processConversation()`, reads `stream.text`
+   * synchronously the moment this promise resolves (there's no live
+   * consumer of the incremental `.tokens` frames yet — see the comment
+   * above), so every conversational reply that took the streaming path
+   * (the default — see `IntelligentModelRouter.shouldStream()`) came back
+   * as an empty string. The action side of app-control still worked (it
+   * runs before this is even called), which is exactly why Notepad kept
+   * opening/closing for real while JARVIS's own spoken/printed reply text
+   * was silently blank. Fixed by awaiting the drip's completion before
+   * resolving, so the promise this function returns actually means "the
+   * full response is ready" for its current synchronous caller — the
+   * token-by-token pacing itself is unchanged, for whenever a real
+   * incremental consumer exists.
    */
   private async streamFromModel(
     prompt: string,
@@ -321,39 +458,47 @@ export class ConversationalIntelligence {
 
     this.currentStream = response;
 
-    // In production: stream from LLM
-    // For now: simulate streaming
-    const mockResponse = `I understand you'd like to ${originalUtterance.substring(0, 20)}. Let me help with that.`;
-    const tokens = this.tokenize(mockResponse);
+    const { text: realResponse } = await this.callModel(prompt, originalUtterance, model);
+    const tokens = this.tokenize(realResponse);
 
-    // Simulate token-by-token arrival
-    let tokenIndex = 0;
-    const streamInterval = setInterval(() => {
-      if (tokenIndex < tokens.length) {
-        response.tokens.push(tokens[tokenIndex]);
-        response.text += (tokenIndex > 0 ? " " : "") + tokens[tokenIndex];
-        response.totalTokens = tokenIndex + 1;
-        tokenIndex++;
-      } else {
-        response.isComplete = true;
-        clearInterval(streamInterval);
-      }
-    }, 50); // 50ms per token ≈ natural speech rate
+    // Drip out the real response token-by-token at a natural speech rate —
+    // and WAIT for the drip to finish before this function returns (see
+    // the bug note above). If nothing has flagged completion externally,
+    // finishing the drip resolves this on its own.
+    await new Promise<void>((resolve) => {
+      let tokenIndex = 0;
+      const streamInterval = setInterval(() => {
+        if (response.isComplete) {
+          clearInterval(streamInterval);
+          resolve();
+          return;
+        }
+        if (tokenIndex < tokens.length) {
+          response.tokens.push(tokens[tokenIndex]);
+          response.text += (tokenIndex > 0 ? " " : "") + tokens[tokenIndex];
+          response.totalTokens = tokenIndex + 1;
+          tokenIndex++;
+        } else {
+          response.isComplete = true;
+          clearInterval(streamInterval);
+          resolve();
+        }
+      }, 50); // 50ms per token ≈ natural speech rate
+    });
 
     return response;
   }
 
   /**
-   * Create streaming response from buffered text
+   * Create streaming response from a real (non-streamed) model call.
    */
   private async streamFromBuffer(
     prompt: string,
     model: { model: string; provider: string; config: Record<string, unknown> },
     originalUtterance: string
   ): Promise<StreamingResponse> {
-    // Non-streaming path: wait for full response, then stream it
-    const mockResponse = `I'd be happy to help with that. Let me think about the best approach...`;
-    return this.createStreamFromText(mockResponse, "model");
+    const { text: realResponse } = await this.callModel(prompt, originalUtterance, model);
+    return this.createStreamFromText(realResponse, "model");
   }
 
   /**

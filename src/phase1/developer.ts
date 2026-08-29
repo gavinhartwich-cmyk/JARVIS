@@ -15,7 +15,7 @@
  * autonomous authority over dangerous systems").
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { builtinModules } from "module";
 import { RepositoryExplorer, CodeReader, DependencyAnalyzer } from "./repository";
 import { v4 as uuidv4 } from "uuid";
@@ -153,14 +153,16 @@ export class JARVISDeveloper {
     this.repositoryPath = repositoryPath;
     this.gitManager = new GitManager(repositoryPath);
     this.repositoryExplorer = new RepositoryExplorer(repositoryPath);
-    // Same Gemini-first, Ollama-fallback gateway as Phase 0 (see
+    // Same OmniRoute-first, Ollama-fallback gateway as Phase 0 (see
     // src/models/llm-gateway.ts) — the Coder/Debugger loop is exactly
-    // where a Gemini 429 mid-pipeline used to be most costly to hit.
+    // where a single upstream's quota exhaustion mid-pipeline used to be
+    // most costly to hit; OmniRoute's own 300+-provider auto-fallback now
+    // absorbs that before it ever reaches JARVIS as an error.
     this.modelProvider = modelProvider ?? new GatewayModelProvider(createDefaultGateway());
 
     const modelConfig = {
       provider: this.modelProvider.name,
-      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      model: process.env.OMNIROUTE_MODEL || "auto",
       temperature: 0.3, // lower than Phase 0's conversational default — code needs precision, not creativity
       maxTokens: 8000, // Coder/Debugger need room for full file contents
     };
@@ -260,7 +262,38 @@ export class JARVISDeveloper {
     console.log(`Task ID: ${taskId}`);
     console.log(`Branch: ${branchName}`);
 
-    const startStatus = await this.gitManager.getStatus();
+    // BUG FIX (2026-08-28, full-codebase review): getStatus() used to run
+    // here, before the try block below starts — so a real failure (target
+    // path isn't a git repo, git binary missing, corrupted .git) threw
+    // straight out of developFeature() uncaught, skipping the whole
+    // try/catch's "return a failed DeveloperResult" contract entirely and
+    // relying on cli.ts's top-level handler alone. Wrapped in its own
+    // try/catch now so this failure mode returns the same well-formed
+    // `{ status: "failed", ... }` shape every other failure in this
+    // pipeline does, consistent with what cli.ts's "developer" command
+    // handler expects to read `result.status` from.
+    let startStatus: Awaited<ReturnType<typeof this.gitManager.getStatus>>;
+    try {
+      startStatus = await this.gitManager.getStatus();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`\n❌ Could not read git status for '${this.repositoryPath}': ${message}`);
+      return {
+        taskId,
+        success: false,
+        status: "failed",
+        branchName,
+        baseBranch: options.baseBranch || "",
+        architecture: "",
+        taskPlan: "",
+        implementation: new Map(),
+        buildStatus: { success: false, errors: [] },
+        testResults: { configured: false, passed: 0, failed: 0 },
+        codeReviewResults: { quality: 0, issues: [], approved: false },
+        securityReviewResults: { riskLevel: "low", issues: [], approved: false },
+        verificationResults: { recommendation: "needs_fixes", issues: [`Not a usable git repository: ${message}`] },
+      };
+    }
     const baseBranch = options.baseBranch || startStatus.branch;
 
     const result: DeveloperResult = {
@@ -764,10 +797,20 @@ export class JARVISDeveloper {
     try {
       await this.gitManager.stageAll();
       const hasChanges = await this.gitManager.hasUncommittedChanges();
+      // BUG FIX (2026-08-28, full-codebase review): `commit` used to be
+      // declared inside this `if` block, so it was out of scope by the
+      // `return` below — the function computed a real commit hash, logged
+      // it, and then discarded it, always returning `commitHash: undefined`
+      // even on a fully successful run. Hoisted so the real hash actually
+      // reaches the caller (developFeature() assigns it to
+      // result.gitCommit) instead of silently losing it from the audit
+      // trail.
+      let commitHash: string | undefined;
       if (hasChanges) {
         const commit = await this.gitManager.commit(
           `JARVIS Developer: ${requirement.slice(0, 72)}\n\nTask: ${taskId}`
         );
+        commitHash = commit.hash;
         console.log(`   Committed: ${commit.hash}`);
       } else {
         console.log("   Nothing new to commit (already committed).");
@@ -793,7 +836,7 @@ export class JARVISDeveloper {
       const status = await this.gitManager.getStatus();
       console.log(prUrl ? `   PR: ${prUrl}` : "   No remote available — branch is local-only; review it directly on this machine.");
 
-      return { success: true, prUrl, branchPushed, commitHash: undefined };
+      return { success: true, prUrl, branchPushed, commitHash };
     } catch (error) {
       console.error(`   ❌ Deploy step failed: ${error instanceof Error ? error.message : error}`);
       return { success: false };
@@ -812,10 +855,21 @@ export class JARVISDeveloper {
     taskId: string
   ): string | undefined {
     try {
-      const title = `JARVIS Developer: ${requirement.slice(0, 72)}`.replace(/"/g, '\\"');
+      // SECURITY FIX (2026-08-28, full-codebase review): this used to build
+      // a shell command string with `.replace(/"/g, '\\"')` as its only
+      // defense — that escapes a literal `"` but does nothing about
+      // `$(...)`/backtick command substitution or `;`/`&&` chaining, which
+      // bash still expands even inside double quotes. Since `requirement`
+      // (part of `body`) and `baseBranch` both ultimately come from
+      // cli.ts's argv, this was a second real injection point, independent
+      // of the one in git.ts. Fixed the same way: execFileSync with an
+      // argv array — no shell involved, so title/body/branch names reach
+      // `gh` as literal arguments no matter what characters they contain.
+      const title = `JARVIS Developer: ${requirement.slice(0, 72)}`;
       const body = `Automated change from JARVIS Developer (Phase 1).\n\nTask: ${taskId}\nRequirement: ${requirement}\n\nThis PR was opened automatically after all automated checks passed and a human explicitly approved deployment. Review before merging.`;
-      const output = execSync(
-        `gh pr create --base "${baseBranch}" --head "${branchName}" --title "${title}" --body "${body.replace(/"/g, '\\"')}"`,
+      const output = execFileSync(
+        "gh",
+        ["pr", "create", "--base", baseBranch, "--head", branchName, "--title", title, "--body", body],
         { cwd: this.repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
       );
       const urlMatch = output.match(/https:\/\/github\.com\/\S+/);
@@ -901,7 +955,7 @@ export class JARVISDeveloper {
     });
 
     console.log("\nKey Features:");
-    console.log("  ✓ Full autonomous development pipeline, wired to a real LLM (Gemini)");
+    console.log("  ✓ Full autonomous development pipeline, wired to a real LLM (OmniRoute → Ollama → Gemini → OpenRouter)");
     console.log("  ✓ Real build verification (bun run typecheck)");
     console.log("  ✓ Real test execution (bun test) — honestly reports 'no tests' rather than faking a pass");
     console.log("  ✓ Bounded auto-debug loop (max " + MAX_DEBUG_ATTEMPTS + " attempts) on build/test failure");

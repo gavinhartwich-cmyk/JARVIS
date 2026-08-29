@@ -40,6 +40,19 @@ export class GeminiProvider implements ModelProvider {
     if (!this.apiKey) return false;
 
     try {
+      // BUG FIX (2026-08-28, full-codebase review): this fetch had no
+      // signal/timeout at all — unlike every other provider's available()
+      // (Ollama 3s, OpenRouter/OmniRoute 5s) and unlike this file's own
+      // stream() method (which does set a 60s AbortSignal.timeout).
+      // selectProvider() in llm-gateway.ts awaits each candidate's
+      // available() sequentially in registration order (OmniRoute ->
+      // Ollama -> Gemini -> OpenRouter): if GEMINI_API_KEY is set and this
+      // network path stalls (not a clean connection-refused, but a
+      // firewall silently dropping packets, a DNS hang, a slow proxy)
+      // while OmniRoute/Ollama are both down, this await blocks forever
+      // and OpenRouter — the otherwise-healthy next provider in line —
+      // never gets a chance to be tried at all. 5s matches the other
+      // providers' health-check budgets.
       const response = await fetch(this.endpoint(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -47,6 +60,7 @@ export class GeminiProvider implements ModelProvider {
           contents: [{ role: "user", parts: [{ text: "ping" }] }],
           generationConfig: { maxOutputTokens: 5 },
         }),
+        signal: AbortSignal.timeout(5_000),
       });
       return response.ok;
     } catch (error) {
@@ -61,6 +75,8 @@ export class GeminiProvider implements ModelProvider {
       temperature?: number;
       maxTokens?: number;
       systemPrompt?: string;
+      timeoutMs?: number;
+      signal?: AbortSignal;
     }
   ): Promise<ModelResponse> {
     if (!this.apiKey) {
@@ -105,10 +121,23 @@ export class GeminiProvider implements ModelProvider {
       systemInstruction: { parts: [{ text: structuredSystemText }] },
     };
 
+    // BUG FIX (2026-08-28, full-codebase review): this fetch also had no
+    // signal/timeout — contrast with stream() in this same file (line
+    // ~199), which correctly applies
+    // `options.signal || AbortSignal.timeout(options.timeoutMs ?? 60_000)`.
+    // This is the streaming-vs-non-streaming divergence that mattered:
+    // production only ever calls complete(), never stream(). Once
+    // selectProvider() picked Gemini (e.g. OmniRoute/Ollama both
+    // unavailable), any network stall here — not just a slow response,
+    // a connection that's accepted but never answered — hung this call
+    // forever. A promise that never settles is never caught by the
+    // gateway's try/catch, so it never fell back to OpenRouter and never
+    // surfaced an error upward either.
     const response = await fetch(this.endpoint(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: options?.signal || AbortSignal.timeout(options?.timeoutMs ?? 60_000),
     });
 
     if (!response.ok) {

@@ -8,9 +8,12 @@ import { storeMemory } from "./memory";
 import { TaskDecomposer } from "./task-decomposer";
 import { toolManager } from "../tools/manager";
 import { ConversationEngine } from "../phase2/conversation-engine";
-import { ConversationalIntelligence } from "./conversation-intelligence";
+import { ConversationalIntelligence, type ActionOutcome } from "./conversation-intelligence";
 import { IntelligentModelRouter } from "./model-router";
 import { identityEngine, type IdentityResult } from "./identity";
+import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
+import { ScreenControl } from "../phase3/screen-control";
+import type { ModelProvider } from "../models/types";
 
 /**
  * Orchestrator with Conversational Intelligence
@@ -49,6 +52,11 @@ export class Orchestrator {
   private conversationEngine: ConversationEngine;
   private conversationalIntelligence: ConversationalIntelligence;
   private modelRouter: IntelligentModelRouter;
+  // Same gateway ConversationalIntelligence uses, kept here too so
+  // classifyAppControlIntent() (below) can make its own direct call — a
+  // classification task, not a conversational reply, so it deliberately
+  // doesn't go through IntelligentModelRouter's reply-tiering.
+  private modelProvider: ModelProvider;
 
   // Resolved once per process, not per tool call — a real PIN-elevation
   // flow would refresh this; for now every tool call in a run shares the
@@ -66,9 +74,15 @@ export class Orchestrator {
     // Initialize conversational layer
     this.conversationEngine = new ConversationEngine();
     this.modelRouter = new IntelligentModelRouter();
+    // Same gateway every other real call site uses (OmniRoute → Ollama →
+    // Gemini → OpenRouter) — this is what makes processConversation() a
+    // real LLM call instead of the hardcoded placeholder text it returned
+    // before 2026-08-27.
+    this.modelProvider = new GatewayModelProvider(createDefaultGateway());
     this.conversationalIntelligence = new ConversationalIntelligence(
       this.conversationEngine,
-      this.modelRouter
+      this.modelRouter,
+      this.modelProvider
     );
 
     // Set up proactive monitors
@@ -245,6 +259,22 @@ export class Orchestrator {
         source: `task_${taskId}`,
       });
 
+      // Only "created" and "failed" were ever logged here before — a task
+      // that succeeded left no audit-trail record of its own completion,
+      // even though invariant #12 ("every action is auditable") and the
+      // master doc both claim a complete audit trail.
+      await logAuditEvent({
+        actor: "orchestrator",
+        action: "completed",
+        resource: "task",
+        resourceId: taskId,
+        result: {
+          verificationStatus: finalResult.verificationStatus,
+          confidence: finalResult.confidence,
+        },
+        statusCode: 200,
+      });
+
       console.log(`\n✅ Task complete!`);
       console.log(`   Status: ${finalResult.verificationStatus}`);
       console.log(`   Confidence: ${(finalResult.confidence * 100).toFixed(0)}%`);
@@ -344,9 +374,47 @@ export class Orchestrator {
     taskId?: string;
     context: ReturnType<ConversationEngine["getConversationContext"]>;
   }> {
-    // Use conversational intelligence to process utterance
+    // App-control intents ("open Spotify", "close Notepad") are executed
+    // FOR REAL before the LLM ever generates a reply — see
+    // parseAppControlIntent()/classifyAppControlIntent()/
+    // executeAppControlIntent() below. Fixed 2026-08-27 per Gavin: "when
+    // something like that is asked it completes the task and stay[s]
+    // conversational... it needs to be proactive not reactive." The action
+    // runs first specifically so the reply is grounded in what actually
+    // happened (including a real failure) rather than the model guessing —
+    // see ConversationalIntelligence's ActionOutcome handling.
+    //
+    // Two-tier detection (added 2026-08-27, same day, per Gavin: "that
+    // narrow scope makes it difficult to talk naturally... I don't want it
+    // to be like current home systems where it's very blocky and certain
+    // words MUST be said like with Alexa or Google Home"):
+    //   1. parseAppControlIntent() — free, instant, zero-LLM-cost regex
+    //      match for the common explicit phrasing ("open Spotify"). Tried
+    //      first so the obvious case never pays for a round-trip.
+    //   2. classifyAppControlIntent() — only runs when #1 finds nothing.
+    //      Uses the LLM itself to understand indirect/colloquial phrasing
+    //      ("yo pull up chrome real quick", "I wanna listen to some music,
+    //      get Spotify going", "kill that notepad window") the regex could
+    //      never enumerate. This is genuinely NLU, not a bigger keyword
+    //      list — the tradeoff is one extra LLM round-trip on every
+    //      utterance the regex doesn't already catch, which is real added
+    //      latency; worth confirming feels acceptable once this runs live.
+    let appControlIntent = this.parseAppControlIntent(userUtterance);
+    if (!appControlIntent) {
+      appControlIntent = await this.classifyAppControlIntent(userUtterance);
+    }
+    let actionOutcome: ActionOutcome | undefined;
+    if (appControlIntent) {
+      console.log(`\n🎯 App-control intent detected: ${appControlIntent.action} "${appControlIntent.appName}"`);
+      actionOutcome = await this.executeAppControlIntent(appControlIntent);
+    }
+
+    // Use conversational intelligence to process utterance, with the real
+    // action outcome (if any) so the reply can confirm/deny it truthfully
+    // and proactively, instead of a canned template per app.
     const stream = await this.conversationalIntelligence.processWithStreaming(
-      userUtterance
+      userUtterance,
+      actionOutcome
     );
 
     // In production: stream tokens to TTS
@@ -358,8 +426,14 @@ export class Orchestrator {
     const conversationContext = this.conversationEngine.getConversationContext();
 
     if (this.isTaskRequest(userUtterance)) {
-      // Would decompose and execute as task
-      console.log(`\n📋 Implied task detected in conversation`);
+      // Separate, still-open gap from the app-control one above: this only
+      // detects dev/code-shaped requests spoken conversationally ("write a
+      // script that...", "build a...") — it does not decompose or dispatch
+      // them to the Phase 1 developer pipeline. `taskId` stays undefined.
+      // Left unbuilt deliberately (same "verify before expanding" priority
+      // as before) — for later: decompose via TaskDecomposer, run through
+      // JARVISDeveloper or toolManager.executeTool() as appropriate.
+      console.log(`\n📋 Implied dev-task detected in conversation (not yet executed — see comment above)`);
     }
 
     // Record in memory
@@ -370,6 +444,193 @@ export class Orchestrator {
       taskId,
       context: conversationContext,
     };
+  }
+
+  /**
+   * Detects a conversational "open/launch/start <app>" or "close/quit/exit
+   * <app>" request. Anchored to the START of the utterance (after
+   * stripping a leading "Jarvis," address) rather than matching the verb
+   * anywhere in the sentence — "what's open at the store" or "when does
+   * the movie start" should NOT trigger this; "Jarvis, open Spotify"
+   * should. A false-positive match (e.g. some other imperative-shaped
+   * sentence) still fails safely: `windowsController.openApplication()`
+   * shells out to a real, argument-escaped `Start-Process`, so a bogus
+   * "app name" just fails to launch with a normal PowerShell error — see
+   * windows-control.ts — not a security or stability risk.
+   */
+  private parseAppControlIntent(
+    utterance: string
+  ): { action: "open" | "close"; appName: string } | null {
+    const text = utterance.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+
+    // Note: the repeated-word group in the capture uses a LAZY `{0,3}?`
+    // quantifier deliberately — a greedy quantifier would swallow trailing
+    // filler words ("please", "for me") into the captured app name before
+    // backtracking ever gets a chance to hand them to the trailing filler
+    // group instead (e.g. "open Spotify please" would capture "Spotify
+    // please" as the app name with a greedy quantifier). Lazy makes the
+    // engine prefer the shortest app name first, only extending the
+    // capture when what follows doesn't match a known filler word —
+    // which is exactly right for real multi-word app names too (e.g.
+    // "open Visual Studio Code" still captures the full name, since
+    // "Studio"/"Code" aren't filler words).
+    const openMatch = text.match(
+      /^(?:can you\s+|could you\s+|would you\s+|please\s+)*(?:open|launch|start|fire up|pull up)\s+(?:up\s+)?(?:the\s+)?([a-z0-9][\w\-]*(?:\s+[a-z0-9][\w\-]*){0,3}?)(?:\s+(?:for me|please|app|application|program|now))*[.!?]*$/i
+    );
+    if (openMatch?.[1]) {
+      return { action: "open", appName: openMatch[1].trim() };
+    }
+
+    const closeMatch = text.match(
+      /^(?:can you\s+|could you\s+|would you\s+|please\s+)*(?:close|quit|exit|kill)\s+(?:the\s+)?([a-z0-9][\w\-]*(?:\s+[a-z0-9][\w\-]*){0,3}?)(?:\s+(?:for me|please|app|application|program|now))*[.!?]*$/i
+    );
+    if (closeMatch?.[1]) {
+      return { action: "close", appName: closeMatch[1].trim() };
+    }
+
+    return null;
+  }
+
+  /**
+   * Natural-language fallback for app-control detection, added 2026-08-27
+   * per Gavin's feedback that the regex-only version was "blocky" like
+   * Alexa/Google Home — certain exact words required. Only runs when
+   * parseAppControlIntent() finds nothing, so the free/instant regex path
+   * still handles the common explicit case with zero LLM cost; this one
+   * uses the LLM itself to understand indirect or colloquial phrasing the
+   * regex could never enumerate ("yo pull up chrome real quick", "I wanna
+   * listen to some music, get Spotify going", "kill that notepad window").
+   *
+   * Deliberately conservative: the prompt instructs the model to only
+   * return isAppControl:true when a SPECIFIC named app is actually being
+   * requested to open/close, not merely mentioned ("I'm working in
+   * Photoshop right now" should not trigger this). Never throws — any
+   * failure (provider error, malformed JSON) is treated the same as "no
+   * intent detected" and falls through to plain conversation, same
+   * fail-safe behavior as a real natural miss.
+   */
+  private async classifyAppControlIntent(
+    utterance: string
+  ): Promise<{ action: "open" | "close"; appName: string } | null> {
+    const classifierPrompt =
+      "You are an intent classifier for JARVIS, a desktop voice assistant. Given what the user just said, " +
+      "determine whether they are asking to OPEN/LAUNCH or CLOSE/QUIT a specific application on their " +
+      "computer — in ANY phrasing: direct (\"open Spotify\"), casual (\"yo pull up chrome\"), or indirect " +
+      "(\"I wanna listen to some music, get Spotify going\"). Respond with ONLY a single raw JSON object, no " +
+      "other text, no markdown code fences, matching exactly this shape:\n" +
+      '{"isAppControl": boolean, "action": "open" | "close" | null, "appName": string | null}\n\n' +
+      "Rules:\n" +
+      "- isAppControl is true ONLY if a SPECIFIC, NAMED application is actually being requested to open or " +
+      'close right now — not merely mentioned. ("I\'m working in Photoshop right now" is NOT a request.)\n' +
+      '- If they mention an activity but no specific app ("play some jazz", "let\'s browse the web"), that is ' +
+      "NOT enough on its own — isAppControl is false, since you don't know which app to act on.\n" +
+      '- appName should be just the application name, normalized to how it\'s actually launched (e.g. ' +
+      '"Spotify", "Google Chrome", "Notepad") — no extra words, no leading articles.\n' +
+      "- If the utterance isn't about opening/closing an app at all, isAppControl is false and action/appName " +
+      "are null.\n\n" +
+      "Examples:\n" +
+      '"open Spotify" -> {"isAppControl": true, "action": "open", "appName": "Spotify"}\n' +
+      '"yo pull up chrome real quick" -> {"isAppControl": true, "action": "open", "appName": "Google Chrome"}\n' +
+      '"I wanna listen to some music, get Spotify going" -> {"isAppControl": true, "action": "open", "appName": "Spotify"}\n' +
+      '"kill that notepad window" -> {"isAppControl": true, "action": "close", "appName": "Notepad"}\n' +
+      '"can you get rid of discord" -> {"isAppControl": true, "action": "close", "appName": "Discord"}\n' +
+      '"I\'m working in Photoshop right now" -> {"isAppControl": false, "action": null, "appName": null}\n' +
+      '"what\'s open at the store" -> {"isAppControl": false, "action": null, "appName": null}\n' +
+      '"play some jazz" -> {"isAppControl": false, "action": null, "appName": null}\n' +
+      '"how\'s the weather" -> {"isAppControl": false, "action": null, "appName": null}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        {
+          temperature: 0,
+          maxTokens: 150,
+          // Honored as real JSON-mode by OpenAI-compatible backends
+          // (OmniRoute/OpenRouter); Ollama/Gemini ignore this option and
+          // rely on their own internal structured-output wrapper instead
+          // (see ollama-provider.ts/gemini-provider.ts) — either way the
+          // prompt above is what actually carries the instruction.
+          responseFormat: { type: "json_object" },
+        }
+      );
+
+      const jsonText = this.extractJsonObject(response.content);
+      if (!jsonText) return null;
+
+      const parsed = JSON.parse(jsonText) as {
+        isAppControl?: boolean;
+        action?: "open" | "close" | null;
+        appName?: string | null;
+      };
+
+      if (
+        parsed.isAppControl === true &&
+        (parsed.action === "open" || parsed.action === "close") &&
+        typeof parsed.appName === "string" &&
+        parsed.appName.trim().length > 0
+      ) {
+        return { action: parsed.action, appName: parsed.appName.trim() };
+      }
+      return null;
+    } catch (error) {
+      console.error(
+        "⚠ App-control intent classification failed (falling back to plain conversation):",
+        error instanceof Error ? error.message : error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Pulls the first {...} JSON object out of a model response, tolerating
+   * the markdown code fences or stray leading/trailing text a model might
+   * add despite being told not to (small local models especially).
+   */
+  private extractJsonObject(text: string): string | null {
+    const trimmed = text.trim();
+    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = fenced ? fenced[1].trim() : trimmed;
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start === -1 || end === -1 || end < start) return null;
+    return candidate.slice(start, end + 1);
+  }
+
+  /**
+   * Actually runs an app-control intent via the same real, authorized
+   * `ScreenControl` path `bun run dev control-test` already exercises —
+   * not a new execution mechanism, just a new caller of the existing one.
+   * Never throws: any failure (authorization denied, app not found,
+   * PowerShell error) comes back as `{ success: false, detail: ... }` so
+   * the conversational reply can report it honestly.
+   */
+  private async executeAppControlIntent(intent: {
+    action: "open" | "close";
+    appName: string;
+  }): Promise<ActionOutcome> {
+    const description = `${intent.action === "open" ? "Open" : "Close"} "${intent.appName}"`;
+    try {
+      const identity = await this.getIdentity();
+      const screenControl = new ScreenControl();
+      const result =
+        intent.action === "open"
+          ? await screenControl.openApp(intent.appName, identity)
+          : await screenControl.closeApp(intent.appName, identity);
+      return {
+        description,
+        success: result.success,
+        detail: result.success ? (result.output ?? "done") : (result.error ?? "Unknown error"),
+      };
+    } catch (error) {
+      return {
+        description,
+        success: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /**

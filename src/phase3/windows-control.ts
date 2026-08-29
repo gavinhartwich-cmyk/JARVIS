@@ -90,7 +90,7 @@ Add-Type -AssemblyName System.Windows.Forms
     const sendKeysCombo = this.toSendKeysSyntax(combo);
     await runPowerShell(`
 Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.SendKeys]::SendWait("${sendKeysCombo}")
+[System.Windows.Forms.SendKeys]::SendWait("${psEscape(sendKeysCombo)}")
 `);
   }
 
@@ -123,7 +123,23 @@ Add-Type -AssemblyName System.Windows.Forms
       else if (part === "shift") modifiers += "+";
     }
 
-    const mainKeySyntax = specialKeys[mainKey] ?? mainKey;
+    // SECURITY FIX (2026-08-28, full-codebase review): every other method
+    // in this file (typeText, openApplication, closeApplication,
+    // focusWindow) runs its string argument through psEscape() before
+    // interpolating it into the PowerShell double-quoted SendKeys/
+    // Start-Process string. This method didn't — `mainKey` falls through
+    // to `specialKeys[mainKey] ?? mainKey` verbatim for any key name not
+    // in the small special-keys map above, so an unescaped value reached
+    // the caller (previously interpolated with no escaping at all; now
+    // psEscape() is applied to the whole combo string at the call site
+    // above as a second layer of defense too). A key/combo string
+    // containing `"` followed by PowerShell statement separators could
+    // otherwise break out of the SendKeys("...") string and run arbitrary
+    // PowerShell — this is a first-class field on the public
+    // ControlAction/ScreenControl.key() API, so it's reachable by
+    // anything (a future agent/LLM tool-calling path, not just the
+    // current hardcoded "ctrl+a" caller) that constructs one.
+    const mainKeySyntax = specialKeys[mainKey] ?? psEscape(mainKey);
     return modifiers + mainKeySyntax;
   }
 
@@ -138,9 +154,22 @@ Add-Type -AssemblyName System.Windows.Forms
   }
 
   async focusWindow(windowTitle: string): Promise<void> {
+    // BUG FIX (2026-08-28, full-codebase review): AppActivate returns a
+    // boolean — false, not an exception, when no window matches the
+    // title — but that return value was never checked. The script exited
+    // 0 either way, so ScreenControl.executeSequence() reported success
+    // regardless of whether anything was actually focused, and any
+    // type/key/click actions later in the same sequence silently landed
+    // on whatever window actually had focus instead of the intended one.
+    // Now the script itself throws (nonzero exit, caught by
+    // runPowerShell's reject path) when AppActivate reports no match.
     await runPowerShell(`
 $shell = New-Object -ComObject WScript.Shell
-$shell.AppActivate("${psEscape(windowTitle)}")
+$activated = $shell.AppActivate("${psEscape(windowTitle)}")
+if (-not $activated) {
+  Write-Error "No window matching title '${psEscape(windowTitle)}' could be activated."
+  exit 1
+}
 `);
   }
 

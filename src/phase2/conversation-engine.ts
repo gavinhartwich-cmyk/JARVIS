@@ -241,16 +241,39 @@ export class ConversationEngine {
    */
   private extractNouns(text: string): string[] {
     // Simplified noun extraction - in production would use NLP library
+    //
+    // BUG FIX (2026-08-28, full-codebase review): this used to treat ANY
+    // capitalized word as a "noun," including the sentence-initial word
+    // of an ordinary English sentence (always capitalized regardless of
+    // part of speech — "The meeting is at 3pm" -> "The") and the pronoun
+    // "I". This feeds directly into live pronoun resolution:
+    // resolveReference() -> extractNouns(lastJarvisResponse) ->
+    // updatePronounReferents() sets pronounReferents.set("that", "The"),
+    // so the user's next turn "cancel that" got rewritten to "cancel The"
+    // before intention detection / the LLM ever saw it — corrupting real
+    // conversational turns (this path is genuinely reachable via `bun run
+    // dev conversation`), not just a theoretical edge case. Now tracks
+    // sentence boundaries (a word immediately following [.!?]-terminated
+    // punctuation, or the very first word, is sentence-initial and
+    // skipped) and excludes the standalone pronoun "I".
     const words = text.split(/\s+/);
     const nouns: string[] = [];
-    
+    let sentenceStart = true;
+
     for (const word of words) {
+      const isSentenceStart = sentenceStart;
+      sentenceStart = /[.!?]$/.test(word);
+
+      if (isSentenceStart) continue;
       // Very simple heuristic: capitalized words are likely proper nouns
       if (/^[A-Z]/.test(word)) {
-        nouns.push(word.replace(/[.,!?;:]/g, ""));
+        const cleaned = word.replace(/[.,!?;:]/g, "");
+        if (cleaned && cleaned !== "I") {
+          nouns.push(cleaned);
+        }
       }
     }
-    
+
     return nouns;
   }
 
@@ -275,14 +298,26 @@ export class ConversationEngine {
       return "request";
     }
 
+    // BUG FIX (2026-08-28, full-codebase review): "correction" and
+    // "conversational" both matched utterances starting with "no", and
+    // since this function returns on first match, "correction" was
+    // unreachable for that entire class of input when checked second —
+    // e.g. "No, actually I meant Thursday" was always classified
+    // "conversational". Correction is now checked first, with its "no"
+    // branch tightened to require something after it (a comma or more
+    // words) so a bare "no"/"no." reply — genuinely conversational, not a
+    // correction — still falls through to the conversational check below
+    // exactly as before. (Currently low practical impact: nothing
+    // downstream — selectReasoningPath()/model-router.ts — differentiates
+    // on "correction" today, so this only fixes the classification
+    // itself, not yet any behavior built on it.)
+    if (lower.match(/^(no\s*,|no\s+(actually|wait)\b|actually|wait|hold on|change that)/i)) {
+      return "correction";
+    }
+
     // Conversational detection
     if (lower.match(/^(yes|no|ok|sure|thanks|hello|hi)/i)) {
       return "conversational";
-    }
-
-    // Correction detection
-    if (lower.match(/^(no|actually|wait|hold on|change that)/i)) {
-      return "correction";
     }
 
     // Default: general conversation
@@ -502,24 +537,21 @@ export class ConversationEngine {
     // Minimum silence required: 500ms
     // But check for sentence-ending cues
 
+    // BUG FIX (2026-08-28, full-codebase review): the doc comment above
+    // ("Minimum silence required: 500ms") and this first guard both say
+    // 500ms is the real threshold, but the two branches below only
+    // returned true for >=1000ms or >=3000ms — the 500-999ms range fell
+    // through both and hit the final `return false`, silently
+    // contradicting the function's own stated contract. No caller
+    // exercises this yet (the real-mic pipeline it supports doesn't exist
+    // in this codebase yet), so this was latent rather than live, but
+    // fixed to match the documented 500ms threshold before anything gets
+    // wired up to it.
     if (audioStream.silenceDurationMs < 500) {
       return false; // Too short, likely a pause
     }
 
-    // 1000-2000ms: likely end of sentence
-    if (
-      audioStream.silenceDurationMs >= 1000 &&
-      audioStream.silenceDurationMs < 3000
-    ) {
-      return true;
-    }
-
-    // 3000ms+: definitely end of turn
-    if (audioStream.silenceDurationMs >= 3000) {
-      return true;
-    }
-
-    return false;
+    return true; // >= 500ms silence: treat as end of turn
   }
 
   /**

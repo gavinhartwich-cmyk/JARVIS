@@ -191,9 +191,27 @@ export class Perception {
     }
 
     // Pattern: "type [text]"
-    if (lower.match(/^type\s+(.+)/i)) {
-      const match = lower.match(/^type\s+(.+)/i);
-      const text = match?.[1] || "text";
+    // BUG FIX (2026-08-28, full-codebase review): this used to match
+    // against `lower` (the fully lowercased query) and take the typed
+    // text straight from that match — so "type Hello@Example.com" or
+    // "type MyP@ssw0rd" got typed into the focused window as
+    // "hello@example.com" / "myp@ssw0rd". Case-sensitive text (passwords,
+    // URLs, proper nouns, code) was silently corrupted before it ever
+    // reached the keyboard. Matched against the ORIGINAL-case `query` now
+    // (re-deriving the match index from the lowercased match position, so
+    // the "type" keyword itself still matches case-insensitively while
+    // the captured text preserves whatever case the user actually typed).
+    // The "d" flag gives precise [start, end] indices for each capture
+    // group (match.indices[1]) instead of the original code's approach of
+    // reading the captured text directly out of the lowercased string —
+    // that's what let case get destroyed. Indices are position-stable
+    // between `lower` and `query` since toLowerCase() doesn't change
+    // string length for the characters this pattern matches.
+    const typeMatchLower = lower.match(/^type\s+(.+)/id);
+    if (typeMatchLower) {
+      const indices = (typeMatchLower as unknown as { indices: Array<[number, number]> }).indices;
+      const [start, end] = indices[1];
+      const text = query.slice(start, end) || "text";
       const seq = this.screenControl.buildSequence(`Type text`);
       this.screenControl.type(seq, text);
       return seq;
@@ -203,12 +221,15 @@ export class Perception {
     if (lower.includes("click") && lower.includes("and type")) {
       const seq = this.screenControl.buildSequence("Click and type");
       const clickMatch = lower.match(/click\s+([^,\s]+)/);
-      const typeMatch = lower.match(/type\s+(.+?)(?:\.|$)/);
+      const typeMatch = lower.match(/type\s+(.+?)(?:\.|$)/d);
       if (clickMatch?.[1]) {
         this.screenControl.click(seq, clickMatch[1]);
       }
       if (typeMatch?.[1]) {
-        this.screenControl.type(seq, typeMatch[1]);
+        // Same original-case fix as the standalone "type" pattern above.
+        const indices = (typeMatch as unknown as { indices: Array<[number, number]> }).indices;
+        const [start, end] = indices[1];
+        this.screenControl.type(seq, query.slice(start, end) || typeMatch[1]);
       }
       return seq;
     }

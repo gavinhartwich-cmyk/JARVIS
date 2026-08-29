@@ -223,27 +223,56 @@ export class ScreenControl {
       };
     }
 
-    const auth = await authorizationEngine.authorize(identity, "computer_control", "normal");
-    if (!auth.allowed) {
-      console.log(`\n🔒 Authorization denied: ${auth.reason}`);
-      return {
-        success: false,
-        sequenceId: sequence.id,
-        actionsTaken: 0,
-        error: `Blocked: ${auth.reason}`,
-        executionTimeMs: 0,
-      };
-    }
-
-    if (sequence.confirmBefore) {
-      console.log(`\n⚠️  This sequence is marked as requiring confirmation:`);
-      console.log(`   Sequence: ${sequence.description}`);
-      console.log(`   Actions: ${sequence.actions.length}`);
-      console.log(`   Expected: ${sequence.expectedOutcome}`);
-      console.log(`   (No interactive confirmation UI yet — proceeding since authorization already passed.)`);
-    }
-
+    // BUG FIX (2026-08-28, full-codebase review): `isOperating` used to be
+    // set to `true` only after the `await authorizationEngine.authorize()`
+    // call below — but the busy-check above and that flag-set were
+    // separated by a real async gap (the awaited authorize() call). Two
+    // executeSequence() calls arriving close together (e.g. two
+    // overlapping voice commands) could both read `isOperating === false`,
+    // both proceed through authorize(), and both then set it true and run
+    // their keyboard/mouse action loops concurrently against the same real
+    // desktop — defeating the whole point of the mutex (serializing
+    // automation so one sequence's clicks/keystrokes can't land in the
+    // wrong window mid-sequence). Claiming the lock here, synchronously,
+    // right after the busy-check and before any `await`, closes that gap;
+    // the `finally` below still guarantees it's released on every exit
+    // path, including a denied/failed authorization.
     this.isOperating = true;
+    try {
+      const auth = await authorizationEngine.authorize(identity, "computer_control", "normal");
+      if (!auth.allowed) {
+        console.log(`\n🔒 Authorization denied: ${auth.reason}`);
+        return {
+          success: false,
+          sequenceId: sequence.id,
+          actionsTaken: 0,
+          error: `Blocked: ${auth.reason}`,
+          executionTimeMs: 0,
+        };
+      }
+
+      if (sequence.confirmBefore) {
+        console.log(`\n⚠️  This sequence is marked as requiring confirmation:`);
+        console.log(`   Sequence: ${sequence.description}`);
+        console.log(`   Actions: ${sequence.actions.length}`);
+        console.log(`   Expected: ${sequence.expectedOutcome}`);
+        console.log(`   (No interactive confirmation UI yet — proceeding since authorization already passed.)`);
+      }
+
+      return await this.runSequenceActions(sequence);
+    } finally {
+      this.isOperating = false;
+    }
+  }
+
+  /**
+   * Runs the actual action loop once the lock is held and authorization
+   * has passed — split out of executeSequence() so the outer try/finally
+   * there can guarantee `isOperating` is released on every exit path
+   * (including a denied authorization) without this method needing to
+   * know about the lock at all.
+   */
+  private async runSequenceActions(sequence: ControlSequence): Promise<ControlResult> {
     const startTime = Date.now();
     let actionsTaken = 0;
 
@@ -293,8 +322,6 @@ export class ScreenControl {
 
       this.executionHistory.push(result);
       return result;
-    } finally {
-      this.isOperating = false;
     }
   }
 
@@ -396,6 +423,20 @@ export class ScreenControl {
     const seq = this.buildSequence(`Open ${appName}`);
     this.open(seq, appName);
     this.wait(seq, waitMs);
+    return this.executeSequence(seq, identity);
+  }
+
+  /**
+   * Close/quit application. Added 2026-08-27 alongside openApp() so
+   * conversational "close Spotify"/"quit Notepad" requests (see
+   * `Orchestrator.parseAppControlIntent`) have the same one-call shape as
+   * opening one — same authorization gate, same real
+   * `windowsController.closeApplication()` underneath (best-effort
+   * `Stop-Process` by name; a no-match is not an error).
+   */
+  async closeApp(appName: string, identity: IdentityResult): Promise<ControlResult> {
+    const seq = this.buildSequence(`Close ${appName}`);
+    this.close(seq, appName);
     return this.executeSequence(seq, identity);
   }
 
