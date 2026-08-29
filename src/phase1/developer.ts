@@ -17,6 +17,7 @@
 
 import { execFileSync } from "child_process";
 import { builtinModules } from "module";
+import path from "path";
 import { RepositoryExplorer, CodeReader, DependencyAnalyzer } from "./repository";
 import { v4 as uuidv4 } from "uuid";
 import { GitManager } from "./git";
@@ -544,9 +545,10 @@ export class JARVISDeveloper {
     plan: string
   ): Promise<{ files: Map<string, string>; success: boolean; reason?: string }> {
     console.log("\n💻 STEP 4: Implementing Code (Coder Agent)");
+    const existingContent = this.existingFileContext(requirement, design, plan);
     const output = await this.agents.coder.execute({
       taskId: this.runId,
-      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}`,
+      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}${existingContent}`,
       context: {},
     });
 
@@ -587,6 +589,70 @@ export class JARVISDeveloper {
       `dependency. If you need functionality beyond what's listed, implement it with plain TypeScript ` +
       `and Node/Bun built-ins instead.`
     );
+  }
+
+  /**
+   * Find file paths mentioned in the requirement/design/plan that already
+   * exist in the repo, and return their real current content formatted for
+   * the Coder prompt.
+   *
+   * Found necessary via a live run: given the trivial requirement "add a
+   * one-line code comment above the callModel method in
+   * src/core/conversation-intelligence.ts", the Coder agent was never shown
+   * that file's real 770-line content - only its path, inside a plain-text
+   * requirement string. With nothing to anchor to, it wrote a fresh ~35-line
+   * reimplementation from scratch (the CODER_ROLE "Content: Complete file
+   * content" instruction, taken literally with no existing content to
+   * complete-*from*), silently deleting the real module and breaking every
+   * file that imports from it. That only reached the working tree on a
+   * throwaway feature branch (no --approve), so nothing was lost, but the
+   * pipeline would do real damage the moment a real approved run touched an
+   * existing file. Fix: actually read and inject the current content of any
+   * existing file the task references, so "Complete file content" means
+   * "the real file, with your edit applied" instead of "your best guess at
+   * what a file like this might contain."
+   */
+  private existingFileContext(requirement: string, design: string, plan: string): string {
+    // Repo-relative-looking paths: at least one directory segment, a
+    // recognized extension. Deliberately permissive - false positives just
+    // fail the existsSync check below and cost nothing.
+    const pathPattern = /(?:[\w.-]+\/)+[\w.-]+\.(?:ts|tsx|js|jsx|json|md|ps1|sh|py|sql|yml|yaml)\b/g;
+    const haystack = `${requirement}\n${design}\n${plan}`;
+    const candidates = new Set(haystack.match(pathPattern) ?? []);
+
+    const MAX_FILES = 5;
+    const MAX_CHARS_PER_FILE = 20000;
+    const sections: string[] = [];
+
+    for (const relPath of candidates) {
+      if (sections.length >= MAX_FILES) break;
+      const normalized = relPath.replace(/^\.?\//, "");
+      const resolved = path.resolve(this.repositoryPath, normalized);
+      // Guard against a match that escapes the repo root (e.g. "../../etc/passwd").
+      if (!resolved.startsWith(path.resolve(this.repositoryPath))) continue;
+      try {
+        let content = CodeReader.readFile(resolved);
+        let truncatedNote = "";
+        if (content.length > MAX_CHARS_PER_FILE) {
+          content = content.slice(0, MAX_CHARS_PER_FILE);
+          truncatedNote = "\n... [truncated - file is longer than shown]";
+        }
+        sections.push(
+          `\n--- EXISTING CONTENT of ${normalized} (this file already exists - your file block\n` +
+            `for this path MUST be the complete file below with your change applied, preserving\n` +
+            `every line that isn't part of the requested change; do NOT rewrite or reinvent it) ---\n` +
+            content +
+            truncatedNote +
+            `\n--- END EXISTING CONTENT of ${normalized} ---\n`
+        );
+      } catch {
+        // Doesn't exist on disk (or isn't readable) - it's a new file, no
+        // existing content to show. Nothing to do here.
+      }
+    }
+
+    if (sections.length === 0) return "";
+    return `\n\n${sections.join("\n")}`;
   }
 
   /**

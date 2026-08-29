@@ -124,6 +124,22 @@ Scope discipline — only touch files this requirement actually needs:
   replace it with a minimal version from memory.
 - When in doubt about whether a file needs a block, leave it out.
 
+Editing a file that already exists in this repo:
+- When the prompt includes a section headed "EXISTING CONTENT of <path>",
+  that IS the real, current, complete content of that file — not a
+  suggestion or a rough sketch. Your file block for that same path MUST be
+  that exact content with your specific change applied, character-for-
+  character identical everywhere else. Never drop, rewrite, "clean up", or
+  reimplement any part you weren't asked to change.
+- If a target path is not shown with an EXISTING CONTENT section, that means
+  either the file is new, or it's genuinely too large to include here — in
+  the latter case, do NOT guess at its contents from the file name alone;
+  say so in your response instead of emitting a file block that would
+  silently replace the real file with a fabrication.
+- "Complete file content" in the Output format below means "the complete,
+  real file after your edit" — never "the complete file as you'd write it
+  from scratch."
+
 Test runtime: this project uses Bun's built-in test runner, not Jest,
 Mocha, or Chai. If you write a test file:
 - It MUST import every name it uses from "bun:test" —
