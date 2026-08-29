@@ -1,0 +1,5 @@
+# The working tree on this project's Windows dev machine is CRLF
+# throughout (files are edited with Windows tools that default to
+# CRLF). Declare that as the canonical policy so git stops flagging
+# files as "modified" purely from line-ending drift between checkouts.
+* text=auto eol=crlf
