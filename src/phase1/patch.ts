@@ -131,6 +131,14 @@ Output every file you create or modify using EXACTLY this delimited format, one 
 
 If, after analysis, no file changes are actually needed, output only the single line:
 ===NO_CHANGES===
+
+This applies no matter how small the requested change is. A response like
+a bare markdown code fence containing just a comment, or a raw
+snippet with no ===FILE:=== / ===END FILE=== markers, is NOT valid output
+and will be rejected by the parser that reads your response - even when
+the change itself really is just one line. If a file's EXISTING CONTENT
+was shown to you elsewhere in this prompt, your block for that path is
+that entire content with your edit applied, not a summary of the edit.
 `;
 
 /**

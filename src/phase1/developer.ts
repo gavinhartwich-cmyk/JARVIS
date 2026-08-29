@@ -546,9 +546,19 @@ export class JARVISDeveloper {
   ): Promise<{ files: Map<string, string>; success: boolean; reason?: string }> {
     console.log("\n💻 STEP 4: Implementing Code (Coder Agent)");
     const existingContent = this.existingFileContext(requirement, design, plan);
+    // This final reminder is deliberately placed after everything else,
+    // including the (potentially large) injected file content - found
+    // necessary via a live run where the Coder agent, given a real
+    // requirement plus a 770-line EXISTING CONTENT block, replied with a
+    // bare ```typescript comment and no ===FILE:=== markers at all. The
+    // real protocol instructions live in the system prompt, ahead of all
+    // of this; repeating the concrete requirement right before the model
+    // generates its answer keeps it from getting lost behind a large
+    // block of injected file content.
+    const finalReminder = `\n\nReminder: your response for this requirement must use the ===FILE:===...===END FILE=== format above for every file you touch, with that file's complete content (existing content plus your edit, if it already exists) - not a code fence, not a diff, not just the changed lines.`;
     const output = await this.agents.coder.execute({
       taskId: this.runId,
-      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}${existingContent}`,
+      task: `Requirement:\n${requirement}\n\nArchitecture:\n${design}\n\nTask plan:\n${plan}\n\nRepository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}${existingContent}${finalReminder}`,
       context: {},
     });
 
