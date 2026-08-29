@@ -680,16 +680,20 @@ if (-not $omniUp) {
 # correct: each later agent's prompt genuinely depends on the earlier
 # ones' real output, so this can't just be parallelized away. Each hop is
 # a real OmniRoute call through its free "auto" routing - OmniRoute's own
-# call logs (checked earlier this session) show a single such call taking
-# 47.7s for a three-sentence reply. Five of those sequentially is
-# comfortably 150-250s+ even with nothing wrong, which is exactly what a
-# 180s cap would clip. 300s gives real headroom without the step running
+# call logs show individual calls taking anywhere from ~1s to 47.7s, and a
+# live run of this exact step genuinely exceeded 300s (a previous run of
+# this same step completed in ~280-296s, i.e. already close to that cap
+# with nothing wrong). Each agent's own per-call timeout was also just
+# raised from the provider's 60s default to 90s (cli.ts) since calls were
+# observed running close to 60s on their own - so five sequential calls'
+# true worst case is now 450s, not the ~300s it was implicitly bounded to
+# before. 480s gives a little headroom above that without the step running
 # away forever - Invoke-CapturedCommand still kills the whole process tree
 # on timeout, so a genuine hang is still caught. If this still routinely
 # runs long, pinning OMNIROUTE_MODEL to a specific faster model instead of
 # "auto" (in .env) is worth trying - "auto" is convenient but doesn't let
 # you pick for speed.
-$r = Invoke-JarvisCommand -CommandArgs "test" -TimeoutSec 300
+$r = Invoke-JarvisCommand -CommandArgs "test" -TimeoutSec 480
 Write-FullOutput -Label "5.test" -Result $r
 if ($r.Success) {
   Add-Result -Step "5. Phase 0 vertical slice" -Status PASS -Detail "Exit 0"

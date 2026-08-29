@@ -166,6 +166,14 @@ export class JARVISDeveloper {
       model: process.env.OMNIROUTE_MODEL || "auto",
       temperature: 0.3, // lower than Phase 0's conversational default — code needs precision, not creativity
       maxTokens: 8000,
+      // 120s - a live run hit the provider's 60s-default per-call timeout
+      // on a plain Architect-agent call (no code generation even involved
+      // yet), surfaced as an opaque "The operation timed out." several
+      // layers up. Phase 1's calls (architecture/planning reasoning, and
+      // especially Coder/Debugger reproducing real files) run longer than
+      // Phase 0's conversational calls, so they get more room than cli.ts's
+      // 90s.
+      timeoutMs: 120_000,
     };
 
     // Coder/Debugger specifically have to reproduce an ENTIRE existing

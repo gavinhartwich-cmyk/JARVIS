@@ -67,6 +67,7 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
       const response = await this.modelProvider.complete(messages, {
         temperature: this.modelConfig.temperature || 0.7,
         maxTokens: this.modelConfig.maxTokens || 2000,
+        timeoutMs: this.modelConfig.timeoutMs,
       });
 
       const duration = Date.now() - startTime;

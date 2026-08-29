@@ -51,4 +51,13 @@ export interface ModelConfig {
   temperature?: number;
   maxTokens?: number;
   stream?: boolean;
+  // Per-call timeout passed through to the provider's AbortSignal.timeout().
+  // Every provider defaults to 60_000ms if this is left unset - found via a
+  // live run where a single Architect-agent call (real reasoning over a
+  // real prompt, via OmniRoute's free auto-routed backend) exceeded 60s and
+  // got hard-aborted mid-request, surfacing only as an opaque
+  // "The operation timed out." several layers up. BaseAgent now forwards
+  // this so pipelines whose calls are known to run long (code generation,
+  // multi-step reasoning) can ask for more room than the provider default.
+  timeoutMs?: number;
 }

@@ -108,6 +108,11 @@ async function main() {
           model: process.env.OMNIROUTE_MODEL || "auto",
           temperature: 0.7,
           maxTokens: 2000,
+          // 90s, not the provider default of 60s - a live run through
+          // OmniRoute's free auto-routed backend showed individual calls
+          // running close to (and sometimes past) 60s even for plain
+          // conversational reasoning.
+          timeoutMs: 90_000,
         },
         modelProvider
       );
