@@ -788,7 +788,20 @@ Stop-Process -Name notepad -Force -ErrorAction SilentlyContinue
 # Step 7: Phase 1 developer pipeline (safe, small, no --approve)
 # ============================================================
 Write-Log "`n--- Step 7: Phase 1 developer pipeline (no --approve, so nothing gets committed) ---"
-$devReq = 'Add a one-line code comment above the callModel method in src/core/conversation-intelligence.ts explaining what it does (verification-only test run, do not change behavior)'
+# EIGHTH bug, found from the 23:47:57 run: this requirement asked for a
+# one-line comment above callModel() "explaining what it does" - which an
+# EARLIER real fix in this same file already added (a whole block
+# documenting its behavior and history). The Coder correctly looked at the
+# real existing file content and said no change was needed - a legitimate,
+# correct answer, not a bug - but developer.ts at the time treated any
+# step4 non-success as a hard failure, so this step FAILed for a task that
+# had, in effect, already been completed by prior work. Fixed on two
+# fronts: developer.ts now returns a distinct non-failure status when the
+# Coder determines a requirement is already satisfied, AND this requirement
+# text is made self-refreshing (unique marker per run) so it can never
+# again be pre-satisfied by a previous run's own output - keeping this step
+# an actual live test of the Coder's editing ability, not a fossil.
+$devReq = "Add this exact one-line comment directly above the callModel method in src/core/conversation-intelligence.ts: // verify-jarvis.ps1 Step 7 marker $timestamp (do not change behavior, do not remove any existing comments)"
 $r = Invoke-JarvisCommand -CommandArgs "developer `"$devReq`"" -TimeoutSec 600
 Write-FullOutput -Label "7.developer" -Result $r
 if ($r.Success) {

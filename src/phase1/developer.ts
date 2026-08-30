@@ -75,7 +75,7 @@ export interface DeveloperTask {
 export interface DeveloperResult {
   taskId: string;
   success: boolean;
-  status: "completed" | "failed" | "needs_revision" | "awaiting_human_approval";
+  status: "completed" | "failed" | "needs_revision" | "awaiting_human_approval" | "no_changes_needed";
   branchName: string;
   baseBranch: string;
   architecture: string;
@@ -372,6 +372,22 @@ export class JARVISDeveloper {
       // Step 4: Implement code
       const implementation = await this.step4_ImplementCode(requirement, design.design, plan.roadmap);
       if (!implementation.success) {
+        if (implementation.noChangesNeeded) {
+          // Real, legitimate end state, not a failure: the Coder looked at
+          // the actual current file content and determined the requirement
+          // is already satisfied. There's nothing to build, test, or
+          // review, so return early here instead of falling into the
+          // catch block below, which exists for genuine errors and always
+          // marks the run "failed".
+          result.status = "no_changes_needed";
+          result.success = true;
+          console.log("\n" + "=".repeat(70));
+          console.log("📊 DEVELOPMENT PIPELINE COMPLETE - NO CHANGES NEEDED");
+          console.log("=".repeat(70));
+          console.log("The Coder agent determined the requirement is already satisfied by the current code.");
+          console.log(`Branch: ${branchName} (base: ${baseBranch}) - left checked out, nothing was committed.`);
+          return result;
+        }
         throw new Error(implementation.reason);
       }
       result.implementation = implementation.files;
@@ -564,7 +580,7 @@ export class JARVISDeveloper {
     requirement: string,
     design: string,
     plan: string
-  ): Promise<{ files: Map<string, string>; success: boolean; reason?: string }> {
+  ): Promise<{ files: Map<string, string>; success: boolean; reason?: string; noChangesNeeded?: boolean }> {
     console.log("\n💻 STEP 4: Implementing Code (Coder Agent)");
     const existingContent = this.existingFileContext(requirement, design, plan);
 
@@ -606,7 +622,17 @@ export class JARVISDeveloper {
       });
 
       if (isNoChangesResponse(output.content)) {
-        return { files: new Map(), success: false, reason: "Coder agent determined no file changes were needed for this requirement." };
+        // Distinct from every other step4 failure: the Coder didn't fail
+        // to produce a valid edit, it looked at the real existing file
+        // content (via existingFileContext()) and determined the
+        // requirement is already satisfied. Found live: a verify-jarvis.ps1
+        // Step 7 run asking to "add a one-line comment above callModel"
+        // correctly got this response, because an earlier real fix had
+        // already added an extensive comment block above that exact
+        // method - the requirement genuinely was already done. Flagging
+        // this separately lets the caller treat it as a legitimate
+        // no-op completion instead of an error to throw.
+        return { files: new Map(), success: false, reason: "Coder agent determined no file changes were needed for this requirement.", noChangesNeeded: true };
       }
 
       const blocks: FileBlock[] = parseFileBlocks(output.content);
