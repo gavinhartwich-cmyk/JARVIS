@@ -20,6 +20,14 @@ export interface MicCaptureConfig {
   blockMs?: number;
   pythonPath?: string;
   scriptPath?: string;
+  // Case-insensitive substring match against the real input device list
+  // (e.g. "C920" for an HD Pro Webcam C920's mic) - see mic_capture.py's
+  // own header comment for why this isn't optional-but-ignored: without
+  // it, sounddevice silently opens whatever the OS currently calls the
+  // default input device, which is a guess on any machine with more than
+  // one microphone. Falls back to MIC_DEVICE_NAME, then the OS default if
+  // neither is set.
+  deviceName?: string;
 }
 
 function resolveMicPaths(config: { pythonPath?: string; scriptPath?: string }) {
@@ -30,6 +38,10 @@ function resolveMicPaths(config: { pythonPath?: string; scriptPath?: string }) {
     config.pythonPath || process.env.WHISPER_PYTHON_PATH || "tools/whisper/venv/bin/python";
   const scriptPath = config.scriptPath || process.env.MIC_CAPTURE_SCRIPT_PATH || "scripts/mic_capture.py";
   return { pythonPath, scriptPath };
+}
+
+function resolveDeviceName(config: { deviceName?: string }): string {
+  return config.deviceName || process.env.MIC_DEVICE_NAME || "";
 }
 
 export class MicCapture {
@@ -58,9 +70,10 @@ export class MicCapture {
     if (this.proc) return;
     const { pythonPath, scriptPath } = resolveMicPaths(this.config);
 
+    const deviceName = resolveDeviceName(this.config);
     this.proc = spawn(
       pythonPath,
-      [scriptPath, String(this.config.sampleRate), String(this.config.channels), String(this.config.blockMs)],
+      [scriptPath, String(this.config.sampleRate), String(this.config.channels), String(this.config.blockMs), deviceName],
       { stdio: ["ignore", "pipe", "pipe"] }
     );
 

@@ -13,6 +13,9 @@ import { ScreenControl } from "./phase3/screen-control";
 import { JARVISDeveloper } from "./phase1/developer";
 import { VoiceInterface } from "./phase2/voice-interface";
 import { MicCapture } from "./phase2/mic-capture";
+import { DEFAULT_VOICE_CONFIG } from "./phase2/voice-config";
+import { HudServer } from "./phase2/hud-server";
+import { runPowerShell } from "./phase3/windows-control";
 import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
 import { writeFileSync, readFileSync } from "node:fs";
@@ -352,13 +355,54 @@ async function main() {
       const voice = new VoiceInterface();
       await voice.start();
 
-      const mic = new MicCapture({ sampleRate: 16000, channels: 1, blockMs: 250 });
+      // Visual HUD (2026-08-30, per Gavin: an animated version of the
+      // JARVIS ring icon he shared, showing idle/listening/thinking/
+      // speaking) - Phase 5 in the master doc, which previously said this
+      // "doesn't exist... never got past a chat message." First real
+      // piece of it: public/hud.html is a self-contained animated SVG/CSS
+      // page: state changes come from the real voice-interface.ts events
+      // below, not simulated timers. Port 0 = let the OS pick a free
+      // port, read back via hud.url, since a hardcoded port could already
+      // be in use. Opened as a borderless "app mode" Edge window (real
+      // Windows Edge is always present; no new dependency) rather than a
+      // normal browser tab.
+      const hud = new HudServer();
+      hud.start(0);
+      voice.on("listening", () => hud.setState("idle"));
+      voice.on("wake-word-detected", () => hud.setState("listening"));
+      voice.on("user-speech-recognized", () => hud.setState("thinking"));
+      voice.on("audio-ready", () => hud.setState("speaking"));
+      voice.on("interaction-complete", () => hud.setState("idle"));
+      try {
+        await runPowerShell(
+          `Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420"`
+        );
+        console.log(`\n🖥️  HUD window opened (${hud.url}) - close it manually when you're done; stopping 'listen' does not close it for you.`);
+      } catch (err) {
+        console.log(`\n⚠️  Could not open the HUD window automatically: ${err instanceof Error ? err.message : err}`);
+        console.log(`   You can open it yourself: ${hud.url}`);
+      }
+
+      // Sourced from the same DEFAULT_VOICE_CONFIG the VoiceInterface above
+      // just constructed itself from, not separately hardcoded values -
+      // otherwise it would be possible for the mic to capture at a
+      // different sample rate than wake-word-detector.ts/speech-recognizer.ts
+      // are configured to expect, or (2026-08-30, per Gavin) to silently
+      // ignore his actual mic choice (audio.inputDeviceName) because this
+      // command's own copy of the config drifted from voice-config.ts's.
+      const mic = new MicCapture({
+        sampleRate: DEFAULT_VOICE_CONFIG.audio.sampleRate,
+        channels: DEFAULT_VOICE_CONFIG.audio.channels,
+        blockMs: 250,
+        deviceName: DEFAULT_VOICE_CONFIG.audio.inputDeviceName,
+      });
       let shuttingDown = false;
       const shutdown = async () => {
         if (shuttingDown) return;
         shuttingDown = true;
         console.log("\n🛑 Stopping...");
         mic.stop();
+        hud.stop();
         await voice.stop();
         process.exit(0);
       };

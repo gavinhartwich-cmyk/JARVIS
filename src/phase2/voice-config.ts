@@ -38,6 +38,12 @@ export interface VoiceConfig {
     bitDepth: number; // 16 for 16-bit
     vadEnabled: boolean; // Voice activity detection
     noiseSuppressionEnabled: boolean;
+    // Case-insensitive substring match against the real input device
+    // list (e.g. "C920" for an HD Pro Webcam C920) - see
+    // mic_capture.py/mic-capture.ts. Empty/undefined = whatever the OS
+    // currently calls the default input device, which is a real ambiguity
+    // on any machine with more than one microphone, not a safe default.
+    inputDeviceName?: string;
   };
 
   // Conversation settings
@@ -111,6 +117,15 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     bitDepth: 16,
     vadEnabled: true,
     noiseSuppressionEnabled: true,
+    // Per Gavin (2026-08-30): "I want it to be from the HD Pro Webcam
+    // C920" - explicit, not a guess. "C920" alone (not the full product
+    // name) because Windows/driver naming for this exact device varies
+    // ("Microphone (HD Pro Webcam C920)", "HD Pro Webcam C920", etc.) and
+    // mic_capture.py does a substring match, so the short, stable part of
+    // the name is the safer match target. Override with the
+    // MIC_DEVICE_NAME env var if this ever needs to change without a
+    // code edit.
+    inputDeviceName: "C920",
   },
   conversation: {
     contextWindowSize: 10, // Remember last 10 messages
