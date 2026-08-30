@@ -24,10 +24,22 @@ float32 samples before the int16 conversion, so every downstream
 consumer (wake-word-detector.ts AND the RMS-based VAD in
 voice-interface.ts) benefits, not just the wake-word threshold. Hard-
 clips to [-1, 1] first to avoid wraparound distortion on loud peaks.
-Defaults to 4.0 (a real starting hypothesis, not a measured-correct
-value - the [mic] peak-level log line below is there specifically so
-this can be recalibrated from Gavin's real numbers instead of guessed
-again).
+Defaults to 4.0 - confirmed working for wake-word detection against
+Gavin's real live scores (2026-08-30: 0.9111 confidence on "jarvis" at
+normal volume, up from 0.0000-0.0175 unboosted). [UPDATE, same day]
+That same live run also showed real clipping on louder speech ("peak
+level... CLIPPING" - raw peaks up to 0.48 hitting the old hard np.clip
+ceiling), which distorts exactly the audio faster-whisper needs to
+transcribe accurately. Fixed by switching from a hard clip to a tanh
+soft-knee saturation (np.tanh(raw * gain)): behaves identically to
+plain linear gain for quiet/moderate signal (tanh(z) ~= z for small z,
+so the wake-word-confirmed boost at normal talking volume is
+unchanged) but saturates gradually instead of flat-topping on loud
+peaks, avoiding the harsh distortion hard clipping caused - so the
+gain itself didn't need lowering, only the limiting behavior did. The
+[mic] peak-level log line below still reports raw vs. post-gain peaks
+and now flags heavy saturation (>=0.98) rather than hard clipping,
+since tanh technically never hits exactly 1.0.
 
 device_substring (2026-08-30, per Gavin: "I didn't expect the wake word
 to work when you don't know what mic I want - I want it to be from the
@@ -96,7 +108,14 @@ def main():
             # the stream over it.
             print(f"[mic_capture] stream status: {status}", file=sys.stderr)
         raw = indata[:, 0]
-        boosted = np.clip(raw * gain, -1.0, 1.0)
+        # tanh soft-knee saturation, not a hard np.clip (2026-08-30, real
+        # live data showed hard clipping on louder speech - see the
+        # header comment): behaves like plain linear gain for small
+        # values (tanh(z) ~= z), so quiet/normal-volume audio - including
+        # the exact level that scored 0.9111 on the wake word - is boosted
+        # the same as before, but loud peaks saturate smoothly instead of
+        # flat-topping into distortion.
+        boosted = np.tanh(raw * gain)
         # indata is float32 in [-1, 1] by default; convert to int16 PCM to
         # match what wake-word-detector.ts/speech-recognizer.ts already
         # expect (they build a WAV header assuming 16-bit PCM).
@@ -113,7 +132,7 @@ def main():
         diag_state["post_peak"] = max(diag_state["post_peak"], post_peak)
         wall_now = time.monotonic()
         if wall_now - diag_state["last_log"] >= 1.0:
-            clipped = " (CLIPPING - gain too high)" if diag_state["post_peak"] >= 0.999 else ""
+            clipped = " (heavily saturated - consider lowering gain)" if diag_state["post_peak"] >= 0.98 else ""
             print(
                 f"[mic_capture] peak level (last 1s): raw={diag_state['raw_peak']:.4f} "
                 f"gain={gain:.1f}x -> post-gain={diag_state['post_peak']:.4f}{clipped}",

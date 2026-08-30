@@ -30,13 +30,28 @@ import { playWavBuffer } from "./audio-player";
 // noise never reads as "silent").
 const END_OF_TURN_SILENCE_MS = 3000;
 
-// A real signal-energy threshold has to be tuned against an actual room
-// and microphone, not guessed - this default is a reasonable starting
-// point for 16-bit PCM (16-bit full scale is 32768; ~1.5% of full scale
-// is a common floor for "someone is plainly talking" vs. room noise) but
-// WILL likely need tuning on Gavin's actual hardware, the same honest
-// caveat wake-word-detector.ts's sensitivity default carries.
-const SPEECH_RMS_THRESHOLD = 500;
+// [UPDATE 2026-08-30] A fixed RMS number here turned out not to
+// survive contact with a real mic gain change: mic_capture.py's
+// wake-word-triggered gain fix (audio.micGain) pushed real ambient
+// background energy up to 2600-4000 in Gavin's actual room, well above
+// the 500 this constant used to be - so every chunk read as "still
+// speaking" and a turn could never end on silence (confirmed live:
+// "silence: 0ms/3000ms" for over a minute straight). A fixed number
+// can't work here at all, because it has no way to know what gain or
+// room it's being compared against. Replaced with a threshold computed
+// fresh per turn, in handleWakeWord(), from the real ambient energy
+// actually measured during the idle listening window right before the
+// wake word fired (see idleEnergyWindow below) - whatever the gain or
+// room happens to be, "someone is talking" is now defined relative to
+// what this exact mic just measured as quiet, not against a number
+// tuned once and never revisited. FALLBACK_SPEECH_THRESHOLD is only
+// used on the rare case a turn starts before any idle samples exist
+// yet (e.g. the wake word fires within the first couple seconds of
+// `listen` starting, before a full idle window has been collected).
+const IDLE_NOISE_WINDOW_CHUNKS = 20; // ~5s of 250ms mic chunks - long enough to smooth over one loud blip, short enough to reflect the room right now
+const SPEECH_ABOVE_FLOOR_MULTIPLIER = 2.5; // "speech" = at least this many times louder than the measured quiet floor, not a fixed absolute number
+const MIN_SPEECH_THRESHOLD = 150; // absolute backstop under the floor - guards a near-dead-silent room from producing an unrealistically tiny threshold that any faint sound would cross
+const FALLBACK_SPEECH_THRESHOLD = 500; // only used if a turn starts with zero idle samples collected yet - the old static guess, now a safety net instead of the primary mechanism
 
 /** Root-mean-square energy of a 16-bit PCM buffer - simple, real, cheap voice-activity signal (not a trained VAD model). */
 function computeRmsEnergy(pcm16: Buffer): number {
@@ -101,6 +116,15 @@ export class VoiceInterface {
   private turnSilenceMs: number = 0;
   private turnHasSpeech: boolean = false;
   private turnStartedAt: number = 0;
+  // Rolling window of real energy readings taken while idle (see
+  // IDLE_NOISE_WINDOW_CHUNKS above) - this is what handleWakeWord() reads
+  // from to compute turnSpeechThreshold fresh for each turn, instead of
+  // comparing against a fixed guessed number.
+  private idleEnergyWindow: number[] = [];
+  // This turn's real speech-vs-silence cutoff, computed once in
+  // handleWakeWord() from idleEnergyWindow - see FALLBACK_SPEECH_THRESHOLD
+  // above for why it starts there before any turn has happened.
+  private turnSpeechThreshold: number = FALLBACK_SPEECH_THRESHOLD;
   // Throttles the VAD debug log below to ~2x/sec instead of once per
   // 250ms mic chunk (4x/sec) - enough to see real energy levels/timing
   // live without flooding the console during a real turn.
@@ -254,6 +278,25 @@ export class VoiceInterface {
     this.turnSilenceMs = 0;
     this.turnHasSpeech = false;
     this.turnStartedAt = Date.now();
+
+    // Real per-turn calibration (2026-08-30) - see IDLE_NOISE_WINDOW_CHUNKS
+    // above for why this replaced a fixed SPEECH_RMS_THRESHOLD: whatever
+    // this exact mic/gain/room just measured as "quiet" in the few
+    // seconds before this wake word fired is the real baseline to compare
+    // against, not a number picked once on different hardware.
+    if (this.idleEnergyWindow.length > 0) {
+      const measuredFloor = Math.min(...this.idleEnergyWindow);
+      this.turnSpeechThreshold = Math.max(measuredFloor * SPEECH_ABOVE_FLOOR_MULTIPLIER, MIN_SPEECH_THRESHOLD);
+      console.log(
+        `   🎚️  turn speech threshold: ${this.turnSpeechThreshold.toFixed(0)} (from ${this.idleEnergyWindow.length} real pre-wake-word samples, quietest was ${measuredFloor.toFixed(0)})`
+      );
+    } else {
+      this.turnSpeechThreshold = FALLBACK_SPEECH_THRESHOLD;
+      console.log(
+        `   🎚️  turn speech threshold: ${this.turnSpeechThreshold.toFixed(0)} (fallback - no idle samples collected yet, e.g. wake word fired right at startup)`
+      );
+    }
+
     this.emit("wake-word-detected", event);
 
     // Start listening for speech
@@ -273,8 +316,18 @@ export class VoiceInterface {
   async processMicChunk(chunk: Buffer): Promise<void> {
     if (!this.isRunning || this.isSpeaking) return;
 
+    const energy = computeRmsEnergy(chunk);
+
     if (!this.context.isActive) {
-      // Idle: only the wake-word detector cares about audio right now.
+      // Idle: only the wake-word detector cares about audio right now,
+      // but this is also real, live ambient-noise data - keep a rolling
+      // window of it (see IDLE_NOISE_WINDOW_CHUNKS above) so the NEXT
+      // turn's speech threshold is grounded in what this room/mic/gain
+      // actually measured as quiet moments ago, not a stale guess.
+      this.idleEnergyWindow.push(energy);
+      if (this.idleEnergyWindow.length > IDLE_NOISE_WINDOW_CHUNKS) {
+        this.idleEnergyWindow.shift();
+      }
       if (this.wakeWordDetector) {
         await this.wakeWordDetector.processAudioChunk(chunk);
       }
@@ -288,8 +341,7 @@ export class VoiceInterface {
     }
 
     const chunkMs = (chunk.length / 2 / this.config.audio.sampleRate) * 1000;
-    const energy = computeRmsEnergy(chunk);
-    const isSpeechEnergy = energy > SPEECH_RMS_THRESHOLD;
+    const isSpeechEnergy = energy > this.turnSpeechThreshold;
     if (isSpeechEnergy) {
       this.turnHasSpeech = true;
       this.turnSilenceMs = 0;
@@ -297,18 +349,17 @@ export class VoiceInterface {
       this.turnSilenceMs += chunkMs;
     }
 
-    // Real diagnostic gap found 2026-08-30: a live run where "open
-    // Notepad" produced no response at all, with no way to tell from the
-    // console whether speech was ever detected, what the actual energy
-    // level was, or how close to the silence/max-duration cutoffs the
-    // turn was - SPEECH_RMS_THRESHOLD is a guessed starting point (see
-    // its own comment above) that may not match this exact mic/room, and
-    // without visibility a wrong guess just looks like total silence.
+    // Real diagnostic gap found 2026-08-30, still worth keeping even
+    // after the threshold itself became real/per-turn: this is what
+    // showed the fixed-threshold bug in the first place (silence stuck
+    // at 0ms for over a minute straight in a real live run) and is still
+    // the fastest way to see the new per-turn threshold actually working
+    // (or not) without guessing blind again.
     const now = Date.now();
     if (now - this.lastVadLogAt >= 500) {
       this.lastVadLogAt = now;
       console.log(
-        `   🎚️  energy: ${energy.toFixed(0)} (speech threshold: ${SPEECH_RMS_THRESHOLD}) | speech detected this turn: ${this.turnHasSpeech} | silence: ${this.turnSilenceMs.toFixed(0)}ms / ${END_OF_TURN_SILENCE_MS}ms`
+        `   🎚️  energy: ${energy.toFixed(0)} (speech threshold: ${this.turnSpeechThreshold.toFixed(0)}) | speech detected this turn: ${this.turnHasSpeech} | silence: ${this.turnSilenceMs.toFixed(0)}ms / ${END_OF_TURN_SILENCE_MS}ms`
       );
     }
 
