@@ -18,3 +18,8 @@ tools/piper/
 tools/whisper/
 models/piper/
 models/whisper/
+
+# Python bytecode cache (scripts/ has real .py files: mic_capture.py,
+# wakeword_detect.py, whisper_transcribe.py)
+__pycache__/
+*.pyc

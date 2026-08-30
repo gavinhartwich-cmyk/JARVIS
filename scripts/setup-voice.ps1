@@ -41,6 +41,18 @@ if (-not (Test-Path "tools\whisper\venv")) {
     & tools\whisper\venv\Scripts\pip.exe install --quiet openwakeword onnxruntime sounddevice numpy
 }
 
+Write-Host "== openWakeWord pretrained models =="
+# Real bug found 2026-08-30 on Gavin's actual PC: `pip install openwakeword`
+# installs the code but not the actual model binaries (hey_jarvis's
+# .onnx/.tflite, plus the melspectrogram/embedding/VAD models the feature
+# pipeline needs) - those are separate GitHub release assets fetched only
+# by this explicit call. Missing this step is what made the very first
+# real `bun run dev listen` run fail with a raw ONNXRuntimeError "File
+# doesn't exist" - wakeword_detect.py now also self-heals this
+# defensively, but doing it here means a normal setup run never hits that
+# path in the first place.
+& tools\whisper\venv\Scripts\python.exe -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])"
+
 Write-Host "== Verifying =="
 "hey jarvis, hello from JARVIS." | tools\piper\piper\piper.exe `
     -m models\piper\en_US-amy-medium.onnx -f "$env:TEMP\jarvis-voice-check.wav" `
