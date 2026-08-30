@@ -539,8 +539,15 @@ if ($ollamaUp) {
 # ============================================================
 Write-Log "`n--- Step 3: OmniRoute ---"
 $omniUp = $false
+# -UseBasicParsing added to every Invoke-WebRequest call in this script
+# (2026-08-30, per Gavin: every run was stopping 3 times for a manual
+# [Y/N] "Script Execution Risk" prompt about parsing the response as
+# HTML/DOM). These calls only ever hit OmniRoute's own JSON API - there is
+# no HTML here to parse in the first place - so basic parsing loses
+# nothing and removes prompts that would otherwise block this script from
+# ever running unattended (e.g. via a scheduled task).
 try {
-  $r = Invoke-WebRequest -Uri "http://localhost:20128/v1/models" -TimeoutSec 5 -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)" }
+  $r = Invoke-WebRequest -Uri "http://localhost:20128/v1/models" -TimeoutSec 5 -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)" } -UseBasicParsing
   $omniUp = ($r.StatusCode -eq 200)
 } catch { $omniUp = $false }
 
@@ -571,7 +578,7 @@ if (-not $omniUp) {
     while (-not $omniUp -and $tries -lt 40) {
       Start-Sleep -Seconds 3
       try {
-        $r = Invoke-WebRequest -Uri "http://localhost:20128/v1/models" -TimeoutSec 3 -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)" }
+        $r = Invoke-WebRequest -Uri "http://localhost:20128/v1/models" -TimeoutSec 3 -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)" } -UseBasicParsing
         $omniUp = ($r.StatusCode -eq 200)
       } catch { $tries++ }
     }
@@ -598,7 +605,7 @@ if (-not $env:OMNIROUTE_API_KEY) {
   Add-Result -Step "4. OMNIROUTE_API_KEY" -Status SKIP -Detail "Key is set, but couldn't confirm it's accepted - OmniRoute isn't up (see step 3)"
 } else {
   try {
-    $r = Invoke-WebRequest -Uri "http://localhost:20128/v1/models" -TimeoutSec 5 -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)" }
+    $r = Invoke-WebRequest -Uri "http://localhost:20128/v1/models" -TimeoutSec 5 -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)" } -UseBasicParsing
     if ($r.StatusCode -eq 200) {
       Add-Result -Step "4. OMNIROUTE_API_KEY" -Status PASS -Detail "Accepted by /v1/models"
     } else {
@@ -657,7 +664,7 @@ if (-not $omniUp) {
   try {
     $smokeResp = Invoke-WebRequest -Uri "http://localhost:20128/v1/chat/completions" -Method Post `
       -Headers @{ Authorization = "Bearer $($env:OMNIROUTE_API_KEY)"; "Content-Type" = "application/json" } `
-      -Body $smokeBody -TimeoutSec 20
+      -Body $smokeBody -TimeoutSec 20 -UseBasicParsing
     $swSmoke.Stop()
     $rawContent = $smokeResp.Content
     try {
