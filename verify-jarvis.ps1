@@ -342,7 +342,33 @@ function Invoke-CapturedCommand {
     if (-not $finished) {
       try { & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null } catch { }
       try { [void]$proc.WaitForExit(5000) } catch { }
-      return @{ Success = $false; Output = "TIMED OUT after ${TimeoutSec}s"; ExitCode = -1 }
+      # SEVENTH bug, found 2026-08-30: this branch used to return a bare
+      # "TIMED OUT" string with no attempt to read the redirect files -
+      # which is exactly why every single timeout ever logged showed zero
+      # partial output, even on steps with real, useful progress (Phase 0's
+      # own checks print as they complete). cmd.exe's redirection writes
+      # stdout/stderr to these files continuously as the child runs, not
+      # only at clean exit, so whatever made it to disk before the kill is
+      # sitting right there. Read it the same way the success path does,
+      # so a timeout finally shows what actually happened before the cutoff
+      # instead of a dead end that looks identical whether the process was
+      # one line or one page into its work.
+      $partialStdout = ""; $partialStderr = ""
+      for ($i = 0; $i -lt 5; $i++) {
+        try {
+          if (Test-Path -LiteralPath $stdoutFile) { $partialStdout = [System.IO.File]::ReadAllText($stdoutFile) }
+          if (Test-Path -LiteralPath $stderrFile) { $partialStderr = [System.IO.File]::ReadAllText($stderrFile) }
+          break
+        } catch { Start-Sleep -Milliseconds 200 }
+      }
+      $partialCombined = "$partialStdout`n$partialStderr".Trim()
+      $timeoutMsg = "TIMED OUT after ${TimeoutSec}s"
+      if ($partialCombined) {
+        $timeoutMsg += " - partial output captured before kill:`n$partialCombined"
+      } else {
+        $timeoutMsg += " - no output was written to the redirect files before the kill (genuinely produced nothing yet, not just uncaptured)."
+      }
+      return @{ Success = $false; Output = $timeoutMsg; ExitCode = -1 }
     }
 
     $exitCode = -999
