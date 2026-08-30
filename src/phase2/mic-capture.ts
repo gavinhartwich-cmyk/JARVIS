@@ -28,6 +28,15 @@ export interface MicCaptureConfig {
   // one microphone. Falls back to MIC_DEVICE_NAME, then the OS default if
   // neither is set.
   deviceName?: string;
+  // Linear multiplier applied to raw mic samples before they reach
+  // wake-word-detector.ts/speech-recognizer.ts/the VAD - see
+  // mic_capture.py's own header comment (2026-08-30) for why this
+  // exists: Gavin's real wake-word scores at normal talking volume
+  // through the C920 topped out at 0.0175, ~15-50x below where an
+  // actual "jarvis" utterance should score, pointing at raw input level
+  // rather than just the wake-word threshold. Falls back to MIC_GAIN,
+  // then mic_capture.py's own default (4.0) if neither is set.
+  gain?: number;
 }
 
 function resolveMicPaths(config: { pythonPath?: string; scriptPath?: string }) {
@@ -42,6 +51,12 @@ function resolveMicPaths(config: { pythonPath?: string; scriptPath?: string }) {
 
 function resolveDeviceName(config: { deviceName?: string }): string {
   return config.deviceName || process.env.MIC_DEVICE_NAME || "";
+}
+
+function resolveGain(config: { gain?: number }): string {
+  if (config.gain !== undefined) return String(config.gain);
+  if (process.env.MIC_GAIN) return process.env.MIC_GAIN;
+  return ""; // let mic_capture.py apply its own default (4.0)
 }
 
 export class MicCapture {
@@ -71,9 +86,17 @@ export class MicCapture {
     const { pythonPath, scriptPath } = resolveMicPaths(this.config);
 
     const deviceName = resolveDeviceName(this.config);
+    const gain = resolveGain(this.config);
     this.proc = spawn(
       pythonPath,
-      [scriptPath, String(this.config.sampleRate), String(this.config.channels), String(this.config.blockMs), deviceName],
+      [
+        scriptPath,
+        String(this.config.sampleRate),
+        String(this.config.channels),
+        String(this.config.blockMs),
+        deviceName,
+        gain,
+      ],
       { stdio: ["ignore", "pipe", "pipe"] }
     );
 

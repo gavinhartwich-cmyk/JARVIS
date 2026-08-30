@@ -395,6 +395,11 @@ async function main() {
         channels: DEFAULT_VOICE_CONFIG.audio.channels,
         blockMs: 250,
         deviceName: DEFAULT_VOICE_CONFIG.audio.inputDeviceName,
+        // 2026-08-30: same drift risk as deviceName above - sourced from
+        // DEFAULT_VOICE_CONFIG so a future gain retune in voice-config.ts
+        // actually reaches the real mic process instead of silently
+        // being ignored by a second hardcoded copy here.
+        gain: DEFAULT_VOICE_CONFIG.audio.micGain,
       });
       let shuttingDown = false;
       const shutdown = async () => {

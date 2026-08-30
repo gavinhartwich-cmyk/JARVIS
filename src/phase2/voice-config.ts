@@ -44,6 +44,17 @@ export interface VoiceConfig {
     // currently calls the default input device, which is a real ambiguity
     // on any machine with more than one microphone, not a safe default.
     inputDeviceName?: string;
+    // Linear gain multiplier applied to raw mic samples in mic_capture.py
+    // before anything downstream ever sees them - added 2026-08-30 after
+    // Gavin's real wake-word scores at normal talking volume through the
+    // C920 topped out at 0.0175 (see wakeWord.sensitivity comment below
+    // for the full data). A real, unvalidated hypothesis, not a proven
+    // fix: 4.0 is a starting point, not a measured-correct value - watch
+    // the "[mic] peak level" log line mic_capture.py now prints once/sec
+    // (raw vs. post-gain, and whether post-gain is clipping) to tell
+    // whether this needs to go higher, lower, or whether the real fix is
+    // elsewhere (e.g. Windows mic boost/OS input volume).
+    micGain?: number;
   };
 
   // Conversation settings
@@ -73,21 +84,38 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     keyword: "jarvis",
     // The underlying model (openWakeWord's "hey_jarvis") was trained on the
     // phrase "hey jarvis", not bare "jarvis" — but Gavin wants any mention
-    // of "Jarvis" to trigger it, not just "hey Jarvis". Measured against
-    // real Piper-synthesized clips (2026-08-26): unrelated speech scores
-    // ~0.0001-0.0003 (noise floor); bare "jarvis" utterances scored
-    // 0.25-0.99 depending on sentence position/cadence, with one
-    // deeply-embedded mid-sentence case ("...if jarvis knows...") scoring
-    // only 0.003. 0.15 sits ~50x above the noise floor (safe from false
-    // triggers) while catching every measured "jarvis" case except that
-    // one low-cadence outlier — see wake-word-detector.ts header comment
-    // and jarvis-phase-1-developer memory for the full data. This is a
-    // real accuracy tradeoff, not a guarantee: catching that remaining
-    // case reliably would need training a dedicated "jarvis" model
-    // (openWakeWord supports this, but it's a much bigger task — large
-    // negative dataset + synthetic positive generation), not just a
-    // threshold change.
-    sensitivity: 0.15,
+    // of "Jarvis" to trigger it, not just "hey Jarvis". Originally
+    // measured against real Piper-synthesized clips (2026-08-26):
+    // unrelated speech scores ~0.0001-0.0003 (noise floor); bare "jarvis"
+    // utterances scored 0.25-0.99 depending on sentence position/cadence,
+    // with one deeply-embedded mid-sentence case ("...if jarvis
+    // knows...") scoring only 0.003. That data set 0.15 as the threshold.
+    //
+    // [UPDATE 2026-08-30] Real live data from Gavin's actual mic/room
+    // told a very different story: with the wake-word score logging
+    // added this session, 12 real samples while he talked at normal
+    // volume through the C920 - genuinely trying the wake word, not
+    // silence - ranged only 0.0000-0.0175. That's below even the OLD
+    // noise floor for synthesized clips, and ~15-50x below where a real
+    // "jarvis" utterance scored on 2026-08-26. Per Gavin: "the
+    // sensitivity needs to be turned up clearly because I want it to
+    // hear me at normal talking volume." Two changes together, not
+    // threshold alone: (1) audio.micGain (see above) now boosts the raw
+    // signal 4x before it ever reaches this model, since a gap this
+    // large points at input level, not just trigger point; (2) this
+    // threshold is lowered to 0.05 as a safety margin on top of that -
+    // still ~15-75x above the observed real non-speech floor
+    // (0.0000-0.0034) even before the gain fix helps separate signal
+    // from noise further. Disclosed uncertainty: a threshold this far
+    // below the original synthesized-clip data is unusual, and the two
+    // fixes together are a real hypothesis grounded in Gavin's actual
+    // numbers, not a proven fix yet - watch the wake-word score log
+    // (still printed every cycle) and the new mic_capture.py peak-level
+    // log after this change; if scores still don't clear 0.05 at normal
+    // volume, that means the gain isn't enough yet (raise audio.micGain
+    // or MIC_GAIN) rather than lowering this further into the noise
+    // floor, which would just trade missed wake-ups for false triggers.
+    sensitivity: 0.05,
   },
   speechRecognition: {
     enabled: true,
@@ -126,6 +154,15 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     // MIC_DEVICE_NAME env var if this ever needs to change without a
     // code edit.
     inputDeviceName: "C920",
+    // 2026-08-30, real evidence (see wakeWord.sensitivity comment below
+    // for the full log): Gavin's real wake-word scores at normal talking
+    // volume never got above 0.0175, versus 0.25-0.99 measured on
+    // 2026-08-26 for actual "jarvis" utterances - a gap way too large to
+    // just be threshold tuning, so this boosts the raw signal itself
+    // rather than only lowering the trigger point to chase a suppressed
+    // one. 4.0 is a first real attempt, not a validated value - override
+    // with MIC_GAIN if it needs adjusting before another code change.
+    micGain: 4.0,
   },
   conversation: {
     contextWindowSize: 10, // Remember last 10 messages

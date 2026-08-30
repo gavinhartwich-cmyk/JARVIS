@@ -13,15 +13,26 @@
  * bare "jarvis" scores 0.25-0.99 depending on sentence position and
  * cadence (higher near a pause/end-of-utterance, e.g. "jarvis, can you
  * help me" -> 0.997; lower when buried mid-sentence with no pause, e.g.
- * "...if jarvis knows the answer..." -> 0.003). voice-config.ts's default
- * sensitivity (0.15) is tuned from this real data to catch the large
- * majority of "jarvis" mentions while staying far above the noise floor
- * — but it is NOT a 100% guarantee of catching every utterance in every
- * sentence position; that outlier case would need a dedicated custom-
- * trained "jarvis" model (openWakeWord supports this, but it's
- * substantially more work than a threshold tune — see
- * jarvis-phase-1-developer memory for the full data and the open
- * decision on whether that's worth doing).
+ * "...if jarvis knows the answer..." -> 0.003).
+ *
+ * [UPDATE 2026-08-30] That data was all from synthesized Piper clips
+ * fed straight into the model, not a real mic. Real live scores from
+ * Gavin's actual voice through his actual C920, talking at normal
+ * volume, never got above 0.0175 across 12 samples - far below even the
+ * old synthesized noise floor. voice-config.ts's default sensitivity is
+ * now 0.05 (down from 0.15), paired with a new audio.micGain (4.0) in
+ * mic_capture.py that boosts the raw signal before it reaches this
+ * model at all, since a gap this large pointed at input level, not just
+ * the trigger point. Both numbers are a real first attempt grounded in
+ * Gavin's own data, not re-validated against synthesized clips - see
+ * voice-config.ts's sensitivity comment for the full reasoning and what
+ * to watch (the score log below, and mic_capture.py's new peak-level
+ * log) if this still isn't right. This is NOT a 100% guarantee of
+ * catching every utterance in every sentence position; the outlier case
+ * above would need a dedicated custom-trained "jarvis" model
+ * (openWakeWord supports this, but it's substantially more work than a
+ * threshold tune — see jarvis-phase-1-developer memory for the full
+ * data and the open decision on whether that's worth doing).
  *
  * Real continuous microphone capture doesn't exist in this codebase yet
  * (out of scope for this sandbox — needs Gavin's PC); this class buffers
@@ -234,7 +245,7 @@ export class WakeWordDetector {
       // fire" and "detection never ran / crashed silently" looked
       // identical from the console. Logging every real score (not just
       // successful triggers) so a live run shows real numbers to
-      // calibrate `sensitivity` (default 0.15) against instead of
+      // calibrate `sensitivity` (default 0.05 as of 2026-08-30, was 0.15) against instead of
       // guessing blind - especially relevant since the model's own known
       // behavior (see this file's header comment) scores anywhere from
       // ~0.003 to ~0.999 on genuine "jarvis" utterances depending on
