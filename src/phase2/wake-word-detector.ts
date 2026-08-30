@@ -229,6 +229,18 @@ export class WakeWordDetector {
 
     try {
       const result = await this.runWakeWordModel(bufferedAudio);
+      // Real diagnostic gap found 2026-08-30: this only ever logged on a
+      // hard error, never the actual score - so "the wake word didn't
+      // fire" and "detection never ran / crashed silently" looked
+      // identical from the console. Logging every real score (not just
+      // successful triggers) so a live run shows real numbers to
+      // calibrate `sensitivity` (default 0.15) against instead of
+      // guessing blind - especially relevant since the model's own known
+      // behavior (see this file's header comment) scores anywhere from
+      // ~0.003 to ~0.999 on genuine "jarvis" utterances depending on
+      // cadence/position, so seeing the real number matters more here
+      // than for a typical fixed threshold.
+      console.log(`   🔍 wake-word score: ${result.max_score.toFixed(4)} (threshold: ${this.sensitivity})`);
       if (result.max_score > this.sensitivity) {
         this.emitWakeWordDetected(result.max_score, bufferedAudio);
       }

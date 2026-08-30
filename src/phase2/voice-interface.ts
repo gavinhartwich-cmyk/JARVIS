@@ -101,6 +101,10 @@ export class VoiceInterface {
   private turnSilenceMs: number = 0;
   private turnHasSpeech: boolean = false;
   private turnStartedAt: number = 0;
+  // Throttles the VAD debug log below to ~2x/sec instead of once per
+  // 250ms mic chunk (4x/sec) - enough to see real energy levels/timing
+  // live without flooding the console during a real turn.
+  private lastVadLogAt: number = 0;
 
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
@@ -284,7 +288,8 @@ export class VoiceInterface {
     }
 
     const chunkMs = (chunk.length / 2 / this.config.audio.sampleRate) * 1000;
-    const isSpeechEnergy = computeRmsEnergy(chunk) > SPEECH_RMS_THRESHOLD;
+    const energy = computeRmsEnergy(chunk);
+    const isSpeechEnergy = energy > SPEECH_RMS_THRESHOLD;
     if (isSpeechEnergy) {
       this.turnHasSpeech = true;
       this.turnSilenceMs = 0;
@@ -292,11 +297,27 @@ export class VoiceInterface {
       this.turnSilenceMs += chunkMs;
     }
 
+    // Real diagnostic gap found 2026-08-30: a live run where "open
+    // Notepad" produced no response at all, with no way to tell from the
+    // console whether speech was ever detected, what the actual energy
+    // level was, or how close to the silence/max-duration cutoffs the
+    // turn was - SPEECH_RMS_THRESHOLD is a guessed starting point (see
+    // its own comment above) that may not match this exact mic/room, and
+    // without visibility a wrong guess just looks like total silence.
+    const now = Date.now();
+    if (now - this.lastVadLogAt >= 500) {
+      this.lastVadLogAt = now;
+      console.log(
+        `   🎚️  energy: ${energy.toFixed(0)} (speech threshold: ${SPEECH_RMS_THRESHOLD}) | speech detected this turn: ${this.turnHasSpeech} | silence: ${this.turnSilenceMs.toFixed(0)}ms / ${END_OF_TURN_SILENCE_MS}ms`
+      );
+    }
+
     const turnDurationMs = Date.now() - this.turnStartedAt;
     const hitSilenceCutoff = this.turnHasSpeech && this.turnSilenceMs >= END_OF_TURN_SILENCE_MS;
     const hitMaxDuration = turnDurationMs >= this.config.conversation.maxTurnDuration * 1000;
 
     if ((hitSilenceCutoff || hitMaxDuration) && this.speechRecognizer) {
+      console.log(`   ⏹️  ending turn (${hitSilenceCutoff ? "silence cutoff" : "max turn duration reached"})`);
       try {
         await this.speechRecognizer.stopStreaming();
       } catch {
