@@ -28,14 +28,17 @@ if (-not (Test-Path "models\piper\en_US-amy-medium.onnx")) {
     Write-Host "  voice model already present, skipping"
 }
 
-Write-Host "== faster-whisper (STT) + openWakeWord (wake word) =="
+Write-Host "== faster-whisper (STT) + openWakeWord (wake word) + sounddevice (mic capture) =="
 if (-not (Test-Path "tools\whisper\venv")) {
     py -m venv tools\whisper\venv
     & tools\whisper\venv\Scripts\python.exe -m pip install --quiet --upgrade pip
-    & tools\whisper\venv\Scripts\pip.exe install --quiet faster-whisper openwakeword onnxruntime
+    & tools\whisper\venv\Scripts\pip.exe install --quiet faster-whisper openwakeword onnxruntime sounddevice numpy
 } else {
     Write-Host "  venv already present, skipping"
-    & tools\whisper\venv\Scripts\pip.exe install --quiet openwakeword onnxruntime
+    # sounddevice added 2026-08-30 for real mic capture (mic-capture.ts /
+    # scripts/mic_capture.py) - re-run here too so an existing venv from
+    # before that picks it up, same pattern already used for openwakeword.
+    & tools\whisper\venv\Scripts\pip.exe install --quiet openwakeword onnxruntime sounddevice numpy
 }
 
 Write-Host "== Verifying =="
@@ -57,3 +60,7 @@ Write-Host "  WHISPER_PYTHON_PATH=tools\whisper\venv\Scripts\python.exe"
 Write-Host "  WAKEWORD_PYTHON_PATH=tools\whisper\venv\Scripts\python.exe"
 Write-Host ""
 Write-Host "Then run: bun test src/tests/speech-synthesizer.test.ts src/tests/speech-recognizer.test.ts src/tests/wake-word-detector.test.ts"
+Write-Host ""
+Write-Host "To confirm the microphone itself works before trying 'bun run dev listen':"
+Write-Host "  tools\whisper\venv\Scripts\python.exe -c ""import sounddevice as sd; print(sd.query_devices())"""
+Write-Host "(should list your real input devices - if this errors, sounddevice/PortAudio didn't install correctly)"

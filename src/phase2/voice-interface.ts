@@ -12,6 +12,43 @@ import { SpeechSynthesizer, SynthesisResult } from "./speech-synthesizer";
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
+import { playWavBuffer } from "./audio-player";
+
+// Real end-of-turn detection (2026-08-30): nothing previously ever called
+// speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
+// the whole thing down - meaning a real mic feed would start a turn on
+// wake word and then never finish it. Implements the master architecture
+// doc's Part 5.3 "Silence Duration Rules": <500ms is never end-of-turn,
+// 1000-2000ms is "likely end-of-sentence" (not acted on yet - true
+// low-latency early response prep is a real future optimization, not
+// built here), 3000ms+ is "definitely end of turn, respond" - this uses
+// that top tier as the actual cutoff, since anything looser risks cutting
+// the user off mid-sentence with no way yet to tell a thinking pause from
+// a finished thought. maxTurnDuration (config.conversation.maxTurnDuration,
+// default 300s) is a separate hard backstop against a stuck-open mic if
+// the silence detector itself misses something (e.g. sustained background
+// noise never reads as "silent").
+const END_OF_TURN_SILENCE_MS = 3000;
+
+// A real signal-energy threshold has to be tuned against an actual room
+// and microphone, not guessed - this default is a reasonable starting
+// point for 16-bit PCM (16-bit full scale is 32768; ~1.5% of full scale
+// is a common floor for "someone is plainly talking" vs. room noise) but
+// WILL likely need tuning on Gavin's actual hardware, the same honest
+// caveat wake-word-detector.ts's sensitivity default carries.
+const SPEECH_RMS_THRESHOLD = 500;
+
+/** Root-mean-square energy of a 16-bit PCM buffer - simple, real, cheap voice-activity signal (not a trained VAD model). */
+function computeRmsEnergy(pcm16: Buffer): number {
+  if (pcm16.length < 2) return 0;
+  let sumSquares = 0;
+  const sampleCount = Math.floor(pcm16.length / 2);
+  for (let i = 0; i < sampleCount; i++) {
+    const sample = pcm16.readInt16LE(i * 2);
+    sumSquares += sample * sample;
+  }
+  return Math.sqrt(sumSquares / sampleCount);
+}
 
 const JARVIS_SYSTEM_PROMPT =
   "You are JARVIS, a helpful voice assistant. Keep replies short and " +
@@ -50,6 +87,20 @@ export class VoiceInterface {
 
   private context: VoiceInteractionContext;
   private isRunning: boolean = false;
+  // True while JARVIS's own reply is playing through the speakers - real
+  // mic chunks are dropped entirely during this window (see
+  // processMicChunk()) so JARVIS doesn't hear its own voice and either
+  // re-trigger the wake word or feed itself into the speech recognizer.
+  // Real acoustic echo cancellation would let listening continue safely
+  // even during playback (the master doc's Part 5.1 full-duplex goal);
+  // this half-duplex guard is the honest interim substitute, not a stand-in
+  // that pretends to be that.
+  private isSpeaking: boolean = false;
+  // Per-turn VAD state (see END_OF_TURN_SILENCE_MS / computeRmsEnergy
+  // above) - reset in handleWakeWord() at the start of each turn.
+  private turnSilenceMs: number = 0;
+  private turnHasSpeech: boolean = false;
+  private turnStartedAt: number = 0;
 
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
@@ -196,11 +247,64 @@ export class VoiceInterface {
 
     this.context.isActive = true;
     this.context.lastWakeWordTime = new Date();
+    this.turnSilenceMs = 0;
+    this.turnHasSpeech = false;
+    this.turnStartedAt = Date.now();
     this.emit("wake-word-detected", event);
 
     // Start listening for speech
     if (this.speechRecognizer) {
       await this.speechRecognizer.startStreaming();
+    }
+  }
+
+  /**
+   * Feed one chunk of real microphone PCM16 audio into whichever stage of
+   * the pipeline is currently active. This is the method the `listen` CLI
+   * command's mic-capture loop calls per chunk - everything else in this
+   * class (wake word -> speech recognition -> response -> playback) was
+   * already real and wired; real audio just never reached it. See
+   * mic-capture.ts for where the chunks actually come from.
+   */
+  async processMicChunk(chunk: Buffer): Promise<void> {
+    if (!this.isRunning || this.isSpeaking) return;
+
+    if (!this.context.isActive) {
+      // Idle: only the wake-word detector cares about audio right now.
+      if (this.wakeWordDetector) {
+        await this.wakeWordDetector.processAudioChunk(chunk);
+      }
+      return;
+    }
+
+    // Active turn: feed the recognizer, and separately run VAD on the
+    // same chunk to decide when the user has actually stopped talking.
+    if (this.speechRecognizer) {
+      await this.speechRecognizer.processAudioChunk(chunk);
+    }
+
+    const chunkMs = (chunk.length / 2 / this.config.audio.sampleRate) * 1000;
+    const isSpeechEnergy = computeRmsEnergy(chunk) > SPEECH_RMS_THRESHOLD;
+    if (isSpeechEnergy) {
+      this.turnHasSpeech = true;
+      this.turnSilenceMs = 0;
+    } else {
+      this.turnSilenceMs += chunkMs;
+    }
+
+    const turnDurationMs = Date.now() - this.turnStartedAt;
+    const hitSilenceCutoff = this.turnHasSpeech && this.turnSilenceMs >= END_OF_TURN_SILENCE_MS;
+    const hitMaxDuration = turnDurationMs >= this.config.conversation.maxTurnDuration * 1000;
+
+    if ((hitSilenceCutoff || hitMaxDuration) && this.speechRecognizer) {
+      try {
+        await this.speechRecognizer.stopStreaming();
+      } catch {
+        // stopStreaming() throws if streaming wasn't actually in progress
+        // (e.g. a race between two chunks both crossing the cutoff) -
+        // handleUserSpeech only ever runs off the resulting "final-result"
+        // event, so a redundant/failed stop here is harmless to ignore.
+      }
     }
   }
 
@@ -215,6 +319,20 @@ export class VoiceInterface {
 
     if (audio) {
       console.log(`\n🔊 Response ready: ${audio.duration}ms`);
+      // Block on real playback, and drop mic input for its duration (see
+      // isSpeaking above) - both real fixes, not just bookkeeping: without
+      // the first, nothing anyone could ever actually hear was produced;
+      // without the second, JARVIS's own voice coming back through the
+      // mic could re-trigger the wake word or get transcribed as if the
+      // user had said it.
+      this.isSpeaking = true;
+      try {
+        await playWavBuffer(audio.audio);
+      } catch (err) {
+        console.log(`   ⚠️  Playback failed: ${err instanceof Error ? err.message : err}`);
+      } finally {
+        this.isSpeaking = false;
+      }
     }
 
     // Interaction complete

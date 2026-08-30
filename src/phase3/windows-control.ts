@@ -16,7 +16,7 @@
 
 import { spawn } from "node:child_process";
 
-function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ stdout: string; stderr: string }> {
+export function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ stdout: string; stderr: string }> {
   if (process.platform !== "win32") {
     return Promise.reject(
       new Error(
@@ -43,7 +43,7 @@ function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ stdout: st
 }
 
 // Escapes a string for safe interpolation inside a PowerShell double-quoted string.
-function psEscape(s: string): string {
+export function psEscape(s: string): string {
   return s.replace(/`/g, "``").replace(/"/g, '`"').replace(/\$/g, "`$");
 }
 

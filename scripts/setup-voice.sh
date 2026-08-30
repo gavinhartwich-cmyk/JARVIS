@@ -29,15 +29,15 @@ else
   echo "  voice model already present, skipping"
 fi
 
-echo "== faster-whisper (STT) + openWakeWord (wake word) =="
+echo "== faster-whisper (STT) + openWakeWord (wake word) + sounddevice (mic capture) =="
 if [ ! -d tools/whisper/venv ]; then
   python3 -m venv tools/whisper/venv
   tools/whisper/venv/bin/pip install --quiet --upgrade pip
-  tools/whisper/venv/bin/pip install --quiet faster-whisper openwakeword onnxruntime
+  tools/whisper/venv/bin/pip install --quiet faster-whisper openwakeword onnxruntime sounddevice numpy
 else
   echo "  venv already present, skipping"
-  # Re-run in case an existing venv predates openWakeWord being added here.
-  tools/whisper/venv/bin/pip install --quiet openwakeword onnxruntime
+  # Re-run in case an existing venv predates openWakeWord/sounddevice being added here.
+  tools/whisper/venv/bin/pip install --quiet openwakeword onnxruntime sounddevice numpy
 fi
 
 echo "== Verifying =="

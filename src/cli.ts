@@ -12,6 +12,7 @@ import { authorizationEngine } from "./core/authorization";
 import { ScreenControl } from "./phase3/screen-control";
 import { JARVISDeveloper } from "./phase1/developer";
 import { VoiceInterface } from "./phase2/voice-interface";
+import { MicCapture } from "./phase2/mic-capture";
 import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
 import { writeFileSync, readFileSync } from "node:fs";
@@ -320,6 +321,70 @@ async function main() {
         }
         console.log("=".repeat(70));
       }
+    } else if (command === "listen") {
+      // bun run dev listen
+      //
+      // The real "always-on voice assistant" entrypoint the master
+      // architecture doc's Part 5.2 describes ("Always-listening mode...
+      // Detects wake word efficiently... Transitions to full listening on
+      // detection") - everything this wires together (wake word ->
+      // speech recognition -> real LLM response -> real TTS -> playback ->
+      // back to listening) already existed and was already correct inside
+      // voice-interface.ts; the two things that were actually missing
+      // were a real microphone feed (mic-capture.ts, new) and real audio
+      // playback (audio-player.ts, new) - this command is just the glue
+      // that starts both and keeps the process alive.
+      //
+      // Sequential, not full-duplex: this does NOT yet support barge-in
+      // (interrupting JARVIS mid-reply) - conversation-engine.ts already
+      // has a real state machine designed for that, but it isn't wired to
+      // real audio anywhere yet, and building real-time barge-in with
+      // acoustic echo cancellation blind (this can only run on Gavin's PC,
+      // never tested from this sandbox) would be irresponsible to ship
+      // untested. This is the deliberate first real increment: LISTEN ->
+      // THINK -> SPEAK -> WAIT, looping. Full duplex is real follow-up
+      // work, not a shortcut being passed off as the final spec.
+      console.log("\n" + "=".repeat(70));
+      console.log('🎙️  JARVIS is listening (say "Jarvis" to start a conversation)');
+      console.log("   Press Ctrl+C to stop.");
+      console.log("=".repeat(70));
+
+      const voice = new VoiceInterface();
+      await voice.start();
+
+      const mic = new MicCapture({ sampleRate: 16000, channels: 1, blockMs: 250 });
+      let shuttingDown = false;
+      const shutdown = async () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.log("\n🛑 Stopping...");
+        mic.stop();
+        await voice.stop();
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+
+      mic.start(
+        (chunk) => {
+          // Fire-and-forget: processMicChunk() is async (each stage it
+          // may call - wake-word detection, Whisper - does real I/O), but
+          // the mic keeps producing chunks in real time regardless. Errors
+          // inside it are real bugs to see, not something to swallow.
+          voice.processMicChunk(chunk).catch((err) => {
+            console.log(`   ⚠️  processMicChunk error: ${err instanceof Error ? err.message : err}`);
+          });
+        },
+        (err) => {
+          console.log(`\n❌ Microphone capture failed: ${err.message}`);
+          console.log("   Run scripts/setup-voice.ps1 first if you haven't (installs sounddevice into the whisper venv).");
+          shutdown();
+        }
+      );
+
+      // Keep the process alive - everything happens in the mic callback
+      // and voice's own event-driven pipeline from here.
+      await new Promise(() => {});
     } else if (command === "conversation") {
       // bun run dev conversation "<what you'd say to JARVIS>"
       // Exercises Phase 1.5 (Conversational Intelligence) end to end —
@@ -396,6 +461,7 @@ async function main() {
       console.log("  bun run dev whoami --pin PIN - Same, plus test Level 3 PIN verification");
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
       console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
+      console.log('  bun run dev listen - Real always-on voice assistant: say "Jarvis", it listens, thinks, and speaks back (Windows only, needs scripts/setup-voice.ps1 run first)');
       console.log('  bun run dev conversation "<text>" - Phase 1.5 conversational intelligence, real LLM + memory/context');
       console.log("  bun run dev vision-test <path>   - Real Ollama vision model on a real image (Phase 3)");
     }
