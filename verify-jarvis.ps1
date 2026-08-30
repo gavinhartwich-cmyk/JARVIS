@@ -696,30 +696,24 @@ if (-not $omniUp) {
 # ============================================================
 # Step 5: Phase 0 live vertical slice
 # ============================================================
-# Timeout raised 180s -> 300s (2026-08-29): with real output capture
-# finally working (see Invoke-CapturedCommand's history above), this step
-# timed out for real rather than masking a capture bug - and the reason is
-# visible latency, not a hang. "test" runs cli.ts's 5-agent pipeline
-# (researcher -> reasoner -> critic -> fact-checker -> synthesizer)
-# strictly sequentially - orchestrator.ts's own `for (const agentName of
-# decomposition.agentSequence)` loop `await`s each one in turn, which is
-# correct: each later agent's prompt genuinely depends on the earlier
-# ones' real output, so this can't just be parallelized away. Each hop is
-# a real OmniRoute call through its free "auto" routing - OmniRoute's own
-# call logs show individual calls taking anywhere from ~1s to 47.7s, and a
-# live run of this exact step genuinely exceeded 300s (a previous run of
-# this same step completed in ~280-296s, i.e. already close to that cap
-# with nothing wrong). Each agent's own per-call timeout was also just
-# raised from the provider's 60s default to 90s (cli.ts) since calls were
-# observed running close to 60s on their own - so five sequential calls'
-# true worst case is now 450s, not the ~300s it was implicitly bounded to
-# before. 480s gives a little headroom above that without the step running
-# away forever - Invoke-CapturedCommand still kills the whole process tree
-# on timeout, so a genuine hang is still caught. If this still routinely
-# runs long, pinning OMNIROUTE_MODEL to a specific faster model instead of
-# "auto" (in .env) is worth trying - "auto" is convenient but doesn't let
-# you pick for speed.
-$r = Invoke-JarvisCommand -CommandArgs "test" -TimeoutSec 480
+# Timeout raised again 480s -> 630s (2026-08-30), now that partial-output
+# capture on timeout is finally working (see Invoke-CapturedCommand's
+# SEVENTH bug above) and actually showed why: a real run's captured output
+# proved all 5 pipeline agents (researcher -> reasoner -> critic ->
+# fact-checker -> synthesizer) completed with real confidence scores, and
+# it died right after printing "Synthesizing results..." - which is NOT
+# the synthesizer agent finishing (that already happened, one line above).
+# orchestrator.ts's synthesizeResults() makes a SIXTH real LLM call -
+# synthesizer.execute() again, this time over the combined output of all
+# 5 agents - that the previous 480s figure never accounted for (it was
+# computed as 5 calls x 90s = 450s + margin). Six calls x 90s (cli.ts's
+# per-call timeoutMs) = 540s true worst case, not 450s. 630s gives real
+# margin above that. If this still routinely runs long, pinning
+# OMNIROUTE_MODEL to a specific faster model instead of "auto" (in .env)
+# is worth trying - "auto" is convenient but doesn't let you pick for
+# speed, and a live run showed "auto" sometimes cascading through several
+# failed free-tier attempts before reaching a working paid model.
+$r = Invoke-JarvisCommand -CommandArgs "test" -TimeoutSec 630
 Write-FullOutput -Label "5.test" -Result $r
 if ($r.Success) {
   Add-Result -Step "5. Phase 0 vertical slice" -Status PASS -Detail "Exit 0"
@@ -801,8 +795,23 @@ Write-Log "`n--- Step 7: Phase 1 developer pipeline (no --approve, so nothing ge
 # text is made self-refreshing (unique marker per run) so it can never
 # again be pre-satisfied by a previous run's own output - keeping this step
 # an actual live test of the Coder's editing ability, not a fossil.
+# Timeout raised 600s -> 1500s (2026-08-30): a real run's captured partial
+# output (see Invoke-CapturedCommand's SEVENTH bug above) showed the
+# retry logic (added for the three-different-failure-modes issue) working
+# exactly as designed - architect and planner both completed, then the
+# Coder agent genuinely used its full 3-attempt budget - but the whole
+# command got killed by THIS timeout mid-way through attempt 3, before it
+# could even fail cleanly and let the pipeline report a real result. The
+# 600s figure was never sized for the full worst-case chain: architect(1)
+# + planner(1) + coder(up to 3 retries) + code-review(1) + security-review(1)
+# + verify(1) = up to 8 real LLM calls even on a clean run, or up to 10 if
+# the build/test debug loop fires (2 more debugger attempts) - each capped
+# at 120s (developer.ts's timeoutMs) - true worst case is 1200s, not 600s.
+# 1500s gives real margin above that instead of killing a pipeline that's
+# genuinely still working through its own (real, evidence-based) retry
+# budget.
 $devReq = "Add this exact one-line comment directly above the callModel method in src/core/conversation-intelligence.ts: // verify-jarvis.ps1 Step 7 marker $timestamp (do not change behavior, do not remove any existing comments)"
-$r = Invoke-JarvisCommand -CommandArgs "developer `"$devReq`"" -TimeoutSec 600
+$r = Invoke-JarvisCommand -CommandArgs "developer `"$devReq`"" -TimeoutSec 1500
 Write-FullOutput -Label "7.developer" -Result $r
 if ($r.Success) {
   Add-Result -Step "7. Phase 1 developer pipeline" -Status PASS -Detail "Pipeline ran to the approval gate (nothing committed - no --approve was passed)"
