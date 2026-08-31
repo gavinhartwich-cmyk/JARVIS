@@ -1,6 +1,6 @@
 # JARVIS — Comprehensive Master Architecture
 
-**Updated:** August 31, 2026, eighth pass (08-30: wake-word/mic-gain + VAD fixes; 08-31 first pass: app-control wiring, TTS diagnostic, HUD auto-close, persistent wake-word daemon; 08-31 second pass: duplicate wake-word trigger fix, real app-launch fix via Get-StartApps, a "thinking" audio acknowledgment; 08-31 third pass: Fish Audio TTS integration with automatic Piper fallback; 08-31 fourth pass: real Get-StartApps escaping bug fixed (was opening File Explorer instead of the app), Fish Audio confirmed blocked on payment - Gavin moving to Chatterbox for $0 voice cloning; 08-31 fifth pass: root-caused total playback silence to SoundPlayer's legacy audio path, swapped primary playback to Windows Media Player COM; 08-31 sixth pass: WMP COM confirmed live to hang/timeout, replaced with WPF MediaPlayer + computed-duration sleep; 08-31 seventh pass: built full Chatterbox local voice-cloning TTS integration, provider temporarily reverted to Piper until Gavin has a reference clip; 08-31 eighth pass: WPF MediaPlayer CONFIRMED LIVE to produce real audible sound for the first time all session, fixed a real crackling artifact via DoEvents message pumping, Chatterbox activated with Gavin's real reference clip; 08-31 ninth pass: replaced Part 4.5's generic personality spec with Gavin's full "movie JARVIS" characterization - British butler/supercomputer, not yet wired into actual system prompts)  
+**Updated:** August 31, 2026, eighth pass (08-30: wake-word/mic-gain + VAD fixes; 08-31 first pass: app-control wiring, TTS diagnostic, HUD auto-close, persistent wake-word daemon; 08-31 second pass: duplicate wake-word trigger fix, real app-launch fix via Get-StartApps, a "thinking" audio acknowledgment; 08-31 third pass: Fish Audio TTS integration with automatic Piper fallback; 08-31 fourth pass: real Get-StartApps escaping bug fixed (was opening File Explorer instead of the app), Fish Audio confirmed blocked on payment - Gavin moving to Chatterbox for $0 voice cloning; 08-31 fifth pass: root-caused total playback silence to SoundPlayer's legacy audio path, swapped primary playback to Windows Media Player COM; 08-31 sixth pass: WMP COM confirmed live to hang/timeout, replaced with WPF MediaPlayer + computed-duration sleep; 08-31 seventh pass: built full Chatterbox local voice-cloning TTS integration, provider temporarily reverted to Piper until Gavin has a reference clip; 08-31 eighth pass: WPF MediaPlayer CONFIRMED LIVE to produce real audible sound for the first time all session, fixed a real crackling artifact via DoEvents message pumping, Chatterbox activated with Gavin's real reference clip; 08-31 ninth pass: replaced Part 4.5's generic personality spec with Gavin's full "movie JARVIS" characterization - British butler/supercomputer, not yet wired into actual system prompts; 08-31 tenth pass: wired the movie-JARVIS personality spec into the real LLM-facing system prompts via new src/core/jarvis-personality.ts, consumed by both conversation-intelligence.ts's assemblePrompt() (primary path) and voice-interface.ts's JARVIS_SYSTEM_PROMPT (fallback path); conversation-engine.ts's PersonalityRules confirmed and documented as real but unused dead code)  
 **Status:** Phase 0, Phase 1, and Phase 1.5 are now verified real via `verify-jarvis.ps1` run live on Gavin's actual PC (2026-08-30) — see that script and its `setup-logs/` output, not just this doc, for the current pass/fail state. Phase 3 is code-complete and code-verified as of 2026-08-27 but not yet run live. Phase 2's TTS/STT/wake-word/reply path was already real; as of 2026-08-30 mic capture, audio playback, and end-of-turn detection are also real and code-complete (`bun run dev listen`). First real live run found wake-word sensitivity badly miscalibrated (fixed with a mic-gain change + lowered threshold), then a stuck-turn bug (fixed with a self-calibrating per-turn VAD threshold + a soft-clip fix). Re-run after both: wake word, STT, and TTS all genuinely fired for the first time - but the app never actually opened (voice pipeline wasn't wired to real app-control execution), TTS audio was never heard, the HUD window piled up across runs, and wake-word latency was bad enough to eat the start of one-breath commands. All four fixed 2026-08-31 (see the update above) — **not yet re-run live to confirm**. Full-duplex/interruption remains deliberately unbuilt. See Part 10 below and the ground-truth bullets above for details.  
 **Core Principle:** One persistent intelligence with multiple interfaces, devices, memories, and capabilities
 
@@ -664,30 +664,50 @@ personality. Not paragraphs:
 **Applied to every response, regardless of LLM. Changing providers does
 NOT change personality.**
 
-**Implementation status, disclosed honestly: this is a spec, not yet
-code.** Real, concrete gap — three separate places currently define
-JARVIS's system prompt/personality, and none of them reflect this spec
-yet:
-1. `src/phase2/conversation-engine.ts`'s `PersonalityRules` class - its
-   constructor comment already says *"Default personality: like the
-   movie JARVIS"* but the actual fields (`tone: "casual"`,
-   `formality: "neutral"`) and `applyPersonality()`'s logic (a couple of
-   regex substitutions) don't implement anything like the spec above -
-   the comment has been aspirational, not real, until this update gives
-   it something concrete to build against.
-2. `src/core/conversation-intelligence.ts`'s `assemblePrompt()` -
-   currently pushes a generic `"You are JARVIS, a persistent
-   conversational AI assistant."` line with no personality/voice
-   direction at all.
-3. `src/phase2/voice-interface.ts`'s `JARVIS_SYSTEM_PROMPT` constant -
-   currently `"You are JARVIS, a helpful voice assistant. Keep replies
-   short and ..."`, equally generic.
+**[UPDATE 2026-08-31, tenth pass] Implementation status, disclosed
+honestly: this spec is now real code in the two locations that actually
+matter, and honestly documented as dead code in the third:**
 
-Wiring this spec into those three real system prompts is real follow-up
-work, not done as part of this doc update - ask if you'd like that built
-next; it's a meaningful rewrite (tone, "sir" cadence, opinion-giving
-behavior) across real conversation-generation code, not a one-line
-change.
+1. **`src/core/jarvis-personality.ts` (NEW - the single source of
+   truth)** - exports `JARVIS_PERSONALITY_PROMPT`, the actual LLM-facing
+   system prompt text implementing the spec above (British-inflected
+   professional formality, dry economical wit, the 70/15/10/5 mix,
+   "sir" cadence, willingness to state an opinion, brief/confident
+   replies), plus `JARVIS_USER_NAME = "Gavin"`.
+2. **`src/core/conversation-intelligence.ts`'s `assemblePrompt()`** -
+   now imports and pushes `JARVIS_PERSONALITY_PROMPT` as the system
+   message (was the generic `"You are JARVIS, a persistent
+   conversational AI assistant."` line). This is the prompt actually
+   sent to the model on the primary `Orchestrator.processConversation()`
+   path. Default `formality` preference also flipped `"casual"` →
+   `"formal"` to match. Fallback error string when no model provider is
+   reachable changed to in-character ("I'm afraid none of my model
+   providers are reachable at the moment, sir.").
+3. **`src/phase2/voice-interface.ts`'s `JARVIS_SYSTEM_PROMPT`
+   constant** - now set directly to `JARVIS_PERSONALITY_PROMPT` (was a
+   generic "helpful voice assistant" line). This is the prompt used on
+   the direct/no-orchestrator fallback path. Both hardcoded
+   provider-unreachable fallback strings updated to the same in-character
+   line as above.
+4. **`src/phase2/conversation-engine.ts`'s `PersonalityRules` class -
+   still real, still unused, now honestly labeled as such.** Grepping
+   all of `src/` confirms `applyPersonality()` has zero call sites
+   anywhere in the live pipeline - `ConversationEngine` is used by
+   `orchestrator.ts`, but only via `getConversationContext()`/
+   `getStatus()`, never anything that would run generated text through
+   `applyPersonality()`. Its default fields have been updated
+   (`tone: "professional"`, `formality: "formal"`,
+   `conciseness: "brief"`, `proactivity: "proactive"`) so they no longer
+   *contradict* the movie-JARVIS spec the constructor comment claims,
+   but changing this class currently has **no effect on what JARVIS
+   actually says** - the real mechanism is the system prompt in
+   `jarvis-personality.ts`, consumed by the two files above. This is
+   flagged in a large comment directly on the class in the source.
+
+**Not yet confirmed live** - this has a clean typecheck but Gavin has
+not yet run `bun run dev listen` and heard an actual response since this
+change landed, so whether the tone/wording lands right in practice is
+still unverified.
 
 ### 4.6 Streaming Architecture
 

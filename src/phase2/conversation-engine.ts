@@ -696,19 +696,41 @@ export class ConversationEngine {
 /**
  * Personality Rules
  *
- * Distinct from LLM. Defines JARVIS's behavioral identity.
- * Can be applied regardless of underlying model.
+ * [UPDATE 2026-08-31] HONEST STATUS: this class's applyPersonality() method
+ * has ZERO call sites anywhere in src/ (verified by grep across the whole
+ * codebase). ConversationEngine is used by orchestrator.ts, but only via
+ * getConversationContext()/getStatus() - nothing in the live pipeline ever
+ * calls applyPersonality() on generated text. This class is real, working
+ * code, but it is dead code: it does not affect what JARVIS actually says.
+ *
+ * The REAL, effective mechanism that shapes JARVIS's tone is the system
+ * prompt sent to the LLM at generation time - see src/core/jarvis-personality.ts
+ * (JARVIS_PERSONALITY_PROMPT), which is consumed by
+ * conversation-intelligence.ts's assemblePrompt() (primary orchestrator path)
+ * and voice-interface.ts's JARVIS_SYSTEM_PROMPT (fallback path). That file is
+ * the single source of truth for the "movie JARVIS" personality spec in
+ * JARVIS-MASTER-ARCHITECTURE-UPDATED.md Part 4.5.
+ *
+ * The defaults below are updated to no longer CONTRADICT that spec (they
+ * used to default to "casual"/"neutral" while the constructor comment
+ * claimed "like the movie JARVIS" - that was never true). They are left in
+ * place, undeleted, in case a future pass wires applyPersonality() into the
+ * real response path as a post-processing layer on top of the system
+ * prompt. Until that wiring happens, changing these fields has no visible
+ * effect on JARVIS's actual behavior.
  */
 export class PersonalityRules {
-  private tone: "professional" | "casual" | "technical" = "casual";
-  private formality: "formal" | "neutral" | "casual" = "neutral";
-  private conciseness: "brief" | "moderate" | "detailed" = "moderate";
+  private tone: "professional" | "casual" | "technical" = "professional";
+  private formality: "formal" | "neutral" | "casual" = "formal";
+  private conciseness: "brief" | "moderate" | "detailed" = "brief";
   private humor: boolean = true;
-  private proactivity: "passive" | "balanced" | "proactive" = "balanced";
+  private proactivity: "passive" | "balanced" | "proactive" = "proactive";
 
   constructor() {
-    // Default personality: like the movie JARVIS
-    // Professional but warm, helpful but not obsequious
+    // Default personality: like the movie JARVIS (British-inflected
+    // professional formality, dry wit, brief/confident replies, proactive).
+    // NOTE: see class-level comment above - these fields are not currently
+    // consumed anywhere in the live response pipeline.
   }
 
   /**

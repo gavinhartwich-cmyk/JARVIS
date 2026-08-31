@@ -15,6 +15,7 @@ import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gatewa
 import type { ModelProvider } from "../models/types";
 import { playWavBuffer } from "./audio-player";
 import type { Orchestrator } from "../core/orchestrator";
+import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 
 // Real end-of-turn detection (2026-08-30): nothing previously ever called
 // speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
@@ -103,9 +104,14 @@ function computeWavPeakAmplitude(wav: Buffer): number {
   return -1; // no data chunk found
 }
 
-const JARVIS_SYSTEM_PROMPT =
-  "You are JARVIS, a helpful voice assistant. Keep replies short and " +
-  "conversational (1-3 sentences) since they will be spoken aloud, not read.";
+// [UPDATE 2026-08-31] Was a generic "helpful voice assistant" one-liner
+// with zero real personality direction. Now uses the same shared
+// movie-JARVIS spec every other system prompt in this codebase uses
+// (see jarvis-personality.ts) - this is the direct/no-orchestrator
+// fallback path (see generateResponse() below), so it matters just as
+// much as the primary Orchestrator path that conversation-intelligence.ts
+// handles.
+const JARVIS_SYSTEM_PROMPT = JARVIS_PERSONALITY_PROMPT;
 
 export interface VoiceInteractionContext {
   conversationId: string;
@@ -626,7 +632,7 @@ export class VoiceInterface {
         const err = error instanceof Error ? error.message : String(error);
         console.error("❌ JARVIS response generation failed:", err);
         this.emit("error", { message: err });
-        return "Sorry, I couldn't reach any model provider to answer that.";
+        return "I'm afraid none of my model providers are reachable at the moment, sir.";
       }
     }
 
@@ -654,7 +660,7 @@ export class VoiceInterface {
       const err = error instanceof Error ? error.message : String(error);
       console.error("❌ JARVIS response generation failed:", err);
       this.emit("error", { message: err });
-      response = "Sorry, I couldn't reach any model provider to answer that.";
+      response = "I'm afraid none of my model providers are reachable at the moment, sir.";
     }
 
     console.log(`🤖 JARVIS: "${response}"`);

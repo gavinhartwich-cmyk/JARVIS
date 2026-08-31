@@ -16,6 +16,7 @@
 
 import type { ConversationEngine, ConversationContext, ReasoningPath } from "../phase2/conversation-engine.ts";
 import type { ModelProvider } from "../models/types";
+import { JARVIS_PERSONALITY_PROMPT } from "./jarvis-personality";
 
 export interface ConversationMemory {
   // Long-term episodic memory
@@ -135,7 +136,14 @@ export class ConversationalIntelligence {
       preferences: {
         communicationStyle: "mixed",
         responseTime: "adaptive",
-        formality: "casual",
+        // [UPDATE 2026-08-31] Was "casual" - directly contradicted the
+        // real personality spec (JARVIS is "slightly formal" per Gavin's
+        // movie-JARVIS characterization, not casual). Formality is now a
+        // fixed part of JARVIS's character (see jarvis-personality.ts),
+        // not a per-user adaptive dial, so this default just needs to
+        // stop actively fighting it - see assemblePrompt() below, which
+        // no longer surfaces this field to the model at all.
+        formality: "formal",
         proactivity: "balanced",
         interruptionTolerance: "medium",
       },
@@ -196,8 +204,13 @@ export class ConversationalIntelligence {
   ): string {
     const components: string[] = [];
 
-    // System prompt segment
-    components.push(`You are JARVIS, a persistent conversational AI assistant.`);
+    // System prompt segment - [UPDATE 2026-08-31] was a generic one-liner
+    // ("You are JARVIS, a persistent conversational AI assistant.") with
+    // zero actual personality direction. Now uses the real, shared
+    // movie-JARVIS spec (see jarvis-personality.ts) - the same text every
+    // other system prompt in this codebase uses, so personality is
+    // consistent regardless of which path generated the reply.
+    components.push(JARVIS_PERSONALITY_PROMPT);
     components.push(`You maintain continuous conversation state across interactions.`);
 
     // Real action outcome, if one was taken before this reply was
@@ -230,10 +243,14 @@ export class ConversationalIntelligence {
       }
     }
 
-    // Personality segment
+    // Response-shape preferences - [UPDATE 2026-08-31] dropped the
+    // "Formality" line entirely: formality is now fixed by JARVIS's
+    // character (jarvis-personality.ts above), not a separate adaptive
+    // dial that could contradict it. communicationStyle/responseTime are
+    // kept - "brief vs. detailed" and "immediate vs. thoughtful" are
+    // real, compatible personalization axes that don't fight the voice.
     const prefs = this.memory.preferences;
     components.push(`\nCommunication Style: ${prefs.communicationStyle}`);
-    components.push(`Formality: ${prefs.formality}`);
     components.push(`Response approach: ${prefs.responseTime}`);
 
     // Current context segment
@@ -407,7 +424,10 @@ export class ConversationalIntelligence {
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       console.error("❌ Conversational model call failed (all providers exhausted):", err);
-      return { text: "Sorry, I couldn't reach any model provider to answer that.", tokensUsed: 0 };
+      // [UPDATE 2026-08-31] In-character fallback text, not a generic
+      // apology - this is the one line JARVIS says without any LLM
+      // behind it at all, so it's hand-written rather than generated.
+      return { text: "I'm afraid none of my model providers are reachable at the moment, sir.", tokensUsed: 0 };
     }
   }
 
