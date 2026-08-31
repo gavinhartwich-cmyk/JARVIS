@@ -35,9 +35,18 @@ export function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ std
     proc.stdout.on("data", (d) => (stdout += d.toString()));
     proc.stderr.on("data", (d) => (stderr += d.toString()));
     proc.on("error", reject);
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`PowerShell exited ${code}: ${stderr || stdout}`));
+      else {
+        // BUG FIX (2026-08-31): code is null when the process was killed
+        // by a signal (e.g. this call's own timeoutMs firing) rather than
+        // exiting on its own - a bare "PowerShell exited null:" told
+        // Gavin nothing real about what happened. Report the signal too
+        // so a real hang (killed by our own timeout) reads differently
+        // from a real PowerShell error (nonzero exit code, real stderr).
+        const reason = signal ? `killed by signal ${signal} (likely timed out after ${timeoutMs}ms)` : `exited ${code}`;
+        reject(new Error(`PowerShell ${reason}: ${stderr || stdout}`));
+      }
     });
   });
 }
