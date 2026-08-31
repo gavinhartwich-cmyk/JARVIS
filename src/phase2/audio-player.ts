@@ -46,7 +46,20 @@
  * workaround for scripting WPF MediaPlayer from a plain console host.
  * Falls back to the legacy `SoundPlayer` (known-bad device selection,
  * but at least doesn't hang) only if `PresentationCore` itself can't be
- * loaded. Not yet confirmed live - needs Gavin's real hardware.
+ * loaded.
+ *
+ * [UPDATE 2026-08-31, confirmed live] This DID fix the total silence -
+ * Gavin: "it gave audio" - real progress, but the flat `Start-Sleep`
+ * wait produced audible crackling. Real cause: MediaPlayer's COM/Media
+ * Foundation pipeline expects its hosting thread's Windows message queue
+ * to be pumped periodically (built for a real WPF/WinForms app with a
+ * running message loop); blocking that thread completely for the whole
+ * clip starves that pumping. Replaced the blind sleep with a loop
+ * calling `[System.Windows.Forms.Application]::DoEvents()` every 15ms
+ * for the same total duration - the standard real workaround for
+ * driving WPF media components from a plain console script with no UI.
+ * Not yet confirmed live - needs Gavin's real hardware to know if this
+ * actually removes the crackle.
  */
 
 import { writeFileSync, unlinkSync } from "node:fs";
@@ -111,10 +124,27 @@ $path = "${psEscape(path)}"
 $played = $false
 try {
   Add-Type -AssemblyName PresentationCore
+  Add-Type -AssemblyName System.Windows.Forms
   $player = New-Object System.Windows.Media.MediaPlayer
   $player.Open([Uri]$path)
   $player.Play()
-  Start-Sleep -Milliseconds ${sleepMs}
+  # BUG FIX (2026-08-31, confirmed live): a real Start-Sleep here produced
+  # audible crackling - Gavin: "it gave audio... but it was really
+  # crackley". Real, well-documented cause: MediaPlayer's underlying COM/
+  # Media Foundation pipeline expects the hosting thread's Windows
+  # message queue to be pumped periodically (it's built for a real WPF/
+  # WinForms app with a running message loop); Start-Sleep blocks this
+  # console script's thread completely for the whole clip, starving that
+  # pumping and producing exactly this kind of stutter/crackle. Pumping
+  # via System.Windows.Forms.Application]::DoEvents() in a tight loop -
+  # the standard real workaround for driving WPF media components from a
+  # plain console script with no UI - services those callbacks instead
+  # of blocking blind, for the same total duration as before.
+  $deadline = (Get-Date).AddMilliseconds(${sleepMs})
+  while ((Get-Date) -lt $deadline) {
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 15
+  }
   $player.Stop()
   $player.Close()
   $played = $true

@@ -190,7 +190,19 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     // "chatterbox", fill in chatterbox.referenceClipPath (or the
     // CHATTERBOX_VOICE_CLIP_PATH env var), and run
     // scripts/setup-chatterbox.ps1 first if that venv doesn't exist yet.
-    provider: "piper",
+    // [UPDATE 2026-08-31, third pass] Gavin provided a real reference
+    // clip (originally a .webm, converted to a proper WAV via ffmpeg -
+    // see scripts/setup-chatterbox.ps1's printed instructions, since
+    // Chatterbox's audio loader isn't documented to reliably handle
+    // .webm) and confirmed an NVIDIA GPU. Provider flipped to
+    // "chatterbox" - safe to do even before scripts/setup-chatterbox.ps1
+    // has actually been run and the WAV actually exists at
+    // CHATTERBOX_VOICE_CLIP_PATH, because tts-provider.ts's fallback
+    // wrapper catches ANY Chatterbox failure (missing venv, missing
+    // file, model load error) and uses Piper instead - this activates
+    // for real the moment both pieces are actually in place, no further
+    // code change needed.
+    provider: "chatterbox",
     fishAudio: {
       referenceId: "049975dde0a14889ad219f24a95e3a4f",
     },
