@@ -295,7 +295,12 @@ async function main() {
         console.log("🎙️  VOICE REPLY (real LLM + real Piper TTS — no mic/wake-word: text in, audio out)");
         console.log("=".repeat(70));
 
-        const voice = new VoiceInterface();
+        // 2026-08-31: pass the already-constructed Orchestrator (real
+        // app-control execution, same pipeline `bun run dev conversation`
+        // uses) instead of leaving VoiceInterface's app-control-less
+        // fallback path as the only option - see voice-interface.ts's
+        // generateResponse() for the full story.
+        const voice = new VoiceInterface(DEFAULT_VOICE_CONFIG, modelProvider, orchestrator);
         const { response, audio } = await voice.respondToText(text);
         console.log(`\n🤖 JARVIS: "${response}"`);
 
@@ -352,7 +357,13 @@ async function main() {
       console.log("   Press Ctrl+C to stop.");
       console.log("=".repeat(70));
 
-      const voice = new VoiceInterface();
+      // 2026-08-31: same real-app-control fix as voice-reply above - a
+      // live run found "open Notepad"/"open Spotify" spoken through the
+      // mic only ever got a conversational clarifying question back,
+      // because nothing wired the orchestrator's real
+      // parseAppControlIntent/executeAppControlIntent pipeline into the
+      // voice path at all. See voice-interface.ts's generateResponse().
+      const voice = new VoiceInterface(DEFAULT_VOICE_CONFIG, modelProvider, orchestrator);
       await voice.start();
 
       // Visual HUD (2026-08-30, per Gavin: an animated version of the
@@ -373,11 +384,33 @@ async function main() {
       voice.on("user-speech-recognized", () => hud.setState("thinking"));
       voice.on("audio-ready", () => hud.setState("speaking"));
       voice.on("interaction-complete", () => hud.setState("idle"));
+      // 2026-08-31, per Gavin: "the jarvis window doesn't close once
+      // it's stopped so I had like 7 opened" - real problem confirmed
+      // over repeated test runs, not a one-off. Root cause: Start-Process
+      // was fire-and-forget with no way to ever find this specific window
+      // again, so shutdown() below had nothing to close. Fixed by
+      // capturing the launched process's real PID (-PassThru, then read
+      // back $p.Id) and closing exactly that PID on shutdown - NOT a
+      // blanket `taskkill msedge`, which would risk closing Gavin's
+      // regular browsing too (the exact risk this file's own comments
+      // already flagged as the reason nothing auto-closed it before).
+      // Honest caveat: if Edge happens to already be running when this
+      // launches, Chromium's process model can hand the new --app window
+      // off to an existing Edge process tree, in which case this captured
+      // PID may not be the one actually owning the visible window - the
+      // common case (no other Edge instance active) is what this fixes;
+      // watch for whether windows still pile up if Edge is your daily
+      // browser too.
+      let hudProcessId: number | null = null;
       try {
-        await runPowerShell(
-          `Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420"`
+        const { stdout } = await runPowerShell(
+          `$p = Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420" -PassThru; $p.Id`
         );
-        console.log(`\n🖥️  HUD window opened (${hud.url}) - close it manually when you're done; stopping 'listen' does not close it for you.`);
+        const parsedPid = parseInt(stdout.trim(), 10);
+        if (!Number.isNaN(parsedPid)) {
+          hudProcessId = parsedPid;
+        }
+        console.log(`\n🖥️  HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
       } catch (err) {
         console.log(`\n⚠️  Could not open the HUD window automatically: ${err instanceof Error ? err.message : err}`);
         console.log(`   You can open it yourself: ${hud.url}`);
@@ -409,6 +442,15 @@ async function main() {
         mic.stop();
         hud.stop();
         await voice.stop();
+        if (hudProcessId !== null) {
+          try {
+            await runPowerShell(`Stop-Process -Id ${hudProcessId} -Force -ErrorAction SilentlyContinue`);
+          } catch {
+            // Best-effort - harmless if the window was already closed by
+            // hand, or if the captured PID wasn't the real window owner
+            // (see the launch comment above for when that can happen).
+          }
+        }
         process.exit(0);
       };
       process.on("SIGINT", shutdown);

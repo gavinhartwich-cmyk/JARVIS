@@ -3,8 +3,8 @@
  *
  * Detects when the user says "Jarvis" — anywhere in speech, not just the
  * literal phrase "hey Jarvis" — using a real local openWakeWord model
- * (via scripts/wakeword_detect.py — see detectWakeWord()), not a
- * simulation.
+ * (via scripts/wakeword_detect_daemon.py — see ensureDaemonStarted()),
+ * not a simulation.
  *
  * IMPORTANT CAVEAT: the underlying pretrained model ("hey_jarvis") was
  * only ever trained on the phrase "hey jarvis", not bare "jarvis". Real
@@ -34,26 +34,33 @@
  * threshold tune — see jarvis-phase-1-developer memory for the full
  * data and the open decision on whether that's worth doing).
  *
- * Real continuous microphone capture doesn't exist in this codebase yet
- * (out of scope for this sandbox — needs Gavin's PC); this class buffers
- * whatever PCM16 chunks processAudioChunk() receives and runs detection
- * once ~1s has accumulated, spawning one subprocess per detection cycle.
- * That's the same "batch, not persistent-stream" tradeoff SpeechRecognizer
- * makes, and is fine for now — a persistent stdin-streaming subprocess
- * would be the next optimization once real-time mic latency matters.
+ * [UPDATE 2026-08-31] Real, measured fix for "very delayed from the
+ * wakeword to the listening mode" (Gavin, after trying to say "jarvis,
+ * open notepad" as one sentence): the previous design spawned a brand
+ * new Python subprocess per detection cycle, and on this project's own
+ * venv that subprocess's own startup (numpy/openwakeword imports plus
+ * Model() construction) measured ~1.1-1.5s EVERY cycle - on top of the
+ * ~1s of audio it needed to buffer first. That's 2+ real seconds between
+ * saying "jarvis" and detection completing, which eats directly into
+ * whatever he says right after it, explaining the garbled/truncated
+ * transcripts ("Drivers open Spotify", "Open no pad") from that same
+ * live run. Fixed by switching to a single persistent daemon
+ * (scripts/wakeword_detect_daemon.py) that loads the model exactly ONCE
+ * per `listen` session and then scores real 80ms/1280-sample chunks as
+ * they stream in over stdin - the one real unavoidable cost (model load)
+ * is now paid once at startup, not per detection, and the buffering
+ * window drops from ~1s to ~80ms. See ensureDaemonStarted()/
+ * processAudioChunk() below.
  */
 
-import { spawn } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { spawn, ChildProcessByStdio } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
 
 export interface WakeWordEvent {
   keyword: string;
   confidence: number; // 0-1
   timestamp: Date;
-  audioChunk?: Buffer; // Raw audio data
+  audioChunk?: Buffer; // Raw audio data - a short rolling window of recent PCM for debugging, not the full utterance (see ROLLING_AUDIO_MAX_BYTES below)
 }
 
 export interface WakeWordDetectorConfig {
@@ -62,44 +69,32 @@ export interface WakeWordDetectorConfig {
   modelPath?: string;
   sampleRate: number;
   pythonPath?: string; // Path to the venv python with openwakeword installed
-  scriptPath?: string; // Path to scripts/wakeword_detect.py
+  scriptPath?: string; // Path to scripts/wakeword_detect_daemon.py
 }
 
 function resolveWakeWordPaths(config: { pythonPath?: string; scriptPath?: string }) {
   const pythonPath =
     config.pythonPath || process.env.WAKEWORD_PYTHON_PATH || "tools/whisper/venv/bin/python";
+  // 2026-08-31: default repointed from the one-shot wakeword_detect.py to
+  // the new persistent daemon - see this file's header comment. The
+  // one-shot script still exists (src/tests/wake-word-detector.test.ts
+  // and anyone passing WAKEWORD_SCRIPT_PATH explicitly can still use it),
+  // it's just no longer what a caller gets by default.
   const scriptPath =
-    config.scriptPath || process.env.WAKEWORD_SCRIPT_PATH || "scripts/wakeword_detect.py";
+    config.scriptPath || process.env.WAKEWORD_SCRIPT_PATH || "scripts/wakeword_detect_daemon.py";
   return { pythonPath, scriptPath };
 }
 
-/**
- * Wrap raw 16-bit mono PCM in a minimal WAV container so
- * wakeword_detect.py can load it via Python's wave module.
- */
-function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
-  const header = Buffer.alloc(44);
-  const dataSize = pcm.length;
-  header.write("RIFF", 0, "ascii");
-  header.writeUInt32LE(36 + dataSize, 4);
-  header.write("WAVE", 8, "ascii");
-  header.write("fmt ", 12, "ascii");
-  header.writeUInt32LE(16, 16); // fmt chunk size
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // mono
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(sampleRate * 2, 28); // byte rate (16-bit mono)
-  header.writeUInt16LE(2, 32); // block align
-  header.writeUInt16LE(16, 34); // bits per sample
-  header.write("data", 36, "ascii");
-  header.writeUInt32LE(dataSize, 40);
-  return Buffer.concat([header, pcm]);
-}
+// How much recent raw PCM to keep around purely for WakeWordEvent's
+// optional audioChunk field (debugging use, not consumed by any real
+// code path today - see the interface comment above). 1s at 16kHz
+// 16-bit mono.
+const ROLLING_AUDIO_MAX_BYTES = 16000 * 2;
 
-interface WakeWordScriptResult {
-  model: string;
-  max_score: number;
-  scores: number[];
+interface DaemonScoreLine {
+  score?: number;
+  ready?: boolean;
+  model?: string;
   error?: string;
 }
 
@@ -116,9 +111,27 @@ export class WakeWordDetector {
   private sampleRate: number;
   private pythonPath: string;
   private scriptPath: string;
-  private audioBuffer: Buffer = Buffer.alloc(0);
   private isListening: boolean = false;
-  private detecting: boolean = false;
+
+  // Persistent daemon process state (2026-08-31) - see this file's header
+  // comment for why this replaced a per-cycle subprocess spawn.
+  private daemonProc: ChildProcessByStdio<Writable, Readable, Readable> | null = null;
+  private daemonReady: Promise<void> | null = null;
+  private daemonStdoutBuffer: string = "";
+  // Total 16-bit samples ever written to the daemon's stdin, and total
+  // score lines ever received back - processAudioChunk() computes how
+  // many scores it should expect once its chunk is fully accounted for
+  // (Math.floor(totalSamplesSent / 1280)) and awaits until
+  // scoresReceivedCount catches up, so callers that await one big chunk
+  // (the real-openwakeword test) still see a real detection complete
+  // before the call resolves, exactly like the old batch design did -
+  // while callers feeding small real-time chunks (mic-capture.ts) get
+  // scores back within milliseconds of a warm daemon, not after a full
+  // ~1s buffer.
+  private totalSamplesSent: number = 0;
+  private scoresReceivedCount: number = 0;
+  private scoreWaiters: Array<{ count: number; resolve: () => void }> = [];
+  private rollingAudio: Buffer = Buffer.alloc(0);
 
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
@@ -183,147 +196,262 @@ export class WakeWordDetector {
     console.log(`   Sensitivity: ${(this.sensitivity * 100).toFixed(0)}%`);
 
     this.isListening = true;
-    this.audioBuffer = Buffer.alloc(0);
     this.emit("listening-started");
 
-    // Real detection runs in detectWakeWord() once processAudioChunk()
-    // has buffered ~1s of audio — there is no continuous mic input to read
-    // from here yet (needs Gavin's PC; see file header).
-    console.log("   Listening for wake word...");
+    // Spawns (or reuses, if already warm from a previous turn) the
+    // persistent daemon and waits for it to finish loading the model -
+    // the one real unavoidable cost, paid here once, not per detection.
+    //
+    // 2026-08-31: this now does real process I/O where the old per-cycle
+    // design never did (startListening() used to just flip a flag - the
+    // subprocess spawn happened lazily, later, inside processAudioChunk(),
+    // where a failure was already caught and logged without crashing
+    // anything). A daemon spawn failure here (bad python path, missing
+    // venv) must not become an uncaught rejection that takes down the
+    // whole `listen` session the moment it starts - caught and logged
+    // the same way processAudioChunk() below handles a mid-session
+    // failure, not rethrown.
+    try {
+      await this.ensureDaemonStarted();
+      console.log("   Listening for wake word...");
+    } catch (error) {
+      const message = `wake word daemon failed to start: ${error instanceof Error ? error.message : error}`;
+      console.error("❌ Wake word detection failed:", message);
+      this.emit("error", { message });
+    }
   }
 
   /**
    * Stop listening for wake word
+   *
+   * Does NOT kill the persistent daemon (2026-08-31) - stopListening()
+   * is called between conversation turns (voice-interface.ts resumes
+   * listening after every reply), and killing/reloading the model on
+   * every single turn would reintroduce the exact per-cycle reload cost
+   * this daemon architecture exists to eliminate. The daemon is only
+   * ever actually torn down by shutdown() (see below), called once when
+   * the whole `listen` session ends.
    */
   async stopListening(): Promise<void> {
     if (!this.isListening) return;
 
     console.log("🛑 Stopping wake word detection");
     this.isListening = false;
-    this.audioBuffer = Buffer.alloc(0);
     this.emit("listening-stopped");
+  }
+
+  /**
+   * Permanently tear down the persistent daemon process - call this once,
+   * when the whole `listen` session is shutting down (see
+   * voice-interface.ts's stop()), not between turns (see stopListening()
+   * above for why those are different).
+   */
+  shutdown(): void {
+    if (this.daemonProc) {
+      this.daemonProc.stdin.end();
+      this.daemonProc.kill();
+      this.daemonProc = null;
+    }
+    this.daemonReady = null;
+  }
+
+  /**
+   * Spawn the persistent wakeword_detect_daemon.py process if it isn't
+   * already running, and return a promise that resolves once it has
+   * finished loading the model and printed its "ready" line. Safe to
+   * call repeatedly - reuses the existing process/promise if one is
+   * already up or starting.
+   */
+  private ensureDaemonStarted(): Promise<void> {
+    if (this.daemonReady) return this.daemonReady;
+
+    this.daemonReady = new Promise<void>((resolveReady, rejectReady) => {
+      const proc = spawn(this.pythonPath, [this.scriptPath, this.modelPath], {
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessByStdio<Writable, Readable, Readable>;
+      this.daemonProc = proc;
+
+      let readyResolved = false;
+
+      proc.stdout.on("data", (data: Buffer) => {
+        this.daemonStdoutBuffer += data.toString("utf-8");
+        let newlineIndex: number;
+        while ((newlineIndex = this.daemonStdoutBuffer.indexOf("\n")) !== -1) {
+          const line = this.daemonStdoutBuffer.slice(0, newlineIndex).trim();
+          this.daemonStdoutBuffer = this.daemonStdoutBuffer.slice(newlineIndex + 1);
+          if (!line) continue;
+
+          let parsed: DaemonScoreLine;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            console.error(`❌ Wake word daemon produced non-JSON line: ${line}`);
+            continue;
+          }
+
+          if (parsed.ready) {
+            readyResolved = true;
+            resolveReady();
+            continue;
+          }
+
+          if (parsed.error) {
+            console.error("❌ Wake word detection failed:", parsed.error);
+            this.emit("error", { message: parsed.error });
+            // A single bad chunk doesn't necessarily mean the daemon
+            // died - still count it so any pending waiter doesn't hang
+            // forever on a chunk that will never produce a real score.
+            this.scoresReceivedCount++;
+            this.resolveReadyWaiters();
+            continue;
+          }
+
+          if (typeof parsed.score === "number") {
+            this.scoresReceivedCount++;
+            this.handleScore(parsed.score);
+            this.resolveReadyWaiters();
+          }
+        }
+      });
+
+      proc.stderr.on("data", (data: Buffer) => {
+        // wakeword_detect_daemon.py logs real startup/self-heal-download
+        // progress here (see _wakeword_model_setup.py) - surface it
+        // instead of swallowing real diagnostic info.
+        console.log(`   [wakeword] ${data.toString().trim()}`);
+      });
+
+      proc.on("error", (err) => {
+        const message = `Failed to launch wake word daemon at "${this.pythonPath}": ${err.message}. Run scripts/setup-voice.sh first.`;
+        console.error("❌ Wake word detection failed:", message);
+        this.emit("error", { message });
+        this.daemonProc = null;
+        this.daemonReady = null;
+        if (!readyResolved) rejectReady(new Error(message));
+      });
+
+      proc.on("close", (code) => {
+        const wasRunning = this.daemonProc !== null;
+        this.daemonProc = null;
+        this.daemonReady = null;
+        if (wasRunning && code !== 0 && code !== null) {
+          const message = `wake word daemon exited unexpectedly (code ${code})`;
+          console.error("❌ Wake word detection failed:", message);
+          this.emit("error", { message });
+        }
+        if (!readyResolved) rejectReady(new Error(`wake word daemon exited before becoming ready (code ${code})`));
+      });
+    });
+
+    return this.daemonReady;
+  }
+
+  /** Resolves any waitForScoreCount() callers whose target count has now been reached. */
+  private resolveReadyWaiters(): void {
+    this.scoreWaiters = this.scoreWaiters.filter((waiter) => {
+      if (this.scoresReceivedCount >= waiter.count) {
+        waiter.resolve();
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /** Resolves once scoresReceivedCount has reached at least `count`, or after a safety timeout so a lost/miscounted score can never hang a caller forever. */
+  private waitForScoreCount(count: number, timeoutMs = 5000): Promise<void> {
+    if (this.scoresReceivedCount >= count) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const waiter = { count, resolve };
+      this.scoreWaiters.push(waiter);
+      setTimeout(() => {
+        const idx = this.scoreWaiters.indexOf(waiter);
+        if (idx !== -1) {
+          this.scoreWaiters.splice(idx, 1);
+          console.error(
+            `❌ Wake word detection failed: timed out waiting for the daemon to score ${count} chunks (got ${this.scoresReceivedCount}) - it may have crashed or fallen behind.`
+          );
+          resolve();
+        }
+      }, timeoutMs);
+    });
+  }
+
+  /** Real per-chunk score handling - same threshold check/logging/emit the old per-cycle detectWakeWord() did, just invoked once per 80ms sub-chunk instead of once per ~1s buffer. */
+  private handleScore(score: number): void {
+    // Real diagnostic gap found 2026-08-30: this only ever logged on a
+    // hard error, never the actual score - so "the wake word didn't
+    // fire" and "detection never ran / crashed silently" looked
+    // identical from the console. Logging every real score (not just
+    // successful triggers) so a live run shows real numbers to
+    // calibrate `sensitivity` (default 0.05 as of 2026-08-30, was 0.15)
+    // against instead of guessing blind - especially relevant since the
+    // model's own known behavior (see this file's header comment) scores
+    // anywhere from ~0.003 to ~0.999 on genuine "jarvis" utterances
+    // depending on cadence/position, so seeing the real number matters
+    // more here than for a typical fixed threshold.
+    console.log(`   🔍 wake-word score: ${score.toFixed(4)} (threshold: ${this.sensitivity})`);
+    if (score > this.sensitivity) {
+      this.emitWakeWordDetected(score);
+    }
   }
 
   /**
    * Process audio chunk (called from microphone stream)
    *
-   * Buffers raw PCM16 bytes; once ~1s has accumulated, runs it through the
-   * real openWakeWord model via detectWakeWord().
+   * Writes the chunk to the persistent daemon's stdin, then awaits until
+   * the daemon has actually scored everything derivable from bytes sent
+   * so far - see totalSamplesSent/scoresReceivedCount above for why this
+   * preserves the old "await this and any detection has already fired by
+   * the time it resolves" contract real callers (including
+   * src/tests/wake-word-detector.test.ts, which sends one whole
+   * synthesized clip in a single call) depend on, while still being real
+   * low-latency streaming for the mic pipeline's small chunks.
    */
   async processAudioChunk(audioChunk: Buffer): Promise<void> {
     if (!this.isListening) return;
 
-    this.audioBuffer = Buffer.concat([this.audioBuffer, audioChunk]);
-    const sampleCount = this.audioBuffer.length / 2; // 16-bit samples
-
-    this.emit("audio-chunk", {
-      size: audioChunk.length / 2,
-      bufferSize: sampleCount,
-    });
-
-    // Avoid overlapping subprocess runs if chunks arrive faster than
-    // detection completes.
-    if (sampleCount >= this.sampleRate && !this.detecting) {
-      await this.detectWakeWord();
-    }
-  }
-
-  /**
-   * Detect wake word in the buffered audio
-   *
-   * Runs the real openWakeWord model (via wakeword_detect.py) against the
-   * buffered PCM and emits an event if the peak score crosses sensitivity.
-   */
-  private async detectWakeWord(): Promise<void> {
-    this.detecting = true;
-    const bufferedAudio = this.audioBuffer;
-
     try {
-      const result = await this.runWakeWordModel(bufferedAudio);
-      // Real diagnostic gap found 2026-08-30: this only ever logged on a
-      // hard error, never the actual score - so "the wake word didn't
-      // fire" and "detection never ran / crashed silently" looked
-      // identical from the console. Logging every real score (not just
-      // successful triggers) so a live run shows real numbers to
-      // calibrate `sensitivity` (default 0.05 as of 2026-08-30, was 0.15) against instead of
-      // guessing blind - especially relevant since the model's own known
-      // behavior (see this file's header comment) scores anywhere from
-      // ~0.003 to ~0.999 on genuine "jarvis" utterances depending on
-      // cadence/position, so seeing the real number matters more here
-      // than for a typical fixed threshold.
-      console.log(`   🔍 wake-word score: ${result.max_score.toFixed(4)} (threshold: ${this.sensitivity})`);
-      if (result.max_score > this.sensitivity) {
-        this.emitWakeWordDetected(result.max_score, bufferedAudio);
-      }
+      await this.ensureDaemonStarted();
     } catch (error) {
-      const err = error instanceof Error ? error.message : String(error);
-      console.error("❌ Wake word detection failed:", err);
-      this.emit("error", { message: err });
-    } finally {
-      this.detecting = false;
-      // Keep only last second of audio to avoid buffer bloat
-      const maxBufferBytes = this.sampleRate * 2; // 16-bit samples
-      if (this.audioBuffer.length > maxBufferBytes) {
-        this.audioBuffer = this.audioBuffer.subarray(-maxBufferBytes);
-      }
+      const message = `wake word daemon failed to (re)start: ${error instanceof Error ? error.message : error}`;
+      console.error("❌ Wake word detection failed:", message);
+      this.emit("error", { message });
+      return;
     }
-  }
+    if (!this.daemonProc) return; // daemon failed to start - already logged/emitted above
 
-  /**
-   * Write the buffered PCM to a temp WAV file and run the real
-   * openWakeWord subprocess against it.
-   */
-  private async runWakeWordModel(pcm: Buffer): Promise<WakeWordScriptResult> {
-    const wav = pcmToWav(pcm, this.sampleRate);
-    const tempPath = join(tmpdir(), `jarvis-wakeword-${randomUUID()}.wav`);
-    writeFileSync(tempPath, wav);
+    const sampleCount = Math.floor(audioChunk.length / 2);
+    this.emit("audio-chunk", { size: sampleCount, bufferSize: sampleCount });
+
+    this.rollingAudio = Buffer.concat([this.rollingAudio, audioChunk]);
+    if (this.rollingAudio.length > ROLLING_AUDIO_MAX_BYTES) {
+      this.rollingAudio = this.rollingAudio.subarray(-ROLLING_AUDIO_MAX_BYTES);
+    }
+
+    this.totalSamplesSent += sampleCount;
+    const expectedScoreCount = Math.floor(this.totalSamplesSent / 1280);
 
     try {
-      return await new Promise<WakeWordScriptResult>((resolve, reject) => {
-        const proc = spawn(this.pythonPath, [this.scriptPath, this.modelPath, tempPath]);
-        const stdoutChunks: Buffer[] = [];
-        const stderrChunks: Buffer[] = [];
-        proc.stdout.on("data", (c: Buffer) => stdoutChunks.push(c));
-        proc.stderr.on("data", (c: Buffer) => stderrChunks.push(c));
-
-        proc.on("error", (err) => {
-          reject(new Error(`Failed to launch wakeword detector at "${this.pythonPath}": ${err.message}. Run scripts/setup-voice.sh first.`));
-        });
-
-        proc.on("close", () => {
-          const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
-          let parsed: WakeWordScriptResult;
-          try {
-            parsed = JSON.parse(stdout);
-          } catch {
-            reject(new Error(`wakeword_detect.py produced non-JSON output: ${stdout || Buffer.concat(stderrChunks).toString("utf-8")}`));
-            return;
-          }
-          if (parsed.error) {
-            reject(new Error(`wakeword_detect.py error: ${parsed.error}`));
-            return;
-          }
-          resolve(parsed);
-        });
-      });
-    } finally {
-      try {
-        unlinkSync(tempPath);
-      } catch {
-        // best-effort cleanup
-      }
+      this.daemonProc.stdin.write(audioChunk);
+    } catch (error) {
+      const message = `Failed to write audio to wake word daemon: ${error instanceof Error ? error.message : error}`;
+      console.error("❌ Wake word detection failed:", message);
+      this.emit("error", { message });
+      return;
     }
+
+    await this.waitForScoreCount(expectedScoreCount);
   }
 
   /**
    * Emit wake word detected event
    */
-  private emitWakeWordDetected(confidence: number, audioChunk: Buffer) {
+  private emitWakeWordDetected(confidence: number) {
     const event: WakeWordEvent = {
       keyword: this.keyword,
       confidence: Math.min(confidence, 1.0),
       timestamp: new Date(),
-      audioChunk,
+      audioChunk: this.rollingAudio,
     };
 
     console.log(`🎯 Wake word detected: "${this.keyword}"`);
@@ -345,7 +473,7 @@ export class WakeWordDetector {
       isListening: this.isListening,
       keyword: this.keyword,
       sensitivity: this.sensitivity,
-      bufferSize: this.audioBuffer.length / 2, // 16-bit samples
+      bufferSize: this.rollingAudio.length / 2, // 16-bit samples
     };
   }
 

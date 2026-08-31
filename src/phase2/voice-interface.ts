@@ -13,6 +13,7 @@ import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
 import { playWavBuffer } from "./audio-player";
+import type { Orchestrator } from "../core/orchestrator";
 
 // Real end-of-turn detection (2026-08-30): nothing previously ever called
 // speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
@@ -63,6 +64,42 @@ function computeRmsEnergy(pcm16: Buffer): number {
     sumSquares += sample * sample;
   }
   return Math.sqrt(sumSquares / sampleCount);
+}
+
+// Real diagnostic (2026-08-31), per Gavin: "it also only wrote its
+// response out... instead of saying it outloud" - playWavBuffer()'s
+// PowerShell PlaySync() call completed with no error, so the failure
+// (if it is one) isn't a crash - it's either a genuinely near-silent
+// synthesized clip (a real Piper bug/config problem) or the audio
+// playing out loud on a Windows output device Gavin isn't listening on
+// (nothing wrong with the code, a Windows sound-settings issue). No way
+// to tell those apart from here without hearing it, so this logs the
+// real peak amplitude of what's about to be played - a healthy peak
+// means look at Windows' default playback device; a near-zero peak
+// means the synthesis step itself produced dead audio.
+function computeWavPeakAmplitude(wav: Buffer): number {
+  // Real RIFF chunk walk, not a hardcoded 44-byte header offset - Piper
+  // writes a standard WAV file but this is cheap to do properly.
+  if (wav.length < 12 || wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE") {
+    return -1; // not a WAV file we recognize - caller should treat this as "unknown," not "silent"
+  }
+  let offset = 12;
+  while (offset + 8 <= wav.length) {
+    const chunkId = wav.toString("ascii", offset, offset + 4);
+    const chunkSize = wav.readUInt32LE(offset + 4);
+    if (chunkId === "data") {
+      const dataStart = offset + 8;
+      const dataEnd = Math.min(dataStart + chunkSize, wav.length);
+      let peak = 0;
+      for (let i = dataStart; i + 1 < dataEnd; i += 2) {
+        const sample = Math.abs(wav.readInt16LE(i));
+        if (sample > peak) peak = sample;
+      }
+      return peak / 32768;
+    }
+    offset += 8 + chunkSize + (chunkSize % 2); // chunks are word-aligned
+  }
+  return -1; // no data chunk found
 }
 
 const JARVIS_SYSTEM_PROMPT =
@@ -133,11 +170,25 @@ export class VoiceInterface {
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
 
-  constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG, modelProvider?: ModelProvider) {
+  // Real app-control execution (2026-08-31) - see generateResponse()'s own
+  // comment for the full story: without this, "open Notepad"/"open
+  // Spotify" spoken through the mic just got a conversational reply
+  // asking for clarification, because nothing in this class's own
+  // generateResponse() ever executed anything. Optional and not
+  // constructed internally (unlike modelProvider above) because
+  // Orchestrator does its own heavy one-time setup (agent registration,
+  // its own gateway) that a caller may already have done once and wants
+  // reused, not duplicated per VoiceInterface instance - see cli.ts's
+  // `listen`/`voice-reply` commands, which now pass their own already-
+  // constructed Orchestrator in.
+  private orchestrator?: Orchestrator;
+
+  constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG, modelProvider?: ModelProvider, orchestrator?: Orchestrator) {
     this.config = config;
     // Same Gemini -> Ollama -> OpenRouter gateway Phase 1 uses, so a voice
     // reply degrades to the local model instead of dying on a 429 too.
     this.modelProvider = modelProvider || new GatewayModelProvider(createDefaultGateway());
+    this.orchestrator = orchestrator;
     this.context = {
       conversationId: `conversation-${Date.now()}`,
       messageHistory: [],
@@ -256,6 +307,12 @@ export class VoiceInterface {
 
     if (this.wakeWordDetector) {
       await this.wakeWordDetector.stopListening();
+      // Real process teardown (2026-08-31) - stopListening() alone no
+      // longer kills the persistent wake-word daemon (see its own
+      // comment for why), so the whole `listen` session ending is what
+      // actually needs to end that process, or it would leak past this
+      // VoiceInterface's own lifetime.
+      this.wakeWordDetector.shutdown();
     }
 
     if (this.speechRecognizer) {
@@ -390,7 +447,14 @@ export class VoiceInterface {
     const { response, audio } = await this.respondToText(result.text);
 
     if (audio) {
-      console.log(`\n🔊 Response ready: ${audio.duration}ms`);
+      const peakAmplitude = computeWavPeakAmplitude(audio.audio);
+      const peakDesc =
+        peakAmplitude < 0
+          ? "unrecognized WAV format"
+          : peakAmplitude < 0.02
+            ? `${peakAmplitude.toFixed(4)} - SUSPICIOUSLY QUIET, likely a dead/near-silent synthesis, not a playback-routing issue`
+            : peakAmplitude.toFixed(4);
+      console.log(`\n🔊 Response ready: ${audio.duration}ms, peak amplitude: ${peakDesc}`);
       // Block on real playback, and drop mic input for its duration (see
       // isSpeaking above) - both real fixes, not just bookkeeping: without
       // the first, nothing anyone could ever actually hear was produced;
@@ -463,20 +527,48 @@ export class VoiceInterface {
    * context, which is the right shape for "answer what was just said."
    */
   private async generateResponse(userInput: string): Promise<string> {
-    // Honest gap, noted 2026-08-27: unlike `Orchestrator.processConversation()`
-    // (core/orchestrator.ts), this path does NOT detect/execute app-control
-    // intents ("open Spotify") — it's a deliberately lighter, identity-less
-    // call (see this method's doc comment above), and wiring real execution
-    // in here would need the same identity/authorization resolution the
-    // orchestrator path already has. Not built here yet because voice-reply
-    // has no microphone input anyway (text-in/audio-out only, per this
-    // file's header) — worth revisiting once real mic capture makes this
-    // the primary interactive surface, at which point it should probably
-    // route through the orchestrator path instead of duplicating the logic.
     this.emit("jarvis-responding", { input: userInput });
 
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);
 
+    // [FIXED 2026-08-31] Real gap found live: Gavin said "open Notepad"/
+    // "open Spotify" through the mic and got a conversational reply
+    // asking him to clarify, instead of the app actually opening - this
+    // path (unlike `Orchestrator.processConversation()` in
+    // core/orchestrator.ts) never detected or executed app-control
+    // intents at all. It was a deliberately lighter, identity-less call
+    // with no mic input to matter before 2026-08-30, so it was left
+    // unbuilt on purpose (see git history) - but real mic capture now
+    // makes this the primary interactive surface, exactly the condition
+    // that comment said would make it worth revisiting. Fixed by routing
+    // through the same, already-real, already-tested Orchestrator
+    // pipeline (`parseAppControlIntent`/`classifyAppControlIntent`/
+    // `executeAppControlIntent`, same as `bun run dev conversation`)
+    // instead of writing a second copy of that logic here - see
+    // `orchestrator` above and cli.ts's `listen`/`voice-reply` commands
+    // for where it's constructed and passed in. Honest tradeoff: the
+    // orchestrator keeps its own separate conversation history
+    // (ConversationEngine) rather than this class's own
+    // `context.messageHistory` - fine for app-control + reply generation
+    // (which is what orchestrator.processConversation() is for), but
+    // means the two histories aren't merged into one transcript yet.
+    if (this.orchestrator) {
+      try {
+        const result = await this.orchestrator.processConversation(userInput);
+        console.log(`🤖 JARVIS: "${result.response}"`);
+        return result.response;
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        console.error("❌ JARVIS response generation failed:", err);
+        this.emit("error", { message: err });
+        return "Sorry, I couldn't reach any model provider to answer that.";
+      }
+    }
+
+    // Fallback when no Orchestrator was provided (e.g. a caller that only
+    // wants a lightweight text-in/audio-out reply with no app-control,
+    // or a test using a fake ModelProvider) - the original direct,
+    // single-model-call path. No app-control detection here.
     const recentHistory = this.context.messageHistory.slice(-6, -1); // exclude the just-pushed user turn
     const messages = [
       ...recentHistory.map((turn) => ({

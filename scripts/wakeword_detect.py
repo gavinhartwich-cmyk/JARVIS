@@ -33,53 +33,17 @@ def main() -> int:
     audio_path = sys.argv[2]
 
     try:
-        import os
         import numpy as np
-        import openwakeword
         from openwakeword.model import Model
-        from openwakeword.utils import download_models
+        from _wakeword_model_setup import ensure_model_downloaded
     except ImportError as e:
         print(json.dumps({"error": f"openwakeword not installed: {e}. Run scripts/setup-voice.sh."}))
         return 1
 
-    # Real bug found 2026-08-30 on Gavin's actual PC (not caught by any
-    # earlier sandbox testing): `pip install openwakeword` installs the
-    # Python code but NOT the pretrained model binaries (hey_jarvis's
-    # .onnx/.tflite, plus the melspectrogram/embedding/VAD models the
-    # feature pipeline needs) - those are separate GitHub release assets
-    # that openwakeword.utils.download_models() must be called to fetch
-    # explicitly. setup-voice.ps1/.sh never did this, so Model() failed
-    # with a raw ONNXRuntimeError "File doesn't exist" the first time this
-    # ever ran against a real microphone. Fixed in two places: setup-voice
-    # now calls download_models() as part of normal setup, AND this
-    # defensive check here means an already-installed-but-incomplete venv
-    # (or anyone who runs this before re-running setup) self-heals instead
-    # of failing the same way again - only actually reaches out to GitHub
-    # when a real file is missing (download_models() itself no-ops on
-    # files that already exist), so this is a no-op filesystem check most
-    # of the time, not a startup network call on every real run.
-    if model_name_or_path in openwakeword.MODELS:
-        target_directory = os.path.dirname(openwakeword.MODELS[model_name_or_path]["model_path"])
-        expected_path = openwakeword.MODELS[model_name_or_path]["model_path"].replace(".tflite", ".onnx")
-        if not os.path.exists(expected_path):
-            print(f"[wakeword_detect] {model_name_or_path} model not found locally, downloading...", file=sys.stderr)
-            download_models([model_name_or_path])
-            # download_models() has a real quirk (found 2026-08-30 by
-            # actually reproducing this, not just reading its source): it
-            # only checks whether the .tflite variant already exists
-            # before deciding to fetch BOTH formats - if a previous
-            # partial/interrupted setup left the .tflite present but the
-            # .onnx missing (this venv is always run with
-            # inference_framework="onnx", never tflite - see the note
-            # below), that call silently does nothing and this exact
-            # failure would recur. Belt-and-suspenders: if the onnx file
-            # still isn't there after asking the library to fetch it,
-            # download it directly from its own recorded release URL.
-            if not os.path.exists(expected_path):
-                from openwakeword.utils import download_file
-                onnx_url = openwakeword.MODELS[model_name_or_path]["download_url"].replace(".tflite", ".onnx")
-                print(f"[wakeword_detect] download_models() didn't produce {expected_path} - fetching {onnx_url} directly", file=sys.stderr)
-                download_file(onnx_url, target_directory)
+    # See _wakeword_model_setup.py (2026-08-31: factored out of this file,
+    # now shared with wakeword_detect_daemon.py) for the full story on the
+    # two real bugs this closes.
+    ensure_model_downloaded(model_name_or_path)
 
     try:
         with wave.open(audio_path, "rb") as wf:
@@ -98,8 +62,8 @@ def main() -> int:
 
         # tflite_runtime (openWakeWord's default inference backend) is built
         # against NumPy 1.x and segfaults/raises under this venv's NumPy 2.x
-        # (see openwakeword.MODELS name resolution above — it maps names to
-        # .tflite paths by default). Force the ONNX backend instead, which
+        # (openwakeword.MODELS maps names to .tflite paths by default - see
+        # _wakeword_model_setup.py). Force the ONNX backend instead, which
         # this venv has installed and verified working.
         model = Model(wakeword_models=[model_name_or_path], inference_framework="onnx")
         model_name = list(model.models.keys())[0]
