@@ -135,6 +135,16 @@ export class VoiceInterface {
   private wakeWordDetector?: WakeWordDetector;
   private speechRecognizer?: SpeechRecognizer;
   private speechSynthesizer?: SpeechSynthesizer;
+  // Short "thinking" acknowledgment (2026-08-31), per Gavin: "it should
+  // be responding while thinking so it seems faster instead of nothing"
+  // - a real LLM call plus full TTS synthesis can take several real
+  // seconds (measured live: ~2s of synthesis alone, on top of the LLM
+  // round trip before it), during which nothing audible happened at all,
+  // making a working pipeline feel broken/unresponsive. Synthesized
+  // once, lazily, and cached (see ensureFillerAudio()) - only the first
+  // turn in a session pays the extra synthesis cost, every turn after
+  // plays back almost instantly.
+  private fillerAudio: SynthesisResult | null = null;
   private modelProvider: ModelProvider;
 
   private context: VoiceInteractionContext;
@@ -330,6 +340,16 @@ export class VoiceInterface {
   private async handleWakeWord(event: WakeWordEvent) {
     console.log(`\n✨ Wake word detected! Starting conversation...`);
 
+    // 2026-08-31: explicit stop, not just relying on context.isActive to
+    // gate future processMicChunk() calls - see wake-word-detector.ts's
+    // stopListening() for why this matters: it also resolves any
+    // already-in-flight score-count waiter left over from the idle-phase
+    // audio right at this exact handoff, instead of letting it hang until
+    // a confusing 5s timeout error fires mid-turn.
+    if (this.wakeWordDetector) {
+      await this.wakeWordDetector.stopListening();
+    }
+
     this.context.isActive = true;
     this.context.lastWakeWordTime = new Date();
     this.turnSilenceMs = 0;
@@ -438,11 +458,53 @@ export class VoiceInterface {
   }
 
   /**
+   * Lazily synthesize (once) and cache a short, fixed "thinking"
+   * acknowledgment - see fillerAudio's own comment above for why this
+   * exists. Deliberately a single fixed generic phrase rather than
+   * routing it through the real LLM (that would just move the same
+   * latency problem one step earlier) or varying it (more natural, but
+   * real added complexity) - a fixed phrase isn't the polish here, it's
+   * the honest fix for "silence looks like it's broken."
+   */
+  private async ensureFillerAudio(): Promise<SynthesisResult | null> {
+    if (!this.speechSynthesizer) return null;
+    if (this.fillerAudio) return this.fillerAudio;
+    try {
+      this.fillerAudio = await this.speechSynthesizer.synthesize("Mm-hm, one moment.");
+    } catch (error) {
+      console.log(
+        `   ⚠️  Filler-audio synthesis failed (non-fatal, continuing without it): ${error instanceof Error ? error.message : error}`
+      );
+    }
+    return this.fillerAudio;
+  }
+
+  /**
    * Handle user speech recognition
    */
   private async handleUserSpeech(result: RecognitionResult) {
     console.log(`\n👤 User said: "${result.text}"`);
     this.emit("user-speech-recognized", result);
+
+    // Real "thinking" acknowledgment (2026-08-31) - see fillerAudio's own
+    // comment above for the full story. Played and awaited BEFORE the
+    // slow respondToText() call below, not overlapping it - this stays
+    // within the existing sequential LISTEN -> THINK -> SPEAK -> WAIT
+    // design (true full-duplex is still deliberately unbuilt, per the
+    // master doc); it just adds one more real, short SPEAK step ahead of
+    // the slow one instead of dead air. Best-effort: a filler synthesis/
+    // playback failure is logged but never blocks the real response.
+    const filler = await this.ensureFillerAudio();
+    if (filler) {
+      this.isSpeaking = true;
+      try {
+        await playWavBuffer(filler.audio);
+      } catch (err) {
+        console.log(`   ⚠️  Filler playback failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+      } finally {
+        this.isSpeaking = false;
+      }
+    }
 
     const { response, audio } = await this.respondToText(result.text);
 

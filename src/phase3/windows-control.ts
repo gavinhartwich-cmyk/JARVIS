@@ -144,7 +144,42 @@ Add-Type -AssemblyName System.Windows.Forms
   }
 
   async openApplication(name: string): Promise<void> {
-    await runPowerShell(`Start-Process "${psEscape(name)}"`);
+    // BUG FIX (2026-08-31, confirmed live): plain `Start-Process "<name>"`
+    // only works when <name> is directly on PATH (system tools like
+    // notepad.exe, calc.exe) or an exact file/executable path - it fails
+    // outright for a normally-installed Start Menu app under a different
+    // real executable name or location. Confirmed live: Gavin has
+    // Spotify genuinely installed and it's in his Start Menu, but
+    // `Start-Process "Spotify"` failed with "The system cannot find the
+    // file specified" - Spotify's actual executable isn't named or
+    // located anything a bare guess would find. Real fix: search the
+    // actual Windows Start Menu app index (Get-StartApps - the same
+    // index Windows Search itself uses, covers both traditional desktop
+    // shortcuts and Microsoft Store/UWP apps, which often have no
+    // PATH-visible executable at all) for a fuzzy name match, and launch
+    // it through the shell:AppsFolder namespace via its real AppID - the
+    // same mechanism the real Start Menu/Windows Search uses to launch
+    // an app, not a guess at a bare name. Falls back to the old plain
+    // Start-Process behavior only when nothing in the Start Menu
+    // matches, which still correctly covers bare system tool names
+    // (notepad, calc, cmd) that may not surface as a friendly Start Menu
+    // tile. Real, disclosed limitation this does NOT fix: it can only
+    // launch what was actually asked for - a name garbled by speech
+    // recognition upstream (e.g. "no pad" instead of "notepad") won't
+    // fuzzy-match anything real either, and correctly falls through to
+    // the same "couldn't find it" failure, now for the right reason.
+    // Not yet run live - can't launch real Windows apps or query a real
+    // Start Menu from this sandbox.
+    const escapedName = psEscape(name);
+    await runPowerShell(`
+$name = "${escapedName}"
+$app = Get-StartApps | Where-Object { $_.Name -like "*$name*" } | Select-Object -First 1
+if ($app) {
+  Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\$($app.AppID)"
+} else {
+  Start-Process "$name"
+}
+`);
   }
 
   async closeApplication(name: string): Promise<void> {

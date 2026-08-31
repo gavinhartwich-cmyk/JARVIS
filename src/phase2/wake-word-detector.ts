@@ -132,6 +132,22 @@ export class WakeWordDetector {
   private scoresReceivedCount: number = 0;
   private scoreWaiters: Array<{ count: number; resolve: () => void }> = [];
   private rollingAudio: Buffer = Buffer.alloc(0);
+  // Real bug found 2026-08-31 on Gavin's live run: streaming real
+  // 80ms-chunk scores (instead of one max-of-buffer score per ~1s batch,
+  // the old design) means a single spoken "jarvis" naturally spans
+  // several consecutive chunks, several of which can independently score
+  // above threshold - the log showed TWO (sometimes three) separate
+  // "Wake word detected" events fire back-to-back for what was clearly
+  // one utterance, each one re-running handleWakeWord() (double-starting
+  // speech recognition, resetting turn timers mid-stream) and very
+  // likely the direct cause of the "timed out waiting for the daemon to
+  // score N chunks" error later in that same log (the isActive handoff
+  // happening twice in quick succession left the sample/score accounting
+  // in an inconsistent state). Fixed with a one-shot latch: once a
+  // detection fires, further scores are still logged (real diagnostic
+  // value unchanged) but never re-emitted until startListening() is
+  // called again for the next turn.
+  private triggered: boolean = false;
 
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
@@ -196,6 +212,7 @@ export class WakeWordDetector {
     console.log(`   Sensitivity: ${(this.sensitivity * 100).toFixed(0)}%`);
 
     this.isListening = true;
+    this.triggered = false; // reset the one-shot latch for this new listening session - see its own comment above
     this.emit("listening-started");
 
     // Spawns (or reuses, if already warm from a previous turn) the
@@ -237,6 +254,22 @@ export class WakeWordDetector {
 
     console.log("🛑 Stopping wake word detection");
     this.isListening = false;
+
+    // Real bug found 2026-08-31: the idle-to-active handoff can leave a
+    // processAudioChunk() call still awaiting a few final scores that
+    // will now never arrive (no more idle-phase audio is being sent to
+    // this daemon once a turn starts) - previously that just hung until
+    // waitForScoreCount()'s 5s safety timeout fired, mid-turn, as a
+    // confusing "❌ Wake word detection failed: timed out..." error that
+    // had nothing to do with an actual failure. Resolving any pending
+    // waiters immediately here is the honest fix: we're intentionally
+    // done listening, so there's nothing left to wait for.
+    if (this.scoreWaiters.length > 0) {
+      const waiters = this.scoreWaiters;
+      this.scoreWaiters = [];
+      waiters.forEach((waiter) => waiter.resolve());
+    }
+
     this.emit("listening-stopped");
   }
 
@@ -390,7 +423,12 @@ export class WakeWordDetector {
     // depending on cadence/position, so seeing the real number matters
     // more here than for a typical fixed threshold.
     console.log(`   🔍 wake-word score: ${score.toFixed(4)} (threshold: ${this.sensitivity})`);
-    if (score > this.sensitivity) {
+    // One-shot latch (see `triggered`'s own comment above) - a single
+    // spoken "jarvis" spans several consecutive 80ms chunks, several of
+    // which can independently score above threshold; only the first one
+    // per listening session actually fires.
+    if (score > this.sensitivity && !this.triggered) {
+      this.triggered = true;
       this.emitWakeWordDetected(score);
     }
   }
