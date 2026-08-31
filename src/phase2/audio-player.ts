@@ -9,9 +9,30 @@
  * windows-control.ts already does for input automation: shell out to a
  * PowerShell one-liner rather than pull in a native Node audio-output
  * dependency that would need compiling against Bun's ABI.
- * `Media.SoundPlayer` is a stock .NET Framework class (System.Windows.Forms
- * assembly not even required for it), present on every Windows install by
- * default - no new dependency to install.
+ *
+ * [UPDATE 2026-08-31] `Media.SoundPlayer` (the original approach - kept
+ * below as the last-resort fallback) is a stock, dependency-free .NET
+ * class, but it plays through Windows' legacy MME/waveOut audio path,
+ * which has a known real quirk: it can target a different "default
+ * device" than the one the rest of Windows (and every other app) treats
+ * as default, especially on a machine with more than one playback
+ * device. Confirmed live with Gavin: `PlaySync()` on a real Windows
+ * system sound (notify.wav) via a plain manual PowerShell command -
+ * completely outside JARVIS's own code - produced NO audible sound at
+ * all, while his speakers work fine for everything else. That isolates
+ * the problem to this exact API, not JARVIS's code, not his hardware,
+ * and not general Windows muting. Primary path is now the Windows Media
+ * Player ActiveX/COM object (`WMPlayer.OCX`) instead - it uses the
+ * modern media pipeline and follows the actual current default output
+ * device, the same one every normal app uses. It ships with Windows
+ * Media Player, present on effectively every standard Windows 10/11
+ * install (not a new download) - but on the off chance it's missing
+ * (e.g. an N/KN edition without the media feature pack), this falls
+ * back to the original SoundPlayer path rather than throwing. Not yet
+ * confirmed live - needs Gavin's real hardware to know if this actually
+ * fixes the silence or if the true cause is upstream of the audio API
+ * entirely (e.g. this process's audio session being isolated some other
+ * way).
  */
 
 import { writeFileSync, unlinkSync } from "node:fs";
@@ -38,7 +59,35 @@ export async function playWavBuffer(audio: Buffer, timeoutMs = 30_000): Promise<
   writeFileSync(path, audio);
   try {
     await runPowerShell(
-      `(New-Object Media.SoundPlayer "${psEscape(path)}").PlaySync()`,
+      `
+$path = "${psEscape(path)}"
+$wmp = $null
+try {
+  $wmp = New-Object -ComObject WMPlayer.OCX.7
+} catch {
+  try { $wmp = New-Object -ComObject WMPlayer.OCX } catch { $wmp = $null }
+}
+if ($wmp) {
+  # WMPPlayState values that mean "still doing something before/while
+  # playing": 10=Ready, 6=Buffering, 9=Transitioning, 7=Waiting,
+  # 3=Playing. Looping while any of these hold blocks until real
+  # playback actually finishes (state moves to 8=MediaEnded or
+  # 1=Stopped), the same "wait for it to really be done" contract
+  # SoundPlayer's PlaySync() gave us.
+  $wmp.settings.autoStart = $false
+  $wmp.URL = $path
+  $wmp.controls.play()
+  Start-Sleep -Milliseconds 150
+  $activeStates = 3,6,7,9,10
+  while ($activeStates -contains $wmp.playState) {
+    Start-Sleep -Milliseconds 100
+  }
+  $wmp.controls.stop()
+  $wmp.close()
+} else {
+  (New-Object Media.SoundPlayer $path).PlaySync()
+}
+`,
       timeoutMs
     );
   } finally {
