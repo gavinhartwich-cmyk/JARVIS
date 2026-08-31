@@ -46,6 +46,11 @@ export interface ISpeechSynthesizer {
     speakingRate: number;
     outputFormat: string;
   };
+  // Optional: only implementations backed by a real persistent process
+  // (chatterbox-synthesizer.ts's daemon) need real teardown. Piper spawns
+  // a fresh subprocess per call and Fish Audio is plain HTTP, so neither
+  // implements this - added 2026-08-31 alongside Chatterbox.
+  shutdown?(): void;
 }
 
 function resolvePiperPaths(config: SynthesizerConfig) {

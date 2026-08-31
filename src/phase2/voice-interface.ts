@@ -323,6 +323,11 @@ export class VoiceInterface {
       this.wakeWordDetector.shutdown();
     }
 
+    // Same real-process-teardown reasoning as above, for Chatterbox's
+    // persistent synthesis daemon (added 2026-08-31) - a no-op for
+    // Piper/Fish Audio, which don't implement shutdown() at all.
+    this.speechSynthesizer?.shutdown?.();
+
     if (this.speechRecognizer) {
       try {
         await this.speechRecognizer.stopStreaming();

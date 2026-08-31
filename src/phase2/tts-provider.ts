@@ -1,19 +1,18 @@
 /**
  * Phase 2: TTS Provider Selection
  *
- * Picks Fish Audio (Gavin's own custom "jarvis" voice) as the primary
- * speech synthesizer when configured, wrapped so it automatically falls
- * back to the local Piper synthesizer if Fish Audio errors - missing/bad
- * API key, network down, the API itself returning 401/402/503, etc. Same
- * $0-first / provider-agnostic resilience pattern this codebase already
- * applies to LLM providers (see model-provider.ts's fallback chain),
- * applied here so a Fish Audio hiccup makes JARVIS fall back to a local
- * voice instead of going completely silent. Added 2026-08-31.
- *
- * Real limitation, disclosed: this has not yet been run against a real
- * Fish Audio account/key end-to-end (that needs Gavin's real hardware) -
- * the fallback path is what protects a real run from a bad first attempt
- * (wrong reference_id, key typo, etc.) rather than losing the turn.
+ * Picks whichever real TTS backend textToSpeech.provider asks for -
+ * "fish-audio" (Gavin's paid Fish Audio voice) or "chatterbox" (local,
+ * $0, voice cloning via Resemble AI's Chatterbox) - wrapped so it
+ * automatically falls back to the local Piper synthesizer if the primary
+ * one errors: missing/bad key, network down, a real API error (Fish
+ * Audio's 401/402/503), a missing Chatterbox venv/reference clip, etc.
+ * Same $0-first / provider-agnostic resilience pattern this codebase
+ * already applies to LLM providers (see model-provider.ts's fallback
+ * chain), applied here so a primary-provider hiccup makes JARVIS fall
+ * back to a local voice instead of going completely silent. Added
+ * 2026-08-31 (Fish Audio), extended same day (Chatterbox) after Fish
+ * Audio hit a real, confirmed 402 Payment Required live.
  */
 
 import {
@@ -22,6 +21,7 @@ import {
   type SynthesisResult,
 } from "./speech-synthesizer";
 import { FishAudioSynthesizer } from "./fish-audio-synthesizer";
+import { ChatterboxSynthesizer } from "./chatterbox-synthesizer";
 import type { VoiceConfig } from "./voice-config";
 
 class FallbackSpeechSynthesizer implements ISpeechSynthesizer {
@@ -55,12 +55,24 @@ class FallbackSpeechSynthesizer implements ISpeechSynthesizer {
     this.primary.setSpeakingRate(rate);
     this.fallback.setSpeakingRate(rate);
   }
+
+  shutdown() {
+    this.primary.shutdown?.();
+    this.fallback.shutdown?.();
+  }
 }
 
 /**
- * Build whichever ISpeechSynthesizer the config asks for. Piper alone if
- * textToSpeech.provider isn't "fish-audio" (or fishAudio.referenceId is
- * missing); otherwise Fish Audio wrapped with an automatic Piper fallback.
+ * Build whichever ISpeechSynthesizer the config asks for:
+ * - "chatterbox" with a real referenceClipPath configured (or
+ *   CHATTERBOX_VOICE_CLIP_PATH set) -> Chatterbox wrapped with a Piper
+ *   fallback.
+ * - "fish-audio" with a real fishAudio.referenceId configured -> Fish
+ *   Audio wrapped with a Piper fallback.
+ * - anything else (including "chatterbox"/"fish-audio" configured but
+ *   missing the piece they need) -> plain Piper, with a console warning
+ *   in the misconfigured case so it's obvious why the "primary" voice
+ *   never actually engages.
  */
 export function createSpeechSynthesizer(config: VoiceConfig): ISpeechSynthesizer {
   const tts = config.textToSpeech;
@@ -72,16 +84,33 @@ export function createSpeechSynthesizer(config: VoiceConfig): ISpeechSynthesizer
     sampleRate: config.audio.sampleRate,
   });
 
-  if (tts.provider !== "fish-audio" || !tts.fishAudio?.referenceId) {
+  if (tts.provider === "chatterbox") {
+    const referenceClipPath = tts.chatterbox?.referenceClipPath || process.env.CHATTERBOX_VOICE_CLIP_PATH;
+    if (referenceClipPath) {
+      const chatterbox = new ChatterboxSynthesizer({
+        referenceClipPath,
+        speakingRate: tts.speakingRate,
+        outputFormat: "wav",
+        device: tts.chatterbox?.device,
+      });
+      return new FallbackSpeechSynthesizer(chatterbox, piper, "Chatterbox");
+    }
+    console.error(
+      '⚠️  textToSpeech.provider is "chatterbox" but no reference clip is configured ' +
+        "(set textToSpeech.chatterbox.referenceClipPath or the CHATTERBOX_VOICE_CLIP_PATH env var) - using Piper only."
+    );
     return piper;
   }
 
-  const fishAudio = new FishAudioSynthesizer({
-    referenceId: tts.fishAudio.referenceId,
-    speakingRate: tts.speakingRate,
-    outputFormat: tts.outputFormat === "mp3" ? "mp3" : "wav",
-    model: tts.fishAudio.model,
-  });
+  if (tts.provider === "fish-audio" && tts.fishAudio?.referenceId) {
+    const fishAudio = new FishAudioSynthesizer({
+      referenceId: tts.fishAudio.referenceId,
+      speakingRate: tts.speakingRate,
+      outputFormat: tts.outputFormat === "mp3" ? "mp3" : "wav",
+      model: tts.fishAudio.model,
+    });
+    return new FallbackSpeechSynthesizer(fishAudio, piper, "Fish Audio");
+  }
 
-  return new FallbackSpeechSynthesizer(fishAudio, piper, "Fish Audio");
+  return piper;
 }

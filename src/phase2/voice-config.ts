@@ -35,7 +35,7 @@ export interface VoiceConfig {
     // = Gavin's real Fish Audio voice via fishAudio below, wrapped with an
     // automatic fallback to Piper if the Fish Audio call fails for any
     // reason (missing/bad key, network down, API outage).
-    provider?: "piper" | "fish-audio";
+    provider?: "piper" | "fish-audio" | "chatterbox";
     fishAudio?: {
       // Fish Audio voice model id - a specific voice on Gavin's own Fish
       // Audio account, not a stock/public voice name. Given directly by
@@ -44,6 +44,18 @@ export interface VoiceConfig {
       // Fish Audio model tier (s1 / s2-pro / s2.1-pro / s2.1-pro-free).
       // Left unset by default so Fish Audio's own default applies.
       model?: "s1" | "s2-pro" | "s2.1-pro" | "s2.1-pro-free";
+    };
+    // Local, $0 voice cloning via Resemble AI's open-source Chatterbox
+    // model (see src/phase2/chatterbox-synthesizer.ts) - added 2026-08-31
+    // after Fish Audio hit a real 402 Payment Required. Requires
+    // scripts/setup-chatterbox.ps1 run once AND a real reference clip.
+    chatterbox?: {
+      // Path to a real ~10s reference audio clip of the voice to clone
+      // (clean single speaker, minimal background noise). Empty until
+      // Gavin has one - see tts-provider.ts, which falls back to Piper
+      // rather than trying to launch Chatterbox with no clip.
+      referenceClipPath: string;
+      device?: "cuda" | "cpu" | "mps"; // default "cuda" - Gavin confirmed he has an NVIDIA GPU, 2026-08-31
     };
   };
 
@@ -158,17 +170,32 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     outputFormat: "wav",
     // [UPDATE 2026-08-31] Per Gavin: "when the voice speaks i want to
     // connect it to fish audio i have a jarvis voice thats perfect for
-    // it." Primary TTS is now his real Fish Audio "jarvis" voice
-    // (reference_id below, given directly by Gavin), with automatic
-    // fallback to the Piper voice above if Fish Audio errors - see
-    // src/phase2/tts-provider.ts. Requires a real FISH_AUDIO_API_KEY in
-    // .env (Gavin's own choice to add it there himself, not asked for in
-    // chat) - disclosed limitation: not yet run end-to-end against his
-    // real Fish Audio account from here, only the fallback path is
-    // locally verified (typecheck + code review, not a live call).
-    provider: "fish-audio",
+    // it." Wired up Fish Audio as primary (reference_id below, given
+    // directly by Gavin) with automatic fallback to the Piper voice
+    // above - see src/phase2/tts-provider.ts. Confirmed LIVE (not
+    // hypothetical): every real call returned "402 Payment Required -
+    // Insufficient API credit" - the account needs funding Fish Audio
+    // isn't free per-call the way Piper/Chatterbox are.
+    //
+    // [UPDATE 2026-08-31, second pass] Per Gavin, moving to Chatterbox
+    // (local, $0, voice cloning - see src/phase2/chatterbox-synthesizer.ts)
+    // instead of funding Fish Audio, to stay $0-first. He confirmed an
+    // NVIDIA GPU but hadn't picked/recorded a reference clip yet, so
+    // provider is temporarily back to plain "piper" - there's no reason
+    // to keep dialing a provider that's confirmed to 402 on every call
+    // (extra failed network round-trip + log noise for no benefit, the
+    // fallback always lands on Piper anyway). fishAudio config is left
+    // in place, not deleted, in case Gavin ever funds that account
+    // instead. Once Gavin has a real reference clip: set provider to
+    // "chatterbox", fill in chatterbox.referenceClipPath (or the
+    // CHATTERBOX_VOICE_CLIP_PATH env var), and run
+    // scripts/setup-chatterbox.ps1 first if that venv doesn't exist yet.
+    provider: "piper",
     fishAudio: {
       referenceId: "049975dde0a14889ad219f24a95e3a4f",
+    },
+    chatterbox: {
+      referenceClipPath: "",
     },
   },
   audio: {
