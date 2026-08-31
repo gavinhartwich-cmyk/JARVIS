@@ -168,14 +168,33 @@ Add-Type -AssemblyName System.Windows.Forms
     // recognition upstream (e.g. "no pad" instead of "notepad") won't
     // fuzzy-match anything real either, and correctly falls through to
     // the same "couldn't find it" failure, now for the right reason.
-    // Not yet run live - can't launch real Windows apps or query a real
-    // Start Menu from this sandbox.
+    //
+    // [UPDATE 2026-08-31, second confirmation] Ran live and STILL opened
+    // plain File Explorer for both "Spotify" and "Notepad" instead of the
+    // real app - root-caused to a genuine escaping bug in THIS file, not
+    // Windows or Get-StartApps: the PowerShell was built from a TS
+    // template literal containing `\$($app.AppID)`, but `\$` inside a
+    // JS/TS template literal is itself a recognized escape sequence that
+    // collapses to a literal `$` - it silently swallowed the backslash
+    // before the string ever reached PowerShell. The PowerShell that
+    // actually ran was `shell:AppsFolder$($app.AppID)` (missing the
+    // separator between "AppsFolder" and the AppID), which explorer.exe
+    // can't resolve to any real app - and its documented behavior on an
+    // unresolvable shell: URI is to just open a plain File Explorer
+    // window instead of erroring, which is exactly what Gavin saw, with
+    // Start-Process itself still reporting success (it launched
+    // explorer.exe fine - explorer.exe just didn't do what the URI
+    // asked). Verified the exact string this file was producing via a
+    // real Node template-literal test before touching this, and verified
+    // the fix's output separately - `\\$(...)` (an escaped backslash,
+    // producing a real literal `\` in the emitted PowerShell) is what
+    // survives into the actual script now.
     const escapedName = psEscape(name);
     await runPowerShell(`
 $name = "${escapedName}"
 $app = Get-StartApps | Where-Object { $_.Name -like "*$name*" } | Select-Object -First 1
 if ($app) {
-  Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\$($app.AppID)"
+  Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\\$($app.AppID)"
 } else {
   Start-Process "$name"
 }
