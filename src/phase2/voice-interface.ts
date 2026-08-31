@@ -8,7 +8,8 @@
 
 import { WakeWordDetector, WakeWordEvent } from "./wake-word-detector";
 import { SpeechRecognizer, RecognitionResult } from "./speech-recognizer";
-import { SpeechSynthesizer, SynthesisResult } from "./speech-synthesizer";
+import type { SynthesisResult, ISpeechSynthesizer } from "./speech-synthesizer";
+import { createSpeechSynthesizer } from "./tts-provider";
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
@@ -134,7 +135,7 @@ export class VoiceInterface {
   private config: VoiceConfig;
   private wakeWordDetector?: WakeWordDetector;
   private speechRecognizer?: SpeechRecognizer;
-  private speechSynthesizer?: SpeechSynthesizer;
+  private speechSynthesizer?: ISpeechSynthesizer;
   // Short "thinking" acknowledgment (2026-08-31), per Gavin: "it should
   // be responding while thinking so it seems faster instead of nothing"
   // - a real LLM call plus full TTS synthesis can take several real
@@ -275,13 +276,10 @@ export class VoiceInterface {
     }
 
     if (this.config.textToSpeech.enabled) {
-      this.speechSynthesizer = new SpeechSynthesizer({
-        voiceId: this.config.textToSpeech.voiceId,
-        speakingRate: this.config.textToSpeech.speakingRate,
-        outputFormat: this.config.textToSpeech.outputFormat,
-        modelPath: this.config.textToSpeech.modelPath,
-        sampleRate: this.config.audio.sampleRate,
-      });
+      // [UPDATE 2026-08-31] Provider selection (Piper vs. Fish Audio,
+      // with automatic Piper fallback) now lives in tts-provider.ts -
+      // see createSpeechSynthesizer for the real logic.
+      this.speechSynthesizer = createSpeechSynthesizer(this.config);
     }
   }
 

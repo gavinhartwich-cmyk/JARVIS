@@ -22,13 +22,29 @@ export interface VoiceConfig {
     responseFormat: "text" | "json" | "verbose_json";
   };
 
-  // Text-to-speech (Piper)
+  // Text-to-speech (Piper locally, or Fish Audio - see provider below)
   textToSpeech: {
     enabled: boolean;
-    voiceId: string; // Voice to use
+    voiceId: string; // Piper voice to use (and the fallback voice if provider is "fish-audio")
     speakingRate: number; // 1.0 = normal, <1 slower, >1 faster
     outputFormat: "wav" | "mp3"; // Audio format
     modelPath?: string; // Path to Piper model
+    // Which TTS backend actually speaks. Added 2026-08-31 alongside the
+    // Fish Audio integration - see src/phase2/tts-provider.ts. Undefined/
+    // "piper" = local Piper only (original behavior, unchanged). "fish-audio"
+    // = Gavin's real Fish Audio voice via fishAudio below, wrapped with an
+    // automatic fallback to Piper if the Fish Audio call fails for any
+    // reason (missing/bad key, network down, API outage).
+    provider?: "piper" | "fish-audio";
+    fishAudio?: {
+      // Fish Audio voice model id - a specific voice on Gavin's own Fish
+      // Audio account, not a stock/public voice name. Given directly by
+      // Gavin 2026-08-31.
+      referenceId: string;
+      // Fish Audio model tier (s1 / s2-pro / s2.1-pro / s2.1-pro-free).
+      // Left unset by default so Fish Audio's own default applies.
+      model?: "s1" | "s2-pro" | "s2.1-pro" | "s2.1-pro-free";
+    };
   };
 
   // Audio processing
@@ -134,10 +150,26 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     // model, defaulting to the one actually downloaded and tested. To use
     // a different Piper voice, download its .onnx/.onnx.json into
     // models/piper/ (see https://huggingface.co/rhasspy/piper-voices) and
-    // set voiceId to match the filename.
+    // set voiceId to match the filename. This voiceId/Piper path is now
+    // the automatic FALLBACK voice (see provider below), not the primary
+    // one, so it's kept real and working rather than removed.
     voiceId: "en_US-amy-medium",
     speakingRate: 1.0,
     outputFormat: "wav",
+    // [UPDATE 2026-08-31] Per Gavin: "when the voice speaks i want to
+    // connect it to fish audio i have a jarvis voice thats perfect for
+    // it." Primary TTS is now his real Fish Audio "jarvis" voice
+    // (reference_id below, given directly by Gavin), with automatic
+    // fallback to the Piper voice above if Fish Audio errors - see
+    // src/phase2/tts-provider.ts. Requires a real FISH_AUDIO_API_KEY in
+    // .env (Gavin's own choice to add it there himself, not asked for in
+    // chat) - disclosed limitation: not yet run end-to-end against his
+    // real Fish Audio account from here, only the fallback path is
+    // locally verified (typecheck + code review, not a live call).
+    provider: "fish-audio",
+    fishAudio: {
+      referenceId: "049975dde0a14889ad219f24a95e3a4f",
+    },
   },
   audio: {
     sampleRate: 16000,

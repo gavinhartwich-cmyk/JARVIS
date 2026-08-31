@@ -30,6 +30,24 @@ export interface SynthesizerConfig {
   espeakDataPath?: string; // Path to piper's bundled espeak-ng-data dir
 }
 
+/**
+ * Shared shape both SpeechSynthesizer (Piper) and FishAudioSynthesizer
+ * implement, so voice-interface.ts and tts-provider.ts's fallback wrapper
+ * can treat either one interchangeably. Added 2026-08-31 alongside the
+ * Fish Audio integration - see tts-provider.ts.
+ */
+export interface ISpeechSynthesizer {
+  synthesize(text: string): Promise<SynthesisResult>;
+  setVoice(voiceId: string): void;
+  setSpeakingRate(rate: number): void;
+  getStatus(): {
+    isSynthesizing: boolean;
+    voiceId: string;
+    speakingRate: number;
+    outputFormat: string;
+  };
+}
+
 function resolvePiperPaths(config: SynthesizerConfig) {
   const binaryPath =
     config.piperBinaryPath ||
@@ -79,7 +97,7 @@ function wavDurationMs(wav: Buffer): number {
  * Uses Piper (local TTS) for text-to-speech conversion
  * Produces high-quality, natural-sounding speech
  */
-export class SpeechSynthesizer {
+export class SpeechSynthesizer implements ISpeechSynthesizer {
   private voiceId: string;
   private speakingRate: number;
   private outputFormat: string;
