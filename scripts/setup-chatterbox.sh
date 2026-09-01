@@ -25,6 +25,13 @@ tools/chatterbox/venv/bin/pip install torch==2.6.0 torchaudio==2.6.0 --index-url
 echo "== Installing chatterbox-tts =="
 tools/chatterbox/venv/bin/pip install chatterbox-tts
 
+# [ADDED 2026-09-01] See scripts/patch-chatterbox-numpy2-bug.py and
+# https://github.com/resemble-ai/chatterbox/issues/499 - chatterbox-tts
+# 0.1.7 crashes every synthesis under numpy>=2.0. Idempotent, safe to
+# re-run.
+echo "== Patching chatterbox-tts numpy>=2.0 float64 bug (resemble-ai/chatterbox#499) =="
+tools/chatterbox/venv/bin/python scripts/patch-chatterbox-numpy2-bug.py
+
 echo "== Verifying GPU is actually visible to PyTorch =="
 tools/chatterbox/venv/bin/python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
 

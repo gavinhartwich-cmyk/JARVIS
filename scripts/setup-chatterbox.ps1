@@ -37,6 +37,17 @@ Write-Host "== Installing CUDA-accelerated PyTorch 2.6.0 (cu124) =="
 Write-Host "== Installing chatterbox-tts =="
 & tools\chatterbox\venv\Scripts\pip.exe install chatterbox-tts
 
+# [ADDED 2026-09-01] Real bug hit live on Gavin's machine: chatterbox-tts
+# 0.1.7 crashes every synthesis with "RuntimeError: expected scalar type
+# Double but found Float" under numpy>=2.0 (which pip installs by
+# default) - see scripts\patch-chatterbox-numpy2-bug.py's own docstring
+# and https://github.com/resemble-ai/chatterbox/issues/499 for the full
+# root cause. Not fixed upstream yet, so this setup script patches the
+# installed package directly, every time - the patch script is
+# idempotent (checks first, no-ops if already patched or fixed upstream).
+Write-Host "== Patching chatterbox-tts numpy>=2.0 float64 bug (resemble-ai/chatterbox#499) =="
+& tools\chatterbox\venv\Scripts\python.exe scripts\patch-chatterbox-numpy2-bug.py
+
 Write-Host "== Verifying your GPU is actually visible to PyTorch =="
 & tools\chatterbox\venv\Scripts\python.exe -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only - check the --index-url note at the top of this script')"
 
