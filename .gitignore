@@ -18,6 +18,12 @@ tools/piper/
 tools/whisper/
 models/piper/
 models/whisper/
+tools/chatterbox/
+
+# [ADDED 2026-09-01] Chatterbox voice-clone reference clip - Gavin's own
+# real recorded voice sample. Personal audio data, not source code; never
+# belongs in git history.
+assets/voice/
 
 # Python bytecode cache (scripts/ has real .py files: mic_capture.py,
 # wakeword_detect.py, whisper_transcribe.py)
