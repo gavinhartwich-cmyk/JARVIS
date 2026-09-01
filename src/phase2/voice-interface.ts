@@ -206,6 +206,19 @@ export class VoiceInterface {
     // reply degrades to the local model instead of dying on a 429 too.
     this.modelProvider = modelProvider || new GatewayModelProvider(createDefaultGateway());
     this.orchestrator = orchestrator;
+
+    // [ADDED 2026-09-01] Wire the Orchestrator's real-action hooks (see
+    // orchestrator.ts) to our own "acting"/"acting-done" events, so
+    // cli.ts can drive a distinct HUD animation while JARVIS is actually
+    // executing a task (opening an app, etc.) instead of showing the same
+    // "thinking" animation for both LLM latency and real OS actions -
+    // per Gavin: "we also need an animation for when JARVIS is doing the
+    // task that's asked of him."
+    if (this.orchestrator) {
+      this.orchestrator.onActionStart = () => this.emit("acting");
+      this.orchestrator.onActionEnd = () => this.emit("acting-done");
+    }
+
     this.context = {
       conversationId: `conversation-${Date.now()}`,
       messageHistory: [],
@@ -225,6 +238,8 @@ export class VoiceInterface {
     this.listeners.set("wake-word-detected", []);
     this.listeners.set("user-speech-recognized", []);
     this.listeners.set("jarvis-responding", []);
+    this.listeners.set("acting", []);
+    this.listeners.set("acting-done", []);
     this.listeners.set("audio-ready", []);
     this.listeners.set("interaction-complete", []);
     this.listeners.set("error", []);

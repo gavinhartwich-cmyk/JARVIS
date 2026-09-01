@@ -48,6 +48,17 @@ export class Orchestrator {
   private agents: Map<string, Agent> = new Map();
   private decomposer = new TaskDecomposer();
 
+  // [ADDED 2026-09-01] Real-action activity hooks, purely for the HUD.
+  // processConversation() below runs a genuinely slow real-world step -
+  // executeAppControlIntent() shells out to Windows (opening/closing an
+  // app, and eventually real mouse/keyboard control) - that can take
+  // seconds, distinct from ordinary "the LLM is generating a reply"
+  // latency. Orchestrator has no idea a HUD exists (correctly - it stays
+  // a plain library class), so it just calls these optional callbacks if
+  // a caller (voice-interface.ts) sets them. No-ops by default.
+  onActionStart?: () => void;
+  onActionEnd?: () => void;
+
   // Conversational intelligence integration
   private conversationEngine: ConversationEngine;
   private conversationalIntelligence: ConversationalIntelligence;
@@ -406,7 +417,12 @@ export class Orchestrator {
     let actionOutcome: ActionOutcome | undefined;
     if (appControlIntent) {
       console.log(`\n🎯 App-control intent detected: ${appControlIntent.action} "${appControlIntent.appName}"`);
-      actionOutcome = await this.executeAppControlIntent(appControlIntent);
+      this.onActionStart?.();
+      try {
+        actionOutcome = await this.executeAppControlIntent(appControlIntent);
+      } finally {
+        this.onActionEnd?.();
+      }
     }
 
     // Use conversational intelligence to process utterance, with the real

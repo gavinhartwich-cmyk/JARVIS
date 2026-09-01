@@ -16,7 +16,12 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type HudState = "idle" | "listening" | "thinking" | "speaking";
+// [UPDATED 2026-09-01] Added "acting" - a distinct visual state for when
+// JARVIS is actually executing a real-world action (opening an app, etc.),
+// separate from "thinking" (LLM latency). See orchestrator.ts's
+// onActionStart/onActionEnd and voice-interface.ts's "acting"/"acting-done"
+// events for how this gets set.
+export type HudState = "idle" | "listening" | "thinking" | "acting" | "speaking";
 
 export class HudServer {
   private server: ReturnType<typeof Bun.serve> | null = null;

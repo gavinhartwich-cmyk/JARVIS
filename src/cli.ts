@@ -382,6 +382,13 @@ async function main() {
       voice.on("listening", () => hud.setState("idle"));
       voice.on("wake-word-detected", () => hud.setState("listening"));
       voice.on("user-speech-recognized", () => hud.setState("thinking"));
+      // [ADDED 2026-09-01] "acting" - see orchestrator.ts's onActionStart/
+      // onActionEnd and voice-interface.ts's "acting"/"acting-done"
+      // events. Falls back to "thinking" when the action finishes since
+      // the final spoken reply (audio-ready -> "speaking") hasn't
+      // synthesized yet at that point.
+      voice.on("acting", () => hud.setState("acting"));
+      voice.on("acting-done", () => hud.setState("thinking"));
       voice.on("audio-ready", () => hud.setState("speaking"));
       voice.on("interaction-complete", () => hud.setState("idle"));
       // 2026-08-31, per Gavin: "the jarvis window doesn't close once
