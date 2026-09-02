@@ -28,7 +28,8 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
 
 interface GmailAccount {
-  label: string;
+  /** null = not known yet, discover the real address via users.getProfile (see fetchUnread). */
+  label: string | null;
   refreshToken: string;
 }
 
@@ -50,9 +51,14 @@ function businessAccounts(): GmailAccount[] {
 
 function personalAccount(): GmailAccount | null {
   const refreshToken = process.env.GMAIL_PERSONAL_REFRESH_TOKEN;
-  const fromAddress = process.env.GMAIL_PERSONAL_FROM_ADDRESS;
-  if (!refreshToken || !fromAddress) return null;
-  return { label: `personal:${fromAddress}`, refreshToken };
+  if (!refreshToken) return null;
+  // [2026-09-02] No GMAIL_PERSONAL_FROM_ADDRESS required - rather than
+  // ask Gavin to hand-type his own email address (error-prone, and
+  // pointless when the API can just confirm it directly), label is left
+  // null here and discovered for real via Gmail's own users.getProfile
+  // in fetchUnread() below - also doubles as a real confirmation the
+  // token actually works, not just that it was accepted for a refresh.
+  return { label: null, refreshToken };
 }
 
 async function getFreshAccessToken(refreshToken: string): Promise<string> {
@@ -94,8 +100,25 @@ function headerValue(msg: GmailMessageMeta, name: string): string {
   return msg.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
-async function fetchUnread(account: GmailAccount): Promise<{ count: number; subjects: string[] }> {
+async function fetchUnread(account: GmailAccount): Promise<{ label: string; count: number; subjects: string[] }> {
   const accessToken = await getFreshAccessToken(account.refreshToken);
+
+  // Real address discovery (2026-09-02) for accounts whose label wasn't
+  // already known statically (personalAccount()) - a real API call, not
+  // a guess, and it doubles as confirmation the token genuinely works
+  // before trusting it for the actual unread check below.
+  let label = account.label;
+  if (!label) {
+    const profileRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!profileRes.ok) {
+      const body = await profileRes.text().catch(() => "");
+      throw new Error(`Gmail users.getProfile failed (${profileRes.status}): ${body || profileRes.statusText}`);
+    }
+    const profile = (await profileRes.json()) as { emailAddress?: string };
+    label = `personal:${profile.emailAddress ?? "(unknown address)"}`;
+  }
 
   const listUrl = new URL(MESSAGES_URL);
   listUrl.searchParams.set("q", "is:unread in:inbox");
@@ -104,7 +127,7 @@ async function fetchUnread(account: GmailAccount): Promise<{ count: number; subj
   const listRes = await fetch(listUrl.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!listRes.ok) {
     const body = await listRes.text().catch(() => "");
-    throw new Error(`Gmail messages.list failed for ${account.label} (${listRes.status}): ${body || listRes.statusText}`);
+    throw new Error(`Gmail messages.list failed for ${label} (${listRes.status}): ${body || listRes.statusText}`);
   }
   const listData = (await listRes.json()) as { messages?: Array<{ id: string }>; resultSizeEstimate?: number };
   const ids = listData.messages ?? [];
@@ -121,7 +144,7 @@ async function fetchUnread(account: GmailAccount): Promise<{ count: number; subj
     }
   }
 
-  return { count: listData.resultSizeEstimate ?? ids.length, subjects };
+  return { label, count: listData.resultSizeEstimate ?? ids.length, subjects };
 }
 
 export async function checkUnreadEmail(): Promise<MonitoredEvent[]> {
@@ -132,24 +155,24 @@ export async function checkUnreadEmail(): Promise<MonitoredEvent[]> {
 
   for (const account of accounts) {
     try {
-      const { count, subjects } = await fetchUnread(account);
+      const { label, count, subjects } = await fetchUnread(account);
       if (count === 0) continue;
 
       events.push({
         source: "email",
-        summary: `${count} unread email${count === 1 ? "" : "s"} in ${account.label}${subjects.length > 0 ? ` — most recent: "${subjects[0]}"` : ""}.`,
+        summary: `${count} unread email${count === 1 ? "" : "s"} in ${label}${subjects.length > 0 ? ` — most recent: "${subjects[0]}"` : ""}.`,
         // Count baked into the dedupeKey deliberately: a still-unchanged
         // unread count doesn't re-notify (real dedup), but a NEW unread
         // message bumping the total is a genuinely new condition and
         // should notify again, not be silently suppressed by the old
         // count's dedup record.
-        dedupeKey: `email:${account.label}:${count}`,
+        dedupeKey: `email:${label}:${count}`,
         relevance: 50,
         urgency: 25,
-        metadata: { account: account.label, unreadCount: count, subjects },
+        metadata: { account: label, unreadCount: count, subjects },
       });
     } catch (err) {
-      console.error(`   ⚠️  Email monitor failed for ${account.label} (non-fatal, skipping): ${err instanceof Error ? err.message : err}`);
+      console.error(`   ⚠️  Email monitor failed (non-fatal, skipping): ${err instanceof Error ? err.message : err}`);
     }
   }
   return events;
