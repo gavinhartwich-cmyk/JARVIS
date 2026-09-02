@@ -36,6 +36,11 @@ __pycache__/
 native-hud/bin/
 native-hud/obj/
 
+# [ADDED 2026-09-02] Real cached Spotify OAuth token (scripts/spotify_control.py)
+# - a real credential, not source code, gitignored the same way every other
+# real secret in this project is (.env, assets/voice/, etc.)
+scripts/.spotify-cache
+
 # [ADDED 2026-09-02] Real runtime state from start-jarvis.ps1/stop-jarvis.ps1
 # (background/auto-run mode) - a live PID file and a graceful-shutdown flag
 # file cli.ts's `listen` command polls for (see its own comment). Neither

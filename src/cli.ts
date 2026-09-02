@@ -20,6 +20,7 @@ import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
 import { VideoAnalyzer } from "./phase3/video-analyzer";
 import { CameraCapture, listCameraDevices } from "./phase3/camera-capture";
+import { spotifyAuth, spotifyPlay } from "./core/spotify";
 import { proactivityEngine } from "./core/proactivity";
 import { runAllMonitors } from "./core/system-monitors";
 import { sendSms } from "./core/sms";
@@ -831,6 +832,47 @@ async function main() {
 
       console.log(`\n📝 Description: ${analysis.text}`);
       console.log("\n" + "=".repeat(70));
+    } else if (command === "spotify-auth") {
+      // bun run dev spotify-auth
+      // One-time, real, interactive Spotify OAuth consent flow (see
+      // scripts/spotify_control.py's own header comment for the full
+      // real setup steps - a Spotify Developer app is required first,
+      // this can't skip that). Opens a real browser; the resulting token
+      // is cached to scripts/.spotify-cache so every later call is silent.
+      console.log("\n" + "=".repeat(70));
+      console.log("🎵 SPOTIFY AUTH (real, one-time, opens a real browser)");
+      console.log("=".repeat(70));
+      console.log("\nIf this is the first time: create an app at https://developer.spotify.com/dashboard,");
+      console.log('add redirect URI "http://127.0.0.1:8888/callback", and put SPOTIPY_CLIENT_ID/');
+      console.log("SPOTIPY_CLIENT_SECRET in .env before running this.\n");
+
+      const authResult = await spotifyAuth();
+      if (authResult.success) {
+        console.log(`✅ ${authResult.detail}`);
+      } else {
+        console.log(`❌ ${authResult.error}`);
+      }
+      console.log("\n" + "=".repeat(70));
+    } else if (command === "spotify-test") {
+      // bun run dev spotify-test "<song/artist>"
+      // Real end-to-end playback test - requires spotify-auth to have
+      // been run first, and a real Spotify device (the app or web
+      // player) already open somewhere for Spotify Connect to target.
+      const query = args.slice(1).join(" ");
+      console.log("\n" + "=".repeat(70));
+      console.log("🎵 SPOTIFY TEST (real spotipy playback)");
+      console.log("=".repeat(70));
+      if (!query) {
+        console.log('\nUsage: bun run dev spotify-test "<song or artist>"');
+      } else {
+        const result = await spotifyPlay(query);
+        if (result.success) {
+          console.log(`\n✅ Now playing: ${result.playing}`);
+        } else {
+          console.log(`\n❌ ${result.error}`);
+        }
+      }
+      console.log("\n" + "=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -849,6 +891,8 @@ async function main() {
       console.log("  bun run dev vision-test <path>   - Real Ollama vision model on a real image (Phase 3)");
       console.log('  bun run dev video-test <path> ["<question>"] - Real frame-sampled video understanding (Phase 3)');
       console.log("  bun run dev camera-test [device-name] - Real on-demand webcam capture + vision (Phase 3)");
+      console.log("  bun run dev spotify-auth  - One-time real Spotify OAuth consent (opens a browser)");
+      console.log('  bun run dev spotify-test "<song/artist>" - Real Spotify playback test (Phase 5)');
     }
   } finally {
     await closeDatabase();

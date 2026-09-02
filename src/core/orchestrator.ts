@@ -20,6 +20,7 @@ import { VideoAnalyzer } from "../phase3/video-analyzer";
 import { CameraCapture } from "../phase3/camera-capture";
 import { searchWeb } from "./web-search";
 import { listDirectory, readTextFile, writeTextFile, moveFile } from "./file-manager";
+import { spotifyPlay, spotifyPause, spotifyResume, spotifyNext, spotifyPrevious, spotifyStatus } from "./spotify";
 import { existsSync } from "node:fs";
 import type { ModelProvider } from "../models/types";
 
@@ -499,6 +500,25 @@ export class Orchestrator {
       }
     }
 
+    // Spotify playback intent ("play some jazz", "skip this song") -
+    // checked next, same ActionOutcome slot. Added 2026-09-02 per Gavin:
+    // "For Spotify use spotipy" - closes the real, previously-disclosed
+    // gap where app-control could open Spotify but never play a specific
+    // song (see core/spotify.ts).
+    let spotifyIntent = appControlIntent || clickIntent ? null : this.parseSpotifyIntent(userUtterance);
+    if (!appControlIntent && !clickIntent && !spotifyIntent) {
+      spotifyIntent = await this.classifySpotifyIntent(userUtterance);
+    }
+    if (spotifyIntent) {
+      console.log(`\n🎵 Spotify intent detected: ${spotifyIntent.action}${spotifyIntent.query ? ` "${spotifyIntent.query}"` : ""}`);
+      this.onActionStart?.();
+      try {
+        actionOutcome = await this.executeSpotifyIntent(spotifyIntent);
+      } finally {
+        this.onActionEnd?.();
+      }
+    }
+
     // File-operation intent ("what's in my downloads folder", "read my
     // notes.txt", "create a file called...") - checked after app-control/
     // click, same ActionOutcome slot (a real file operation is a real
@@ -508,7 +528,7 @@ export class Orchestrator {
     // LLM-classifier only, no regex fast tier - see classifyFileIntent()'s
     // own comment for why.
     let fileIntent: Awaited<ReturnType<typeof this.classifyFileIntent>> = null;
-    if (!appControlIntent && !clickIntent) {
+    if (!appControlIntent && !clickIntent && !spotifyIntent) {
       fileIntent = await this.classifyFileIntent(userUtterance);
       if (fileIntent) {
         console.log(`\n📁 File intent detected: ${fileIntent.operation} "${fileIntent.path}"`);
@@ -530,7 +550,7 @@ export class Orchestrator {
     // work before this — see screen-capture.ts's header comment for the
     // fake-data finding that blocked it.
     let visionContext: string | undefined;
-    if (!appControlIntent && !clickIntent && !fileIntent) {
+    if (!appControlIntent && !clickIntent && !spotifyIntent && !fileIntent) {
       // Video intent checked first: a real, resolvable video file path
       // named in the utterance is a stronger, more specific signal than
       // generic screen phrasing, and the two are mutually exclusive in
@@ -603,7 +623,7 @@ export class Orchestrator {
     // of this funnel; see web-search.ts for the real $0 DuckDuckGo-based
     // mechanism.
     let searchContext: string | undefined;
-    if (!appControlIntent && !clickIntent && !fileIntent && !visionContext) {
+    if (!appControlIntent && !clickIntent && !spotifyIntent && !fileIntent && !visionContext) {
       let searchQuery = this.parseSearchIntent(userUtterance);
       if (!searchQuery) {
         searchQuery = await this.classifySearchIntent(userUtterance);
@@ -937,6 +957,149 @@ export class Orchestrator {
         success: result.success,
         detail: result.success ? (result.output ?? "done") : (result.error ?? "Unknown error"),
       };
+    } catch (error) {
+      return {
+        description,
+        success: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Free, instant, zero-LLM-cost regex tier for Spotify playback control.
+   * Closes a real, previously-disclosed gap: app-control (open/close)
+   * could launch Spotify but never play a specific song - per Gavin,
+   * "For Spotify use spotipy" (see core/spotify.ts, a real spotipy-backed
+   * Python subprocess, not window automation). A bare "play spotify"/
+   * "play music" is deliberately excluded from the "play <query>" match
+   * below - that's ambiguous with app-control's own "open" intent, and
+   * there's no real song/artist to search for anyway.
+   */
+  private parseSpotifyIntent(
+    utterance: string
+  ): { action: "play" | "pause" | "resume" | "next" | "previous" | "status"; query?: string } | null {
+    const text = utterance.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+    if (/^(?:can you\s+|please\s+)*(?:pause|stop)(?:\s+the\s+music)?[.!?]*$/i.test(text)) return { action: "pause" };
+    if (/^(?:can you\s+|please\s+)*(?:resume|unpause|continue)(?:\s+the\s+music)?[.!?]*$/i.test(text))
+      return { action: "resume" };
+    if (/^(?:can you\s+|please\s+)*(?:skip|next)(?:\s+(?:song|track))?[.!?]*$/i.test(text)) return { action: "next" };
+    if (/^(?:can you\s+|please\s+)*(?:go back|previous|last)(?:\s+(?:song|track))?[.!?]*$/i.test(text))
+      return { action: "previous" };
+    if (/^(?:can you\s+|please\s+)*what(?:'s| is)\s+(?:playing|this song)[.!?]*$/i.test(text))
+      return { action: "status" };
+
+    const playMatch = text.match(/^(?:can you\s+|please\s+)*play\s+(?:some\s+)?(.+?)[.!?]*$/i);
+    if (playMatch?.[1]) {
+      const query = playMatch[1].trim();
+      if (query.toLowerCase() !== "spotify" && query.toLowerCase() !== "music") {
+        return { action: "play", query };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * LLM fallback for indirect Spotify phrasing ("I wanna listen to some
+   * jazz", "put on some Taylor Swift", "turn the music off"). Same
+   * conservative shape as the other classifiers - only fires for a real,
+   * specific playback request.
+   */
+  private async classifySpotifyIntent(
+    utterance: string
+  ): Promise<{ action: "play" | "pause" | "resume" | "next" | "previous" | "status"; query?: string } | null> {
+    const classifierPrompt =
+      "You are an intent classifier for JARVIS, a desktop voice assistant that can control real Spotify " +
+      "playback (play a specific song/artist, pause, resume, skip, go back, or report what's playing). Given " +
+      "what the user just said, determine whether they're requesting Spotify playback control. Respond with " +
+      "ONLY a single raw JSON object, no other text, no markdown code fences, matching exactly this shape:\n" +
+      '{"isSpotify": boolean, "action": "play" | "pause" | "resume" | "next" | "previous" | "status" | null, ' +
+      '"query": string | null}\n\n' +
+      "Rules:\n" +
+      '- action "play" needs a real query (song/artist/genre/playlist name) - if they just want music in ' +
+      'general with nothing specific, still extract SOMETHING reasonable from what they said.\n' +
+      "- Default to false on ambiguity - only fires for a real, specific playback request.\n\n" +
+      "Examples:\n" +
+      '"I wanna listen to some jazz" -> {"isSpotify": true, "action": "play", "query": "jazz"}\n' +
+      '"put on some Taylor Swift" -> {"isSpotify": true, "action": "play", "query": "Taylor Swift"}\n' +
+      '"turn the music off" -> {"isSpotify": true, "action": "pause", "query": null}\n' +
+      '"open Spotify" -> {"isSpotify": false, "action": null, "query": null}\n' +
+      '"how\'s the weather" -> {"isSpotify": false, "action": null, "query": null}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        { temperature: 0, maxTokens: 100, responseFormat: { type: "json_object" } }
+      );
+
+      const jsonText = this.extractJsonObject(response.content);
+      if (!jsonText) return null;
+
+      const parsed = JSON.parse(jsonText) as {
+        isSpotify?: boolean;
+        action?: "play" | "pause" | "resume" | "next" | "previous" | "status" | null;
+        query?: string | null;
+      };
+      if (parsed.isSpotify === true && parsed.action) {
+        if (parsed.action === "play" && !parsed.query) return null;
+        return { action: parsed.action, query: parsed.query ?? undefined };
+      }
+      return null;
+    } catch (error) {
+      console.error(
+        "⚠ Spotify intent classification failed (falling back to plain conversation):",
+        error instanceof Error ? error.message : error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Actually controls real Spotify playback via core/spotify.ts (real
+   * spotipy-backed Python subprocess). Never throws: any failure
+   * (credentials not set up, no active device, no real search match)
+   * comes back as a real ActionOutcome failure so the reply reports it
+   * honestly instead of claiming a song is playing when it isn't.
+   */
+  private async executeSpotifyIntent(intent: {
+    action: "play" | "pause" | "resume" | "next" | "previous" | "status";
+    query?: string;
+  }): Promise<ActionOutcome> {
+    const description =
+      intent.action === "play"
+        ? `Play "${intent.query}" on Spotify`
+        : `Spotify: ${intent.action}`;
+    try {
+      let result: { success: boolean; error?: string; playing?: string; isPlaying?: boolean; track?: string; artists?: string[]; detail?: string };
+      switch (intent.action) {
+        case "play":
+          result = await spotifyPlay(intent.query!);
+          break;
+        case "pause":
+          result = await spotifyPause();
+          break;
+        case "resume":
+          result = await spotifyResume();
+          break;
+        case "next":
+          result = await spotifyNext();
+          break;
+        case "previous":
+          result = await spotifyPrevious();
+          break;
+        case "status":
+          result = await spotifyStatus();
+          break;
+      }
+      const detail = result.success
+        ? result.playing ??
+          (result.track ? `${result.isPlaying ? "Playing" : "Paused"}: ${result.track} by ${(result.artists ?? []).join(", ")}` : result.detail) ??
+          "done"
+        : (result.error ?? "Unknown error");
+      return { description, success: result.success, detail: detail ?? "done" };
     } catch (error) {
       return {
         description,
