@@ -19,6 +19,7 @@ import { runPowerShell } from "./phase3/windows-control";
 import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
 import { VideoAnalyzer } from "./phase3/video-analyzer";
+import { CameraCapture, listCameraDevices } from "./phase3/camera-capture";
 import { proactivityEngine } from "./core/proactivity";
 import { runAllMonitors } from "./core/system-monitors";
 import { sendSms } from "./core/sms";
@@ -766,6 +767,34 @@ async function main() {
         console.log(`\n💬 Answer: ${synthesis.content.trim()}`);
         console.log("\n" + "=".repeat(70));
       }
+    } else if (command === "camera-test") {
+      // bun run dev camera-test [device-name]
+      // Exercises the new Phase 3 camera vision (src/phase3/camera-capture.ts)
+      // - real ffmpeg DirectShow single-frame capture (with a short warm-up
+      // burst so auto-exposure has a moment to converge), run through the
+      // same real VisionSystem/OllamaVisionProvider the other vision
+      // commands use. On-demand only, by design - see camera-capture.ts's
+      // header comment for the real privacy reasoning and the disclosed,
+      // unresolved question of whether this session's own tool-execution
+      // context can capture genuine (non-black) scene content, same as the
+      // screen-capture blank-screenshot finding.
+      console.log("\n" + "=".repeat(70));
+      console.log("📷 CAMERA TEST (real ffmpeg DirectShow capture + real Ollama vision)");
+      console.log("=".repeat(70));
+
+      const devices = await listCameraDevices();
+      console.log(`\n🔌 Devices found: ${devices.join(", ") || "(none)"}`);
+
+      const deviceArg = args[1];
+      const camera = new CameraCapture();
+      const frame = await camera.captureFrame(deviceArg);
+
+      const visionSystem = new VisionSystem();
+      visionSystem.setProvider(new OllamaVisionProvider());
+      const analysis = await visionSystem.analyzeImage(frame.data);
+
+      console.log(`\n📝 Description: ${analysis.text}`);
+      console.log("\n" + "=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -783,6 +812,7 @@ async function main() {
       console.log('  bun run dev conversation "<text>" - Phase 1.5 conversational intelligence, real LLM + memory/context');
       console.log("  bun run dev vision-test <path>   - Real Ollama vision model on a real image (Phase 3)");
       console.log('  bun run dev video-test <path> ["<question>"] - Real frame-sampled video understanding (Phase 3)');
+      console.log("  bun run dev camera-test [device-name] - Real on-demand webcam capture + vision (Phase 3)");
     }
   } finally {
     await closeDatabase();

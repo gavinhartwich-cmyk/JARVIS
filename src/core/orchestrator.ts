@@ -17,6 +17,7 @@ import { ScreenCapture } from "../phase3/screen-capture";
 import { VisionSystem } from "../phase3/vision-system";
 import { OllamaVisionProvider } from "../phase3/ollama-vision-provider";
 import { VideoAnalyzer } from "../phase3/video-analyzer";
+import { CameraCapture } from "../phase3/camera-capture";
 import { existsSync } from "node:fs";
 import type { ModelProvider } from "../models/types";
 
@@ -108,6 +109,14 @@ export class Orchestrator {
       this.videoAnalyzer = new VideoAnalyzer(this.getVisionSystem());
     }
     return this.videoAnalyzer;
+  }
+
+  private cameraCapture?: CameraCapture;
+  private getCameraCapture(): CameraCapture {
+    if (!this.cameraCapture) {
+      this.cameraCapture = new CameraCapture();
+    }
+    return this.cameraCapture;
   }
 
   // Resolved once per process, not per tool call — a real PIN-elevation
@@ -496,6 +505,31 @@ export class Orchestrator {
         }
       }
 
+      // Camera intent checked next, before the screen-vision fallback:
+      // added 2026-09-02 per Gavin's explicit go-ahead ("No do camera
+      // vision") after it was previously deliberately deferred over the
+      // real privacy angle of turning on a webcam. Deliberately regex-only
+      // — NO LLM classifier fallback tier, unlike app-control/screen-
+      // vision — since this is a materially more privacy-sensitive real
+      // action (activating the camera pointed at Gavin, not just reading
+      // an already-visible screen) than anything else this funnel guards;
+      // requiring explicit "camera"/"webcam" wording or clearly
+      // self-referential phrasing ("look at me") is a deliberate,
+      // disclosed conservative choice so an LLM's own judgment call can
+      // never be what triggers a real camera capture.
+      if (!visionContext) {
+        const cameraQuestion = this.parseCameraVisionIntent(userUtterance);
+        if (cameraQuestion) {
+          console.log(`\n📷 Camera intent detected: "${cameraQuestion}"`);
+          this.onActionStart?.();
+          try {
+            visionContext = await this.executeCameraVisionIntent(cameraQuestion);
+          } finally {
+            this.onActionEnd?.();
+          }
+        }
+      }
+
       if (!visionContext) {
         let visionQuestion = this.parseScreenVisionIntent(userUtterance);
         if (!visionQuestion) {
@@ -812,6 +846,56 @@ export class Orchestrator {
       const detail = error instanceof Error ? error.message : String(error);
       console.error("⚠ Video analysis failed:", detail);
       return `(Video analysis of "${path}" failed: ${detail} — tell the user honestly that you couldn't analyze the video just now, don't guess at its contents.)`;
+    }
+  }
+
+  /**
+   * Free, instant, zero-LLM-cost regex tier for camera-vision phrasing —
+   * and, deliberately, the ONLY tier (no LLM classifier fallback, unlike
+   * every other intent in this funnel) — see this being called for the
+   * real reasoning why. Requires either an explicit "camera"/"webcam"
+   * mention with a verb, or clearly self-referential phrasing that only
+   * makes sense pointed at a camera on the user themselves ("look at me",
+   * "what do I look like").
+   */
+  private parseCameraVisionIntent(utterance: string): string | null {
+    const text = utterance.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+    const explicitCameraMention =
+      /\b(camera|webcam)\b/i.test(text) &&
+      /\b(look|check|see|show|use|turn on|activate|what|is|can)\b/i.test(text);
+    const selfReferential =
+      /\b(look at me|can you see me|do you see me|what do i look like|how do i look|what am i wearing|can you see my face)\b/i.test(
+        text
+      );
+    return explicitCameraMention || selfReferential ? text : null;
+  }
+
+  /**
+   * Actually captures a real webcam frame (camera-capture.ts - real
+   * ffmpeg DirectShow capture, see its header comment for the real
+   * OpenCV-vs-ffmpeg finding and the disclosed black-frame caveat) and
+   * runs it through the real, connected vision provider for a neutral
+   * description, same "moondream describes, the conversational LLM
+   * reasons about the user's specific question" split as
+   * executeScreenVisionIntent() - same reason: passing the user's raw
+   * question straight to moondream was already found to reliably return
+   * an empty response for first-person phrasing (see that method's own
+   * comment), and there's no reason to expect camera questions to be any
+   * more first-person-phrasing-tolerant than screen ones were. Never
+   * throws: any failure comes back as a clear, honest string.
+   */
+  private async executeCameraVisionIntent(question: string): Promise<string> {
+    try {
+      const frame = await this.getCameraCapture().captureFrame();
+      const analysis = await this.getVisionSystem().analyzeImage(frame.data);
+      return (
+        `Camera capture (real webcam frame, "${frame.deviceName}", ${frame.width}x${frame.height}) description: ` +
+        `${analysis.text}`
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("⚠ Camera capture/analysis failed:", detail);
+      return `(Camera capture failed: ${detail} — tell the user honestly that you couldn't use the camera just now, don't guess at what it would show.)`;
     }
   }
 
