@@ -9,7 +9,7 @@
 import { WakeWordDetector, WakeWordEvent } from "./wake-word-detector";
 import { SpeechRecognizer, RecognitionResult } from "./speech-recognizer";
 import type { SynthesisResult, ISpeechSynthesizer } from "./speech-synthesizer";
-import { createSpeechSynthesizer } from "./tts-provider";
+import { createSpeechSynthesizer, createPiperSynthesizer } from "./tts-provider";
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
@@ -142,6 +142,13 @@ export class VoiceInterface {
   private wakeWordDetector?: WakeWordDetector;
   private speechRecognizer?: SpeechRecognizer;
   private speechSynthesizer?: ISpeechSynthesizer;
+  // [ADDED 2026-09-02] Always-Piper, dedicated to the filler acknowledgment
+  // below - see createPiperSynthesizer()'s own comment for the real bug
+  // this fixes (the filler was paying Chatterbox's slow first-synthesis
+  // cost, defeating its whole purpose). Never the configured provider,
+  // deliberately - speed matters far more than voice-clone fidelity for
+  // three words of "hang on."
+  private fillerSynthesizer?: ISpeechSynthesizer;
   // Short "thinking" acknowledgment (2026-08-31), per Gavin: "it should
   // be responding while thinking so it seems faster instead of nothing"
   // - a real LLM call plus full TTS synthesis can take several real
@@ -319,6 +326,9 @@ export class VoiceInterface {
       // with automatic Piper fallback) now lives in tts-provider.ts -
       // see createSpeechSynthesizer for the real logic.
       this.speechSynthesizer = createSpeechSynthesizer(this.config);
+      // [ADDED 2026-09-02] Separate, always-fast synthesizer for the
+      // filler acknowledgment only - see fillerSynthesizer's own comment.
+      this.fillerSynthesizer = createPiperSynthesizer(this.config);
     }
   }
 
@@ -366,6 +376,7 @@ export class VoiceInterface {
     // persistent synthesis daemon (added 2026-08-31) - a no-op for
     // Piper/Fish Audio, which don't implement shutdown() at all.
     this.speechSynthesizer?.shutdown?.();
+    this.fillerSynthesizer?.shutdown?.();
 
     if (this.speechRecognizer) {
       try {
@@ -511,10 +522,14 @@ export class VoiceInterface {
    * the honest fix for "silence looks like it's broken."
    */
   private async ensureFillerAudio(): Promise<SynthesisResult | null> {
-    if (!this.speechSynthesizer) return null;
+    if (!this.fillerSynthesizer) return null;
     if (this.fillerAudio) return this.fillerAudio;
     try {
-      this.fillerAudio = await this.speechSynthesizer.synthesize("Mm-hm, one moment.");
+      // [2026-09-02] fillerSynthesizer, not speechSynthesizer - see its
+      // own field comment. Real live measurement of why this matters:
+      // Chatterbox synthesis was taking 18-54s under real GPU load, which
+      // this filler exists specifically to not make Gavin sit through.
+      this.fillerAudio = await this.fillerSynthesizer.synthesize("Mm-hm, one moment.");
     } catch (error) {
       console.log(
         `   ⚠️  Filler-audio synthesis failed (non-fatal, continuing without it): ${error instanceof Error ? error.message : error}`

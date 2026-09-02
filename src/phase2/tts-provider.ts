@@ -74,15 +74,34 @@ class FallbackSpeechSynthesizer implements ISpeechSynthesizer {
  *   in the misconfigured case so it's obvious why the "primary" voice
  *   never actually engages.
  */
-export function createSpeechSynthesizer(config: VoiceConfig): ISpeechSynthesizer {
+/**
+ * [ADDED 2026-09-02] A standalone, always-Piper synthesizer - real, live
+ * finding: voice-interface.ts's "thinking" filler acknowledgment
+ * ("Mm-hm, one moment.") was reusing the SAME synthesizer instance as the
+ * real reply, meaning whenever the configured provider is Chatterbox, the
+ * filler - whose entire purpose is to fill dead air quickly while the
+ * real (slow) reply generates - was itself paying Chatterbox's real
+ * multi-second-to-tens-of-seconds latency on its first use per session,
+ * defeating the point. The filler's job is speed, not voice-clone
+ * fidelity, so it always gets a plain, fast, local Piper instance
+ * regardless of what textToSpeech.provider is configured to. Factored out
+ * of createSpeechSynthesizer() below so both share one real construction
+ * path, not two that could drift.
+ */
+export function createPiperSynthesizer(config: VoiceConfig): ISpeechSynthesizer {
   const tts = config.textToSpeech;
-  const piper = new SpeechSynthesizer({
+  return new SpeechSynthesizer({
     voiceId: tts.voiceId,
     speakingRate: tts.speakingRate,
     outputFormat: tts.outputFormat,
     modelPath: tts.modelPath,
     sampleRate: config.audio.sampleRate,
   });
+}
+
+export function createSpeechSynthesizer(config: VoiceConfig): ISpeechSynthesizer {
+  const tts = config.textToSpeech;
+  const piper = createPiperSynthesizer(config);
 
   if (tts.provider === "chatterbox") {
     const referenceClipPath = tts.chatterbox?.referenceClipPath || process.env.CHATTERBOX_VOICE_CLIP_PATH;
