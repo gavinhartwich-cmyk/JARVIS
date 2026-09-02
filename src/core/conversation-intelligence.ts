@@ -229,12 +229,27 @@ export class ConversationalIntelligence {
         components.push(
           `\nYou just took a real action, before generating this reply: ${actionOutcome.description} — it succeeded.`
         );
+        // [2026-09-02] Real bug found and fixed: this used to never
+        // surface actionOutcome.detail on the success path at all - fine
+        // for an app-control/click confirmation where detail is just a
+        // status string ("done"), but genuinely broken for a file
+        // "read"/"list" operation, where detail IS the actual answer
+        // (the file's real contents, or the real directory listing) - a
+        // "read my notes.txt" request would otherwise get "I've read
+        // your file" without ever actually saying what it says. Included
+        // unconditionally now, since the model can tell from context
+        // whether it's substantive content to relay or just a status to
+        // acknowledge - not every action has meaningful detail to add.
+        if (actionOutcome.detail) {
+          components.push(`Result: ${actionOutcome.detail}`);
+        }
         components.push(
           `Confirm this briefly and naturally in past/present tense (it's already done, don't say "I will..."). ` +
-            `Be proactive, not just reactive: if there's an obvious, natural next question for this kind of app or ` +
-            `action (e.g. a music app → what to play; a browser → what to search; a document/notes app → what to ` +
-            `write or open), ask it in the same reply. If there's no obvious follow-up, just confirm naturally — ` +
-            `don't force one.`
+            `If a real result/content is included above, relay it naturally as part of your answer - don't just ` +
+            `say "done" and withhold it. Be proactive, not just reactive: if there's an obvious, natural next ` +
+            `question for this kind of app or action (e.g. a music app → what to play; a browser → what to ` +
+            `search; a document/notes app → what to write or open), ask it in the same reply. If there's no ` +
+            `obvious follow-up, just confirm naturally — don't force one.`
         );
       } else {
         components.push(

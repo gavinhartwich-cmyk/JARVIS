@@ -19,6 +19,7 @@ import { OllamaVisionProvider } from "../phase3/ollama-vision-provider";
 import { VideoAnalyzer } from "../phase3/video-analyzer";
 import { CameraCapture } from "../phase3/camera-capture";
 import { searchWeb } from "./web-search";
+import { listDirectory, readTextFile, writeTextFile, moveFile } from "./file-manager";
 import { existsSync } from "node:fs";
 import type { ModelProvider } from "../models/types";
 
@@ -498,16 +499,38 @@ export class Orchestrator {
       }
     }
 
+    // File-operation intent ("what's in my downloads folder", "read my
+    // notes.txt", "create a file called...") - checked after app-control/
+    // click, same ActionOutcome slot (a real file operation is a real
+    // action). Added 2026-09-02 as part of Phase 5 (Digital Ecosystem) -
+    // see file-manager.ts for the real, deliberately scoped safety
+    // boundary (Desktop/Documents/Downloads/Pictures only, no deletion).
+    // LLM-classifier only, no regex fast tier - see classifyFileIntent()'s
+    // own comment for why.
+    let fileIntent: Awaited<ReturnType<typeof this.classifyFileIntent>> = null;
+    if (!appControlIntent && !clickIntent) {
+      fileIntent = await this.classifyFileIntent(userUtterance);
+      if (fileIntent) {
+        console.log(`\n📁 File intent detected: ${fileIntent.operation} "${fileIntent.path}"`);
+        this.onActionStart?.();
+        try {
+          actionOutcome = await this.executeFileIntent(fileIntent);
+        } finally {
+          this.onActionEnd?.();
+        }
+      }
+    }
+
     // Screen-vision intent ("what's on my screen", "what's wrong with this
     // code") — same two-tier free-regex-then-LLM-classifier pattern as
-    // app-control above, and deliberately skipped if an app-control intent
-    // already matched (one utterance realistically means one or the
-    // other, and app-control already ran a real action this turn). Added
-    // 2026-09-02 per Gavin's own Stage 4 example scenario, which was
-    // confirmed NOT to work before this — see screen-capture.ts's header
-    // comment for the fake-data finding that blocked it.
+    // app-control above, and deliberately skipped if an app-control/click/
+    // file intent already matched (one utterance realistically means one
+    // action, and that action already ran this turn). Added 2026-09-02
+    // per Gavin's own Stage 4 example scenario, which was confirmed NOT to
+    // work before this — see screen-capture.ts's header comment for the
+    // fake-data finding that blocked it.
     let visionContext: string | undefined;
-    if (!appControlIntent && !clickIntent) {
+    if (!appControlIntent && !clickIntent && !fileIntent) {
       // Video intent checked first: a real, resolvable video file path
       // named in the utterance is a stronger, more specific signal than
       // generic screen phrasing, and the two are mutually exclusive in
@@ -580,7 +603,7 @@ export class Orchestrator {
     // of this funnel; see web-search.ts for the real $0 DuckDuckGo-based
     // mechanism.
     let searchContext: string | undefined;
-    if (!appControlIntent && !clickIntent && !visionContext) {
+    if (!appControlIntent && !clickIntent && !fileIntent && !visionContext) {
       let searchQuery = this.parseSearchIntent(userUtterance);
       if (!searchQuery) {
         searchQuery = await this.classifySearchIntent(userUtterance);
@@ -1276,6 +1299,161 @@ export class Orchestrator {
       const detail = error instanceof Error ? error.message : String(error);
       console.error("⚠ Web search failed:", detail);
       return `(Web search for "${query}" failed: ${detail} — tell the user honestly that you couldn't search just now, don't guess at an answer.)`;
+    }
+  }
+
+  /**
+   * LLM-based file-operation classifier (list/read/write/move) - unlike
+   * app-control/click, there's no cheap regex fast path here worth
+   * building: extracting real free-text file CONTENT from natural
+   * phrasing ("create a file called todo.txt with buy milk and eggs on
+   * it") genuinely needs language understanding, not pattern matching, so
+   * this is the primary tier, not a fallback. Deliberately conservative
+   * about "read" vs. app-control's "open" (reading a file's real text
+   * contents is different from launching an application) and biased
+   * toward false on ambiguity, same reasoning as classifySearchIntent()
+   * - a missed file operation just falls back to normal conversation.
+   */
+  private async classifyFileIntent(utterance: string): Promise<{
+    operation: "list" | "read" | "write" | "move";
+    path: string;
+    destinationPath?: string;
+    content?: string;
+    append?: boolean;
+  } | null> {
+    const classifierPrompt =
+      "You are an intent classifier for JARVIS, a desktop voice assistant that can list/read/write/move real " +
+      "files, but ONLY inside the user's own Desktop, Documents, Downloads, and Pictures folders (nowhere else). " +
+      "Given what the user just said, determine whether they want a real file operation. Respond with ONLY a " +
+      "single raw JSON object, no other text, no markdown code fences, matching exactly this shape:\n" +
+      '{"isFileOperation": boolean, "operation": "list" | "read" | "write" | "move" | null, "path": string | ' +
+      'null, "destinationPath": string | null, "content": string | null, "append": boolean}\n\n' +
+      "Rules:\n" +
+      '- "list" = show what\'s in a folder ("what\'s in my downloads folder"). path = the folder.\n' +
+      '- "read" = read a real file\'s actual text contents out loud/back ("read my notes.txt", "what does my ' +
+      'todo list say") - NOT opening an application (that\'s a different system; "open notepad" is ' +
+      "isFileOperation: false).\n" +
+      '- "write" = create a new file or save real text content to one. path = the file, content = the exact ' +
+      "text to write, append = true only if they said to ADD to an existing file rather than create/overwrite.\n" +
+      '- "move" = move/rename a file. path = source, destinationPath = target.\n' +
+      "- Default to false on genuine ambiguity - this only fires for a clearly real, specific file operation, " +
+      "not general conversation that happens to mention a file or folder in passing.\n\n" +
+      "Examples:\n" +
+      '"what\'s in my downloads folder" -> {"isFileOperation": true, "operation": "list", "path": "Downloads", ' +
+      '"destinationPath": null, "content": null, "append": false}\n' +
+      '"read my notes.txt file" -> {"isFileOperation": true, "operation": "read", "path": "Documents/notes.txt", ' +
+      '"destinationPath": null, "content": null, "append": false}\n' +
+      '"create a file called todo.txt with buy milk and eggs on it" -> {"isFileOperation": true, "operation": ' +
+      '"write", "path": "Documents/todo.txt", "destinationPath": null, "content": "buy milk and eggs", "append": false}\n' +
+      '"move report.docx to the desktop" -> {"isFileOperation": true, "operation": "move", "path": "report.docx", ' +
+      '"destinationPath": "Desktop/report.docx", "content": null, "append": false}\n' +
+      '"open notepad" -> {"isFileOperation": false, "operation": null, "path": null, "destinationPath": null, ' +
+      '"content": null, "append": false}\n' +
+      '"what\'s on my screen" -> {"isFileOperation": false, "operation": null, "path": null, "destinationPath": ' +
+      'null, "content": null, "append": false}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        { temperature: 0, maxTokens: 250, responseFormat: { type: "json_object" } }
+      );
+
+      const jsonText = this.extractJsonObject(response.content);
+      if (!jsonText) return null;
+
+      const parsed = JSON.parse(jsonText) as {
+        isFileOperation?: boolean;
+        operation?: "list" | "read" | "write" | "move" | null;
+        path?: string | null;
+        destinationPath?: string | null;
+        content?: string | null;
+        append?: boolean;
+      };
+
+      if (!parsed.isFileOperation || !parsed.operation || !parsed.path) return null;
+      if (parsed.operation === "move" && !parsed.destinationPath) return null;
+      if (parsed.operation === "write" && !parsed.content) return null;
+
+      return {
+        operation: parsed.operation,
+        path: parsed.path,
+        destinationPath: parsed.destinationPath ?? undefined,
+        content: parsed.content ?? undefined,
+        append: parsed.append ?? false,
+      };
+    } catch (error) {
+      console.error(
+        "⚠ File intent classification failed (falling back to plain conversation):",
+        error instanceof Error ? error.message : error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Actually runs a real file operation (file-manager.ts - real,
+   * scoped to Desktop/Documents/Downloads/Pictures, see its own header
+   * comment for the real safety reasoning). Never throws: any failure
+   * (path outside the allowed roots, file not found) comes back as a
+   * real ActionOutcome failure so the reply reports it honestly.
+   */
+  private async executeFileIntent(intent: {
+    operation: "list" | "read" | "write" | "move";
+    path: string;
+    destinationPath?: string;
+    content?: string;
+    append?: boolean;
+  }): Promise<ActionOutcome> {
+    const description =
+      intent.operation === "list"
+        ? `List files in "${intent.path}"`
+        : intent.operation === "read"
+          ? `Read "${intent.path}"`
+          : intent.operation === "write"
+            ? `Write to "${intent.path}"`
+            : `Move "${intent.path}" to "${intent.destinationPath}"`;
+    try {
+      switch (intent.operation) {
+        case "list": {
+          const entries = listDirectory(intent.path);
+          const summary = entries
+            .map((e) => `${e.name}${e.isDirectory ? "/" : ` (${e.sizeBytes} bytes)`}`)
+            .join(", ");
+          return { description, success: true, detail: entries.length > 0 ? summary : "(empty folder)" };
+        }
+        case "read": {
+          const text = readTextFile(intent.path);
+          // Real cap, not arbitrary: a large file's full text landing
+          // verbatim in the conversational prompt would both waste real
+          // tokens and risk the reply trying to read the whole thing back
+          // out loud. 4000 chars is generous for anything a spoken
+          // "read me my notes" realistically means; a genuinely huge file
+          // gets an honest truncation note, not a silently cut-off answer.
+          const MAX_READ_CHARS = 4000;
+          const truncated = text.length > MAX_READ_CHARS;
+          const detail = truncated
+            ? `${text.slice(0, MAX_READ_CHARS)}\n\n(truncated - real file is ${text.length} characters total)`
+            : text;
+          return { description, success: true, detail };
+        }
+        case "write": {
+          writeTextFile(intent.path, intent.content ?? "", { append: intent.append });
+          return { description, success: true, detail: `${intent.append ? "Appended to" : "Wrote"} "${intent.path}"` };
+        }
+        case "move": {
+          moveFile(intent.path, intent.destinationPath!);
+          return { description, success: true, detail: `Moved to "${intent.destinationPath}"` };
+        }
+      }
+    } catch (error) {
+      return {
+        description,
+        success: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 
