@@ -127,18 +127,24 @@ Scope discipline — only touch files this requirement actually needs:
 Editing a file that already exists in this repo:
 - When the prompt includes a section headed "EXISTING CONTENT of <path>",
   that IS the real, current, complete content of that file — not a
-  suggestion or a rough sketch. Your file block for that same path MUST be
-  that exact content with your specific change applied, character-for-
-  character identical everywhere else. Never drop, rewrite, "clean up", or
-  reimplement any part you weren't asked to change.
+  suggestion or a rough sketch.
+- Use an ===EDIT=== block (targeted find/replace, see the format
+  instructions elsewhere in this prompt) for this case, not a ===FILE===
+  block — reproducing the entire file just to change a few lines wastes
+  output budget and is exactly what caused a real, confirmed timeout on a
+  large file. The FIND text in an ===EDIT=== block must be copied
+  verbatim from EXISTING CONTENT, character-for-character including
+  whitespace, and must be just long enough to uniquely identify one spot
+  in the file.
+- ===FILE=== is still correct for a brand-new file, or for the rare case
+  where your change genuinely touches nearly the entire file - in that
+  case it's the complete, real file after your edit, never "the complete
+  file as you'd write it from scratch."
 - If a target path is not shown with an EXISTING CONTENT section, that means
   either the file is new, or it's genuinely too large to include here — in
   the latter case, do NOT guess at its contents from the file name alone;
-  say so in your response instead of emitting a file block that would
-  silently replace the real file with a fabrication.
-- "Complete file content" in the Output format below means "the complete,
-  real file after your edit" — never "the complete file as you'd write it
-  from scratch."
+  say so in your response instead of emitting a block that would silently
+  replace the real file with a fabrication.
 
 Test runtime: this project uses Bun's built-in test runner, not Jest,
 Mocha, or Chai. If you write a test file:
@@ -152,11 +158,9 @@ Mocha, or Chai. If you write a test file:
   \`.to.be...\` chain syntax — bun:test's \`expect\` does not have a
   \`.to\` property and this will fail to typecheck.
 
-Output format:
-- File: Path to create/modify
-- Content: Complete file content
-- Rationale: Why this implementation
-- Dependencies: Any new imports needed`,
+Output format: use the ===EDIT=== / ===FILE=== block format specified
+elsewhere in this prompt - not a "File / Content / Rationale /
+Dependencies" prose description of the change.`,
 };
 
 /**
@@ -258,11 +262,15 @@ Debugging approach:
 - Test the fix thoroughly
 - Ensure no regressions
 
-Scope discipline: only output a file block for a file whose content must
+Scope discipline: only output a block for a file whose content must
 actually change to fix the reported error. Never regenerate or replace
 project configuration files (package.json, tsconfig.json, jest.config.js,
 tslint.json, prettier.config.js, .gitignore, README.md, etc.) as a side
-effect of fixing an unrelated bug.
+effect of fixing an unrelated bug. Prefer ===EDIT=== (a targeted find/
+replace against the file's real current content, shown to you elsewhere
+in this prompt) over ===FILE=== whenever the fix is localized - which a
+"minimal, targeted fix" almost always is; reserve ===FILE=== for a new
+file or a fix that genuinely rewrites most of an existing one.
 
 Test runtime: this project uses Bun's built-in test runner, not Jest,
 Mocha, or Chai. A test file must import every name it uses —

@@ -38,6 +38,8 @@ import type { ModelProvider } from "../models/types";
 import {
   parseFileBlocks,
   applyFileBlocks,
+  parseEditBlocks,
+  applyEditBlocks,
   isNoChangesResponse,
   findDisallowedImports,
   FILE_BLOCK_PROTOCOL_INSTRUCTIONS,
@@ -612,8 +614,8 @@ export class JARVISDeveloper {
       // block of injected file content. On a retry this gets blunter still.
       const finalReminder =
         attempt === 1
-          ? `\n\nReminder: your response for this requirement must use the ===FILE:===...===END FILE=== format above for every file you touch, with that file's complete content (existing content plus your edit, if it already exists) - not a code fence, not a diff, not just the changed lines.`
-          : `\n\nYour previous attempt at this exact requirement was rejected: ${lastFailure?.reason?.slice(0, 300)}\nTry again. Output ONLY ===FILE: <path>===, then the complete file content, then ===END FILE=== - nothing else, no markdown code fence, no explanation before or after.`;
+          ? `\n\nReminder: your response for this requirement must use the ===EDIT===/===FILE=== block format above for every file you touch - ===EDIT=== (a targeted find/replace against that file's real EXISTING CONTENT shown above) for any change to an existing file, ===FILE=== only for a genuinely new file. Not a code fence, not a plain diff, not just the changed lines described in prose.`
+          : `\n\nYour previous attempt at this exact requirement was rejected: ${lastFailure?.reason?.slice(0, 300)}\nTry again. If the rejection was about a FIND anchor not matching, copy it more carefully and exactly from the EXISTING CONTENT shown to you (or include more context to make it unique) - do not fall back to a ===FILE=== block reproducing the whole file just to avoid that. Output ONLY the block(s) - nothing else, no markdown code fence, no explanation before or after.`;
 
       const output = await this.agents.coder.execute({
         taskId: this.runId,
@@ -635,38 +637,69 @@ export class JARVISDeveloper {
         return { files: new Map(), success: false, reason: "Coder agent determined no file changes were needed for this requirement.", noChangesNeeded: true };
       }
 
-      const blocks: FileBlock[] = parseFileBlocks(output.content);
-      if (blocks.length === 0) {
-        // A response that opens a ===FILE:=== block but never reaches
-        // ===END FILE=== isn't malformed - it was cut off by maxTokens
-        // before it could finish. Distinguish that (actionable: the file is
-        // too large for the current cap) from genuinely malformed output
-        // (the model ignored the format entirely) instead of reporting both
-        // the same way. Found via a live run against a 26KB source file.
-        const looksTruncatedMidBlock = /===FILE:\s*.+?\s*===/.test(output.content) && !/===END FILE===/.test(output.content);
+      const fileBlocks: FileBlock[] = parseFileBlocks(output.content);
+      // [ADDED 2026-09-02] ===EDIT=== blocks - see patch.ts's EditBlock
+      // comment for the real bug this fixes (Coder timeout on large
+      // files, confirmed live 2026-09-01). Parsed alongside FILE blocks,
+      // not instead of them - the model chooses per-file which format
+      // fits (new file -> FILE, targeted change to an existing file ->
+      // EDIT), and a response can legitimately contain both.
+      const editBlocks = parseEditBlocks(output.content);
+      if (fileBlocks.length === 0 && editBlocks.length === 0) {
+        // A response that opens a block but never reaches its closing
+        // marker isn't malformed - it was cut off by maxTokens before it
+        // could finish. Distinguish that (actionable: the content is too
+        // large for the current cap) from genuinely malformed output (the
+        // model ignored the format entirely) instead of reporting both
+        // the same way. Found via a live run against a 26KB source file -
+        // EDIT blocks make this far less likely to recur (output size no
+        // longer scales with file size), but still checked for either
+        // marker in case a huge REPLACE section hits the same wall.
+        const looksTruncatedMidBlock =
+          (/===FILE:\s*.+?\s*===/.test(output.content) && !/===END FILE===/.test(output.content)) ||
+          (/===EDIT:\s*.+?\s*===/.test(output.content) && !/===END EDIT===/.test(output.content));
         const wasLengthCapped = (output.finishReason ?? "").toLowerCase().includes("length");
         if (looksTruncatedMidBlock || wasLengthCapped) {
           lastFailure = {
             files: new Map(),
             success: false,
             reason:
-              `Coder agent's response was cut off before it finished (started a ===FILE:=== block but never reached ` +
-              `===END FILE===${wasLengthCapped ? "; provider reported finishReason=" + output.finishReason : ""}). ` +
-              `The file is likely too large for the current maxTokens cap (${output.tokensUsed} tokens used). ` +
+              `Coder agent's response was cut off before it finished (started a block but never reached its closing marker` +
+              `${wasLengthCapped ? "; provider reported finishReason=" + output.finishReason : ""}). ` +
+              `The content is likely too large for the current maxTokens cap (${output.tokensUsed} tokens used). ` +
+              `If this was a ===FILE=== block for an existing file, prefer ===EDIT=== instead - it doesn't need to reproduce the whole file. ` +
               `Raw response (last 500 chars): ${truncate(output.content.slice(-500), 500)}`,
           };
         } else {
           lastFailure = {
             files: new Map(),
             success: false,
-            reason: `Coder agent response did not use the required ===FILE:===...===END FILE=== format. Raw response (truncated): ${truncate(output.content, 500)}`,
+            reason: `Coder agent response did not use the required ===EDIT===...===END EDIT=== or ===FILE===...===END FILE=== format. Raw response (truncated): ${truncate(output.content, 500)}`,
           };
         }
         continue;
       }
 
-      console.log(`   Writing ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
-      const written = applyFileBlocks(this.repositoryPath, blocks);
+      const editResult = applyEditBlocks(this.repositoryPath, editBlocks);
+      if (editResult.errors.length > 0) {
+        // A bad/non-unique FIND anchor is a normal, expected, retry-able
+        // model mistake - same treatment as every other step4 failure
+        // above, not a hard stop. Any FILE blocks in the same response
+        // are deliberately NOT written in this case: applying half a
+        // response (the FILE blocks) while the EDIT half failed could
+        // leave the repo in an inconsistent partial state that's harder
+        // to reason about on retry than "nothing changed yet."
+        lastFailure = {
+          files: new Map(),
+          success: false,
+          reason: `One or more ===EDIT=== blocks could not be applied:\n${editResult.errors.join("\n")}`,
+        };
+        continue;
+      }
+
+      const fileWritten = applyFileBlocks(this.repositoryPath, fileBlocks);
+      const written = new Map<string, string>([...fileWritten, ...editResult.written]);
+      console.log(`   Writing ${written.size} file(s): ${[...written.keys()].join(", ")}`);
       console.log(`   Confidence: ${(output.confidence * 100).toFixed(0)}%`);
       return { files: written, success: true };
     }
@@ -819,7 +852,12 @@ export class JARVISDeveloper {
 
     const output = await this.agents.debugger.execute({
       taskId: this.runId,
-      task: `The following files were just changed and are failing:\n\n${truncate(currentFilesText, 8000)}\n\n${failureText}\n\nFix the failure(s). Repository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}\n\nYou MUST respond with at least one ===FILE:===...===END FILE=== block containing the complete corrected file — a prose-only explanation with no file block will be treated as a failed attempt.`,
+      // [2026-09-02] Same real fix as step4_ImplementCode - the Debugger
+      // agent hits the identical whole-file-reproduction timeout risk on
+      // a large failing file, and it already sees each file's real
+      // current content above (currentFilesText), so it has everything
+      // an ===EDIT=== block's FIND anchor needs.
+      task: `The following files were just changed and are failing:\n\n${truncate(currentFilesText, 8000)}\n\n${failureText}\n\nFix the failure(s). Repository root: ${this.repositoryPath}\nAll file paths must be relative to the repository root.\n\n${this.dependencyConstraintText()}\n\nYou MUST respond with at least one ===EDIT===...===END EDIT=== or ===FILE===...===END FILE=== block containing the fix - prefer ===EDIT=== (a targeted find/replace against the real content shown above) unless the file is new or needs to be almost entirely rewritten. A prose-only explanation with no block will be treated as a failed attempt.`,
       context: {},
     });
 
@@ -827,14 +865,22 @@ export class JARVISDeveloper {
       return { filesChanged: 0, files: new Map(), rawResponse: output.content };
     }
 
-    const blocks = parseFileBlocks(output.content);
-    if (blocks.length === 0) {
-      console.log("   ⚠️  Debugger response did not use the required file-block format.");
+    const fileBlocks = parseFileBlocks(output.content);
+    const editBlocks = parseEditBlocks(output.content);
+    if (fileBlocks.length === 0 && editBlocks.length === 0) {
+      console.log("   ⚠️  Debugger response did not use the required block format.");
       return { filesChanged: 0, files: new Map(), rawResponse: output.content };
     }
 
-    console.log(`   Rewriting ${blocks.length} file(s): ${blocks.map((b) => b.path).join(", ")}`);
-    const written = applyFileBlocks(this.repositoryPath, blocks);
+    const editResult = applyEditBlocks(this.repositoryPath, editBlocks);
+    if (editResult.errors.length > 0) {
+      console.log(`   ⚠️  Debugger's ===EDIT=== block(s) could not be applied:\n${editResult.errors.join("\n")}`);
+      return { filesChanged: 0, files: new Map(), rawResponse: output.content };
+    }
+
+    const fileWritten = applyFileBlocks(this.repositoryPath, fileBlocks);
+    const written = new Map<string, string>([...fileWritten, ...editResult.written]);
+    console.log(`   Rewriting ${written.size} file(s): ${[...written.keys()].join(", ")}`);
     return { filesChanged: written.size, files: written, rawResponse: output.content };
   }
 

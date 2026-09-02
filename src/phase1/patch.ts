@@ -24,7 +24,32 @@ export interface FileBlock {
   content: string;
 }
 
+/**
+ * [ADDED 2026-09-02] Targeted find/replace edit for an EXISTING file — the
+ * real fix for a confirmed-live bug: the Coder agent hit
+ * "The operation timed out." reproducing a real ~770-line file, because
+ * ===FILE=== blocks require the model to output the ENTIRE file (7000-9000+
+ * output tokens for a file that size) even when the actual requested change
+ * is one line. Two earlier passes tried raising the per-call timeout and
+ * token cap - both real fixes for smaller files, neither fixes the
+ * underlying scaling problem, because output cost still scales with FILE
+ * size, not EDIT size. An ===EDIT=== block only costs tokens proportional
+ * to the change itself: a small, verbatim FIND anchor (must match the
+ * file's real current content exactly - the model can only get this right
+ * because existingFileContext() already shows it the real file) plus the
+ * REPLACE text. See applyEditBlocks() for how this gets applied, and
+ * developer.ts's step4_ImplementCode for how a bad/non-unique anchor
+ * becomes a specific, retry-able error rather than a silent wrong edit.
+ */
+export interface EditBlock {
+  path: string;
+  find: string;
+  replace: string;
+}
+
 const FILE_BLOCK_RE = /===FILE:\s*(.+?)\s*===\r?\n([\s\S]*?)\r?\n===END FILE===/g;
+const EDIT_BLOCK_RE =
+  /===EDIT:\s*(.+?)\s*===\r?\n<<<<<<< FIND\r?\n([\s\S]*?)\r?\n=======\r?\n([\s\S]*?)\r?\n>>>>>>> REPLACE\r?\n===END EDIT===/g;
 
 /**
  * Small local models asked for structured JSON (`{content, confidence}`)
@@ -66,8 +91,24 @@ export function parseFileBlocks(text: string): FileBlock[] {
   return blocks;
 }
 
+export function parseEditBlocks(text: string): EditBlock[] {
+  const unwrapped = unwrapNestedContent(text);
+  const blocks: EditBlock[] = [];
+  let match: RegExpExecArray | null;
+  EDIT_BLOCK_RE.lastIndex = 0;
+  while ((match = EDIT_BLOCK_RE.exec(unwrapped)) !== null) {
+    const filePath = match[1].trim();
+    const find = match[2];
+    const replace = match[3];
+    if (filePath) {
+      blocks.push({ path: filePath, find, replace });
+    }
+  }
+  return blocks;
+}
+
 export function isNoChangesResponse(text: string): boolean {
-  return /===NO_CHANGES===/.test(text) && parseFileBlocks(text).length === 0;
+  return /===NO_CHANGES===/.test(text) && parseFileBlocks(text).length === 0 && parseEditBlocks(text).length === 0;
 }
 
 /**
@@ -123,22 +164,42 @@ export function findDisallowedImports(
  * free-form response is actually machine-parseable.
  */
 export const FILE_BLOCK_PROTOCOL_INSTRUCTIONS = `
-Output every file you create or modify using EXACTLY this delimited format, one block per file, with no other text outside the blocks and no markdown code fences inside them:
+There are two block formats. Use EDIT for a targeted change to a file whose
+EXISTING CONTENT was shown to you elsewhere in this prompt — it is almost
+always the right choice for an existing file, and REQUIRED whenever your
+change touches only part of that file. Use FILE only for a brand-new file,
+or when the change genuinely replaces nearly all of an existing file's
+content.
 
-===FILE: relative/path/to/file.ts===
+===EDIT: relative/path/to/file.ts===
+<<<<<<< FIND
+<a short, VERBATIM excerpt copied exactly from that file's real EXISTING
+CONTENT shown to you - same whitespace, same indentation, same everything.
+Include just enough surrounding lines that this excerpt appears EXACTLY
+ONCE in the file - not the whole file, not a paraphrase or a description
+of the location.>
+=======
+<the replacement text for that exact excerpt>
+>>>>>>> REPLACE
+===END EDIT===
+
+You may output several ===EDIT=== blocks for the same file if you need to
+change more than one place in it — each one is applied independently, so
+each FIND excerpt must still be unique and exact on its own.
+
+===FILE: relative/path/to/new-file.ts===
 <complete file content, nothing omitted or truncated>
 ===END FILE===
 
-If, after analysis, no file changes are actually needed, output only the single line:
+If, after analysis, no changes are actually needed, output only the single line:
 ===NO_CHANGES===
 
 This applies no matter how small the requested change is. A response like
-a bare markdown code fence containing just a comment, or a raw
-snippet with no ===FILE:=== / ===END FILE=== markers, is NOT valid output
-and will be rejected by the parser that reads your response - even when
-the change itself really is just one line. If a file's EXISTING CONTENT
-was shown to you elsewhere in this prompt, your block for that path is
-that entire content with your edit applied, not a summary of the edit.
+a bare markdown code fence containing just a comment, or a raw snippet with
+no ===EDIT:=== / ===FILE:=== markers, is NOT valid output and will be
+rejected by the parser that reads your response - even when the change
+itself really is just one line. Output nothing outside these blocks, and no
+markdown code fences inside them.
 `;
 
 /**
@@ -170,4 +231,97 @@ export function applyFileBlocks(
   }
 
   return written;
+}
+
+function truncateForError(text: string, maxLength = 200): string {
+  return text.length > maxLength ? text.slice(0, maxLength) + "..." : text;
+}
+
+/**
+ * [ADDED 2026-09-02] Apply ===EDIT=== blocks - a targeted find/replace
+ * against a file's REAL current content, instead of applyFileBlocks'
+ * whole-file overwrite. See EditBlock's own comment above for why this
+ * exists (a confirmed-live Coder-agent timeout on large files).
+ *
+ * Deliberately returns errors instead of throwing: a bad or non-unique
+ * FIND anchor is a normal, expected, retry-able model mistake (same
+ * category as the existing FILE_BLOCK format-mismatch/truncation
+ * failures developer.ts already retries with a blunter prompt) - not a
+ * codebase-level exception. The error messages are specific enough for a
+ * retry to actually self-correct: which file, whether the anchor was
+ * missing vs. ambiguous, and a truncated echo of what was searched for.
+ *
+ * Multiple ===EDIT=== blocks targeting the same file are applied in
+ * order against each other's output (not each re-read from disk), so a
+ * second edit can target content the first edit just introduced.
+ */
+export function applyEditBlocks(
+  repoRoot: string,
+  blocks: EditBlock[]
+): { written: Map<string, string>; errors: string[] } {
+  const written = new Map<string, string>();
+  const errors: string[] = [];
+  const resolvedRoot = path.resolve(repoRoot);
+  const currentContent = new Map<string, string>();
+
+  for (const block of blocks) {
+    const targetPath = path.resolve(resolvedRoot, block.path);
+    const relative = path.relative(resolvedRoot, targetPath);
+
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      errors.push(`Refusing to edit outside repository root: "${block.path}" resolved to ${targetPath}`);
+      continue;
+    }
+
+    let content = currentContent.get(relative);
+    if (content === undefined) {
+      if (!fs.existsSync(targetPath)) {
+        errors.push(
+          `===EDIT=== block targets "${block.path}", but that file doesn't exist on disk. Use a ===FILE=== block instead for a new file.`
+        );
+        continue;
+      }
+      content = fs.readFileSync(targetPath, "utf-8");
+    }
+
+    if (block.find.length === 0) {
+      errors.push(`===EDIT=== block for "${block.path}" has an empty FIND section - it must contain a real excerpt of the file's current content.`);
+      continue;
+    }
+
+    const occurrences = content.split(block.find).length - 1;
+    if (occurrences === 0) {
+      errors.push(
+        `===EDIT=== block for "${block.path}": the FIND text was not found verbatim in the file's current content. ` +
+          `It must match exactly, including whitespace and indentation - copy it directly from the EXISTING CONTENT shown to you, don't retype or paraphrase it. ` +
+          `FIND started with: ${truncateForError(block.find)}`
+      );
+      continue;
+    }
+    if (occurrences > 1) {
+      errors.push(
+        `===EDIT=== block for "${block.path}": the FIND text matches ${occurrences} different places in the file, not exactly one. ` +
+          `Include more surrounding context (a few more lines before/after) so it uniquely identifies a single location. ` +
+          `FIND started with: ${truncateForError(block.find)}`
+      );
+      continue;
+    }
+
+    // Function-form replacer, not a plain string - String.prototype.replace
+    // treats a string replacement's "$&"/"$1"/"$$" etc. as special
+    // patterns, which would silently corrupt a REPLACE text that happens
+    // to contain a literal "$" (e.g. real code using template literals or
+    // regex). The function form always inserts the text verbatim.
+    const newContent = content.replace(block.find, () => block.replace);
+    currentContent.set(relative, newContent);
+    written.set(relative, newContent);
+  }
+
+  for (const [relative, content] of currentContent) {
+    const targetPath = path.resolve(resolvedRoot, relative);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, content, "utf-8");
+  }
+
+  return { written, errors };
 }
