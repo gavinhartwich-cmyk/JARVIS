@@ -66,20 +66,38 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { runPowerShell, psEscape } from "../phase3/windows-control";
+import { runPowerShell, psEscape, PowerShellAbortedError } from "../phase3/windows-control";
+
+/**
+ * [ADDED 2026-09-02] Thrown by playWavBuffer when the caller's own
+ * AbortSignal ends playback early - real barge-in support (voice-
+ * interface.ts's playInterruptible()), not a playback failure. Callers
+ * should treat this as "the user interrupted," not log it as an error.
+ */
+export class PlaybackInterruptedError extends Error {
+  constructor() {
+    super("Playback interrupted by caller");
+    this.name = "PlaybackInterruptedError";
+  }
+}
 
 /**
  * Play a WAV buffer through the default output device and wait for
  * playback to finish (PlaySync, not Play - a fire-and-forget Play() would
- * return immediately and let the caller (e.g. the `listen` loop) start
- * treating incoming mic audio as a fresh wake-word/utterance window while
- * JARVIS's own voice is still coming out of the speakers - exactly the
- * self-triggering/echo problem the master architecture doc's own STT
- * pipeline spec calls out as needing "echo cancellation" (Part 5.3). This
- * isn't real acoustic echo cancellation, but blocking here is what lets
- * voice-interface.ts's listen loop simply not re-arm the mic until
- * PlaySync's promise resolves - a real, honest interim fix, not a
- * simulation of one.
+ * return immediately and let the caller start treating incoming mic
+ * audio as a fresh wake-word/utterance window while JARVIS's own voice
+ * is still coming out of the speakers).
+ *
+ * [UPDATE 2026-09-02] Real, scoped barge-in support: an optional
+ * AbortSignal now lets a caller stop playback mid-clip (see
+ * PlaybackInterruptedError above and voice-interface.ts's
+ * playInterruptible()). This still isn't real acoustic echo
+ * cancellation - the master doc's Part 5.3 full arbitrary-speech
+ * interruption goal - it's the wake-word-only interim step: JARVIS
+ * keeps listening (specifically for "Jarvis" again, via the same
+ * already-tuned detector, not general speech) while it talks, and a hit
+ * kills this exact process to stop the audio immediately. A real,
+ * honest, working step toward the full goal, not a simulation of it.
  */
 /**
  * Real duration from a WAV header (same header-walk approach used in
@@ -109,7 +127,7 @@ function wavDurationMs(wav: Buffer): number {
   return 4000;
 }
 
-export async function playWavBuffer(audio: Buffer, timeoutMs = 30_000): Promise<void> {
+export async function playWavBuffer(audio: Buffer, timeoutMs = 30_000, signal?: AbortSignal): Promise<void> {
   const path = join(tmpdir(), `jarvis-playback-${randomUUID()}.wav`);
   writeFileSync(path, audio);
   // +600ms real safety margin on top of the exact WAV duration - covers
@@ -155,8 +173,19 @@ if (-not $played) {
   (New-Object Media.SoundPlayer $path).PlaySync()
 }
 `,
-      timeoutMs
+      timeoutMs,
+      signal
     );
+  } catch (err) {
+    // Real barge-in (2026-09-02): the caller's AbortSignal killed the
+    // PowerShell process mid-clip on purpose - re-throw as
+    // PlaybackInterruptedError so voice-interface.ts's
+    // playInterruptible() can tell "the user interrupted" apart from an
+    // actual playback failure (bad device, crashed COM object, etc.).
+    if (err instanceof PowerShellAbortedError) {
+      throw new PlaybackInterruptedError();
+    }
+    throw err;
   } finally {
     try {
       unlinkSync(path);

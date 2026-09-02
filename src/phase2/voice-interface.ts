@@ -13,7 +13,7 @@ import { createSpeechSynthesizer, createPiperSynthesizer } from "./tts-provider"
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
-import { playWavBuffer } from "./audio-player";
+import { playWavBuffer, PlaybackInterruptedError } from "./audio-player";
 import type { Orchestrator } from "../core/orchestrator";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 
@@ -171,7 +171,33 @@ export class VoiceInterface {
   // even during playback (the master doc's Part 5.1 full-duplex goal);
   // this half-duplex guard is the honest interim substitute, not a stand-in
   // that pretends to be that.
+  //
+  // [UPDATE 2026-09-02] Real, scoped barge-in support added - see
+  // playInterruptible()/handleWakeWord() below. Mic chunks during
+  // isSpeaking are no longer dropped entirely: they're routed
+  // specifically to the wake-word detector (processMicChunk()), so
+  // saying "Jarvis" again can interrupt JARVIS mid-speech. This is
+  // deliberately NOT full arbitrary-speech interruption - that still
+  // needs real acoustic echo cancellation (a genuinely harder problem,
+  // still not attempted) to tell real user speech apart from JARVIS's
+  // own voice bleeding into the mic. Reusing the wake-word detector
+  // sidesteps that: it's already tuned to reject non-wake-word audio,
+  // and JARVIS's own scripted replies don't say "Jarvis" as part of
+  // normal conversation, so this is a real, working, honestly-scoped
+  // interim step toward the master doc's full-duplex goal, not the
+  // whole thing.
   private isSpeaking: boolean = false;
+  // Bumped every time a new turn starts (handleWakeWord()) - lets
+  // handleUserSpeech() tell whether a barge-in started a NEW turn while
+  // it was still mid-flight (playing a filler, waiting on the real
+  // reply, or playing the real reply) so it can bail out cleanly instead
+  // of racing the new turn with a stale one.
+  private turnId: number = 0;
+  // Set right before each interruptible playback call, cleared right
+  // after - handleWakeWord() calls .abort() on this when a wake word
+  // fires mid-playback, which is what actually stops the audio (see
+  // playWavBuffer's AbortSignal support).
+  private currentPlaybackAbort: AbortController | null = null;
   // Per-turn VAD state (see END_OF_TURN_SILENCE_MS / computeRmsEnergy
   // above) - reset in handleWakeWord() at the start of each turn.
   private turnSilenceMs: number = 0;
@@ -391,7 +417,23 @@ export class VoiceInterface {
    * Handle wake word detection
    */
   private async handleWakeWord(event: WakeWordEvent) {
-    console.log(`\n✨ Wake word detected! Starting conversation...`);
+    // [ADDED 2026-09-02] Real barge-in: if this fired while JARVIS was
+    // mid-speech, it's an interruption, not a fresh idle-to-active
+    // transition - see isSpeaking's own field comment for the full
+    // design. Aborting the in-flight playback here is what makes
+    // playInterruptible()'s await unblock (it rejects with
+    // PlaybackInterruptedError, which handleUserSpeech() treats as
+    // non-fatal) instead of this function racing it - everything below
+    // this point is exactly the same "start listening for what the user
+    // wants to say" logic a cold wake word already needed, so a
+    // barge-in transitions straight into it, no separate code path.
+    const wasInterruption = this.isSpeaking;
+    if (wasInterruption) {
+      console.log(`\n⏹️  Interrupted mid-speech - stopping and listening now.`);
+      this.currentPlaybackAbort?.abort();
+    } else {
+      console.log(`\n✨ Wake word detected! Starting conversation...`);
+    }
 
     // 2026-08-31: explicit stop, not just relying on context.isActive to
     // gate future processMicChunk() calls - see wake-word-detector.ts's
@@ -403,6 +445,7 @@ export class VoiceInterface {
       await this.wakeWordDetector.stopListening();
     }
 
+    this.turnId++;
     this.context.isActive = true;
     this.context.lastWakeWordTime = new Date();
     this.turnSilenceMs = 0;
@@ -445,7 +488,21 @@ export class VoiceInterface {
    * mic-capture.ts for where the chunks actually come from.
    */
   async processMicChunk(chunk: Buffer): Promise<void> {
-    if (!this.isRunning || this.isSpeaking) return;
+    if (!this.isRunning) return;
+
+    // [ADDED 2026-09-02] Real barge-in: chunks arriving while JARVIS is
+    // speaking used to be dropped entirely. Now routed specifically to
+    // the wake-word detector (only listening if playInterruptible()
+    // re-armed it) - see isSpeaking's own field comment for why this is
+    // scoped to the wake word, not general speech/VAD. A hit here fires
+    // the same "wake-word-detected" event a cold wake word does,
+    // handled by handleWakeWord()'s own interruption branch.
+    if (this.isSpeaking) {
+      if (this.wakeWordDetector) {
+        await this.wakeWordDetector.processAudioChunk(chunk);
+      }
+      return;
+    }
 
     const energy = computeRmsEnergy(chunk);
 
@@ -539,33 +596,79 @@ export class VoiceInterface {
   }
 
   /**
+   * [ADDED 2026-09-02] Plays audio the same way playWavBuffer always did
+   * (blocks until done, sets isSpeaking), but re-arms the wake-word
+   * detector first so a fresh "Jarvis" during playback can interrupt it -
+   * see isSpeaking's own field comment for the full design. Returns
+   * normally on either a clean finish OR a real interruption (both are
+   * "not an error" from the caller's point of view - handleUserSpeech()
+   * tells them apart via turnId, not via this method's return value,
+   * since handleWakeWord() has already fully taken over by the time this
+   * returns from an interruption). A genuine playback failure (bad
+   * device, crashed COM object) still throws, same as before.
+   */
+  private async playInterruptible(audio: Buffer): Promise<void> {
+    this.isSpeaking = true;
+    const controller = new AbortController();
+    this.currentPlaybackAbort = controller;
+    try {
+      await this.wakeWordDetector?.startListening();
+    } catch (err) {
+      console.log(
+        `   ⚠️  Could not arm barge-in listening for this reply (non-fatal, playback continues without it): ${err instanceof Error ? err.message : err}`
+      );
+    }
+    try {
+      await playWavBuffer(audio, undefined, controller.signal);
+    } catch (err) {
+      if (err instanceof PlaybackInterruptedError) {
+        return; // real interruption - handleWakeWord() already started the new turn
+      }
+      throw err;
+    } finally {
+      this.isSpeaking = false;
+      this.currentPlaybackAbort = null;
+    }
+  }
+
+  /**
    * Handle user speech recognition
    */
   private async handleUserSpeech(result: RecognitionResult) {
     console.log(`\n👤 User said: "${result.text}"`);
     this.emit("user-speech-recognized", result);
+    // Captured once, up front - see turnId's own field comment. Every
+    // "did a barge-in happen while I was mid-flight?" check below
+    // compares against this snapshot.
+    const myTurnId = this.turnId;
 
     // Real "thinking" acknowledgment (2026-08-31) - see fillerAudio's own
     // comment above for the full story. Played and awaited BEFORE the
     // slow respondToText() call below, not overlapping it - this stays
     // within the existing sequential LISTEN -> THINK -> SPEAK -> WAIT
-    // design (true full-duplex is still deliberately unbuilt, per the
-    // master doc); it just adds one more real, short SPEAK step ahead of
-    // the slow one instead of dead air. Best-effort: a filler synthesis/
+    // design; it just adds one more real, short SPEAK step ahead of the
+    // slow one instead of dead air. Best-effort: a filler synthesis/
     // playback failure is logged but never blocks the real response.
     const filler = await this.ensureFillerAudio();
     if (filler) {
-      this.isSpeaking = true;
       try {
-        await playWavBuffer(filler.audio);
+        await this.playInterruptible(filler.audio);
       } catch (err) {
         console.log(`   ⚠️  Filler playback failed (non-fatal): ${err instanceof Error ? err.message : err}`);
-      } finally {
-        this.isSpeaking = false;
       }
+      // A barge-in during the filler already started a whole new turn
+      // (handleWakeWord() ran, turnId moved on) - stop here rather than
+      // generate/speak a reply to a question that's no longer current.
+      if (this.turnId !== myTurnId) return;
     }
 
     const { response, audio } = await this.respondToText(result.text);
+    // The "thinking" gap itself (the real LLM/app-control/TTS-synthesis
+    // call above) isn't currently interruptible - JARVIS isn't speaking
+    // during it, so there's nothing playing to barge in on; a wake word
+    // said during this gap is handled as an ordinary new turn once this
+    // one's stale response is discarded here, not as a special case.
+    if (this.turnId !== myTurnId) return;
 
     if (audio) {
       const peakAmplitude = computeWavPeakAmplitude(audio.audio);
@@ -576,20 +679,19 @@ export class VoiceInterface {
             ? `${peakAmplitude.toFixed(4)} - SUSPICIOUSLY QUIET, likely a dead/near-silent synthesis, not a playback-routing issue`
             : peakAmplitude.toFixed(4);
       console.log(`\n🔊 Response ready: ${audio.duration}ms, peak amplitude: ${peakDesc}`);
-      // Block on real playback, and drop mic input for its duration (see
-      // isSpeaking above) - both real fixes, not just bookkeeping: without
-      // the first, nothing anyone could ever actually hear was produced;
-      // without the second, JARVIS's own voice coming back through the
-      // mic could re-trigger the wake word or get transcribed as if the
-      // user had said it.
-      this.isSpeaking = true;
+      // Block on real playback (see playInterruptible's own comment for
+      // what makes this interruptible now, unlike a plain playWavBuffer
+      // call).
       try {
-        await playWavBuffer(audio.audio);
+        await this.playInterruptible(audio.audio);
       } catch (err) {
         console.log(`   ⚠️  Playback failed: ${err instanceof Error ? err.message : err}`);
-      } finally {
-        this.isSpeaking = false;
       }
+      // A barge-in mid-reply already started a whole new turn - don't
+      // also run this turn's own completion/resume-listening logic
+      // below, which would fight handleWakeWord()'s already-in-progress
+      // state for the new turn.
+      if (this.turnId !== myTurnId) return;
     }
 
     // Interaction complete

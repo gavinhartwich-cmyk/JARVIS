@@ -16,7 +16,26 @@
 
 import { spawn } from "node:child_process";
 
-export function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ stdout: string; stderr: string }> {
+/**
+ * [ADDED 2026-09-02] Thrown instead of the generic "killed by signal"
+ * error when the caller's own AbortSignal is what ended the process -
+ * lets a caller (see audio-player.ts's playWavBuffer) distinguish "I
+ * asked for this" (e.g. real barge-in, interrupting JARVIS's own
+ * playback) from a genuine failure/timeout, which need very different
+ * handling (silent/expected vs. logged as a real error).
+ */
+export class PowerShellAbortedError extends Error {
+  constructor() {
+    super("PowerShell process aborted by caller");
+    this.name = "PowerShellAbortedError";
+  }
+}
+
+export function runPowerShell(
+  script: string,
+  timeoutMs = 10_000,
+  signal?: AbortSignal
+): Promise<{ stdout: string; stderr: string }> {
   if (process.platform !== "win32") {
     return Promise.reject(
       new Error(
@@ -35,16 +54,34 @@ export function runPowerShell(script: string, timeoutMs = 10_000): Promise<{ std
     proc.stdout.on("data", (d) => (stdout += d.toString()));
     proc.stderr.on("data", (d) => (stderr += d.toString()));
     proc.on("error", reject);
-    proc.on("close", (code, signal) => {
+
+    // Real cancellation (2026-09-02, for barge-in playback) - killing the
+    // process is what actually stops audio mid-clip, since the PowerShell
+    // script owns the real MediaPlayer/SoundPlayer COM object; there's no
+    // separate "stop playback" message to send it, the process itself IS
+    // the playback.
+    let abortedByCaller = false;
+    if (signal) {
+      const onAbort = () => {
+        abortedByCaller = true;
+        proc.kill();
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    proc.on("close", (code, killSignal) => {
       if (code === 0) resolve({ stdout, stderr });
-      else {
+      else if (abortedByCaller) {
+        reject(new PowerShellAbortedError());
+      } else {
         // BUG FIX (2026-08-31): code is null when the process was killed
         // by a signal (e.g. this call's own timeoutMs firing) rather than
         // exiting on its own - a bare "PowerShell exited null:" told
         // Gavin nothing real about what happened. Report the signal too
         // so a real hang (killed by our own timeout) reads differently
         // from a real PowerShell error (nonzero exit code, real stderr).
-        const reason = signal ? `killed by signal ${signal} (likely timed out after ${timeoutMs}ms)` : `exited ${code}`;
+        const reason = killSignal ? `killed by signal ${killSignal} (likely timed out after ${timeoutMs}ms)` : `exited ${code}`;
         reject(new Error(`PowerShell ${reason}: ${stderr || stdout}`));
       }
     });
