@@ -6,6 +6,7 @@
  */
 
 import { windowsController } from "./windows-control";
+import { findElement } from "./ui-automation";
 import { authorizationEngine } from "../core/authorization";
 import type { IdentityResult } from "../core/identity";
 
@@ -337,13 +338,28 @@ export class ScreenControl {
           console.log(`      → Clicking at (${action.parameters.x}, ${action.parameters.y ?? 0})`);
           await windowsController.click(action.parameters.x, action.parameters.y ?? 0);
         } else if (action.target) {
-          // Clicking a named element (e.g. "the Save button") requires locating
-          // it on screen first — that's the Vision system's job, which isn't
-          // wired to this yet. Fail loudly instead of pretending.
-          throw new Error(
-            `Cannot click target "${action.target}" by name yet — element location needs the ` +
-              `Vision system, which isn't connected here. Use coordinates (x, y) instead for now.`
-          );
+          // [2026-09-02] Real click-by-name, replacing the previous
+          // unconditional throw here. Per Gavin: "screen control is
+          // supposed to be able to do things like click buttons etc just
+          // like you can instead of use api keys thats much clunkier."
+          // Vision-based location was tried and found genuinely unreliable
+          // (see ui-automation.ts's own header comment for the real test
+          // that proved it) - real element lookup instead uses Windows'
+          // own UI Automation accessibility API, which gives an exact
+          // bounding rectangle straight from the OS, no guessing. Searches
+          // the current real foreground window by default.
+          console.log(`      → Locating "${action.target}" via UI Automation...`);
+          const element = await findElement(action.target);
+          if (!element) {
+            throw new Error(
+              `Couldn't find a clickable "${action.target}" in the current window via Windows' accessibility ` +
+                `API - either the wording doesn't match its real on-screen label, or this app doesn't expose ` +
+                `that control to accessibility tools (common for custom-rendered UI, canvas-based content, or ` +
+                `some games). Use coordinates (x, y) instead if you know where it is.`
+            );
+          }
+          console.log(`      → Found "${element.name}" (${element.controlType}) at (${element.x}, ${element.y}) - clicking`);
+          await windowsController.click(element.x, element.y);
         }
         break;
 
@@ -441,12 +457,11 @@ export class ScreenControl {
   }
 
   /**
-   * Find and click (search for target, then click)
+   * Find and click (search for target, then click) - real as of 2026-09-02,
+   * via UI Automation (see executeAction()'s "click" case / ui-automation.ts).
    */
   async findAndClick(description: string, targetName: string, identity: IdentityResult): Promise<ControlResult> {
     const seq = this.buildSequence(description);
-    // Clicking by name (not coordinates) will throw until the Vision system
-    // is wired in to locate the target on screen first — see executeAction().
     this.click(seq, targetName);
     return this.executeSequence(seq, identity);
   }

@@ -475,6 +475,28 @@ export class Orchestrator {
       }
     }
 
+    // Click intent ("click the Save button", "press submit") - checked
+    // right alongside app-control above (same two-tier pattern, same
+    // ActionOutcome slot) since clicking a real UI element is a real
+    // action, not informational the way screen-vision is. Added
+    // 2026-09-02 per Gavin: "screen control is supposed to be able to do
+    // things like click buttons etc just like you can instead of use api
+    // keys thats much clunkier" - see ui-automation.ts for the real
+    // mechanism (Windows UI Automation, not vision-guessing).
+    let clickIntent = appControlIntent ? null : this.parseClickIntent(userUtterance);
+    if (!appControlIntent && !clickIntent) {
+      clickIntent = await this.classifyClickIntent(userUtterance);
+    }
+    if (clickIntent) {
+      console.log(`\n🖱️  Click intent detected: "${clickIntent.elementName}"`);
+      this.onActionStart?.();
+      try {
+        actionOutcome = await this.executeClickIntent(clickIntent.elementName);
+      } finally {
+        this.onActionEnd?.();
+      }
+    }
+
     // Screen-vision intent ("what's on my screen", "what's wrong with this
     // code") — same two-tier free-regex-then-LLM-classifier pattern as
     // app-control above, and deliberately skipped if an app-control intent
@@ -484,7 +506,7 @@ export class Orchestrator {
     // confirmed NOT to work before this — see screen-capture.ts's header
     // comment for the fake-data finding that blocked it.
     let visionContext: string | undefined;
-    if (!appControlIntent) {
+    if (!appControlIntent && !clickIntent) {
       // Video intent checked first: a real, resolvable video file path
       // named in the utterance is a stronger, more specific signal than
       // generic screen phrasing, and the two are mutually exclusive in
@@ -760,6 +782,105 @@ export class Orchestrator {
         intent.action === "open"
           ? await screenControl.openApp(intent.appName, identity)
           : await screenControl.closeApp(intent.appName, identity);
+      return {
+        description,
+        success: result.success,
+        detail: result.success ? (result.output ?? "done") : (result.error ?? "Unknown error"),
+      };
+    } catch (error) {
+      return {
+        description,
+        success: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Free, instant, zero-LLM-cost regex tier for explicit click phrasing —
+   * same lazy-capture reasoning as parseAppControlIntent()'s openMatch
+   * above (prefer the shortest element name, let trailing filler words
+   * like "button"/"please" fall through to the filler group instead of
+   * being swallowed into the name).
+   */
+  private parseClickIntent(utterance: string): { elementName: string } | null {
+    const text = utterance.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+    const match = text.match(
+      /^(?:can you\s+|could you\s+|would you\s+|please\s+)*(?:click|press|tap|hit)\s+(?:on\s+)?(?:the\s+)?([a-z0-9][\w\-]*(?:\s+[a-z0-9][\w\-]*){0,4}?)(?:\s+(?:button|for me|please|now))*[.!?]*$/i
+    );
+    return match?.[1] ? { elementName: match[1].trim() } : null;
+  }
+
+  /**
+   * LLM fallback for indirect click phrasing ("go ahead and save that",
+   * "submit the form", "let's cancel this") - same conservative-and-
+   * fail-safe shape as classifyAppControlIntent(): only fires for a
+   * SPECIFIC UI action, never for merely mentioning a button in passing.
+   */
+  private async classifyClickIntent(utterance: string): Promise<{ elementName: string } | null> {
+    const classifierPrompt =
+      "You are an intent classifier for JARVIS, a desktop voice assistant that can click real UI buttons/" +
+      "controls in the currently focused window. Given what the user just said, determine whether they're " +
+      "asking to click/press/activate a SPECIFIC on-screen UI element - in any phrasing, direct (\"click " +
+      "submit\") or indirect (\"go ahead and save that\", \"let's cancel this\"). Respond with ONLY a single " +
+      "raw JSON object, no other text, no markdown code fences, matching exactly this shape:\n" +
+      '{"isClick": boolean, "elementName": string | null}\n\n' +
+      "Rules:\n" +
+      "- isClick is true ONLY if a specific UI action is being requested right now - not for opening/closing " +
+      'a whole application (that\'s a different system), and not for merely mentioning a button ("the save ' +
+      'button is right there" is NOT a request).\n' +
+      '- elementName should be the real, likely on-screen label of the control, normalized (e.g. "save", ' +
+      '"submit", "cancel", "ok") - no extra words.\n' +
+      "- If the utterance isn't about clicking a UI element, isClick is false and elementName is null.\n\n" +
+      "Examples:\n" +
+      '"click submit" -> {"isClick": true, "elementName": "submit"}\n' +
+      '"go ahead and save that" -> {"isClick": true, "elementName": "save"}\n' +
+      '"let\'s cancel this" -> {"isClick": true, "elementName": "cancel"}\n' +
+      '"open Spotify" -> {"isClick": false, "elementName": null}\n' +
+      '"the save button is right there" -> {"isClick": false, "elementName": null}\n' +
+      '"how\'s the weather" -> {"isClick": false, "elementName": null}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        { temperature: 0, maxTokens: 100, responseFormat: { type: "json_object" } }
+      );
+
+      const jsonText = this.extractJsonObject(response.content);
+      if (!jsonText) return null;
+
+      const parsed = JSON.parse(jsonText) as { isClick?: boolean; elementName?: string | null };
+      if (parsed.isClick === true && typeof parsed.elementName === "string" && parsed.elementName.trim().length > 0) {
+        return { elementName: parsed.elementName.trim() };
+      }
+      return null;
+    } catch (error) {
+      console.error(
+        "⚠ Click intent classification failed (falling back to plain conversation):",
+        error instanceof Error ? error.message : error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Actually clicks a real UI element via the same real, authorized
+   * `ScreenControl` path as executeAppControlIntent() above - real UI
+   * Automation lookup (see ui-automation.ts), then a real Win32 click at
+   * its exact real bounding-rect center. Never throws: any failure
+   * (element not found, authorization denied) comes back as
+   * `{ success: false, detail: ... }` so the conversational reply can
+   * report it honestly instead of claiming a click that never happened.
+   */
+  private async executeClickIntent(elementName: string): Promise<ActionOutcome> {
+    const description = `Click "${elementName}"`;
+    try {
+      const identity = await this.getIdentity();
+      const screenControl = new ScreenControl();
+      const result = await screenControl.findAndClick(description, elementName, identity);
       return {
         description,
         success: result.success,

@@ -94,17 +94,80 @@ export function psEscape(s: string): string {
 }
 
 // Win32 API bindings, loaded once per PowerShell invocation via Add-Type.
-const WIN32_TYPE = `
+//
+// [2026-09-02] Rewritten from the legacy SetCursorPos + mouse_event combo
+// to SendInput, for two real, independently-confirmed reasons, not a
+// stylistic preference:
+//
+// 1. SendInput is Microsoft's own documented replacement for mouse_event
+//    ("has been superseded by SendInput") and, unlike a separate
+//    SetCursorPos + relative mouse_event call, moves and clicks in one
+//    atomic injected event using SCREEN-SIZE-NORMALIZED absolute
+//    coordinates (0-65535, via GetSystemMetrics) - immune to a real class
+//    of bug the old code had no defense against at all: any DPI/display-
+//    scaling mismatch between the calling process and the real screen
+//    would have silently sent the click to the wrong physical pixel.
+//
+// 2. A real, previously-undisclosed bug found live while building
+//    click-by-element-name (ui-automation.ts): the OLD code never checked
+//    whether SetCursorPos/mouse_event actually succeeded - both are
+//    void/best-effort-looking Win32 calls, and a real live test in this
+//    session's own tool-execution context (rebuilding a small isolated
+//    repro, not guessed) found SetCursorPos returning FALSE and
+//    SendInput returning 0 events sent, with GetLastWin32Error()
+//    reporting ERROR_ACCESS_DENIED (5) - the OS refused to inject
+//    synthetic input at all in that context, yet the OLD click()
+//    reported complete, silent success regardless, because nothing ever
+//    checked. That's the same category of bug this whole codebase treats
+//    as unacceptable elsewhere (a hardcoded confidence fallback, a
+//    fabricated vision description) - a real action silently claiming to
+//    have happened when it didn't. Fixed here at the root: SendInput's
+//    real return value (events actually injected) is checked, and a
+//    short-of-expected count throws a real, honest error surfacing the
+//    real Win32 error code, instead of returning cleanly regardless.
+//
+// Disclosed, NOT resolved by this fix: WHETHER input injection is denied
+// this same way when JARVIS's real process runs under Gavin's own
+// interactive Windows login session (a normal user desktop process, not
+// this session's own restricted tool-execution context) is genuinely
+// unverified from here - this is the same real category of environment
+// limitation already found for screen capture (blank screenshots) and
+// camera capture (black frames): this fix guarantees a real, loud error
+// instead of a silent false success either way, which is the actual
+// point - previously there was no way to even tell the two cases apart.
+const WIN32_INPUT_TYPE = `
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class Win32Control {
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+public class Win32Input {
+  [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct INPUT { public uint type; public MOUSEINPUT mi; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
 }
 "@
+function New-JarvisMouseInput([uint32]$flags, [int]$dx = 0, [int]$dy = 0, [uint32]$data = 0) {
+  $mi = New-Object Win32Input+MOUSEINPUT
+  $mi.dx = $dx; $mi.dy = $dy; $mi.mouseData = $data; $mi.dwFlags = $flags; $mi.time = 0; $mi.dwExtraInfo = [IntPtr]::Zero
+  $inp = New-Object Win32Input+INPUT
+  $inp.type = 0
+  $inp.mi = $mi
+  return $inp
+}
+function Send-JarvisInput([Win32Input+INPUT[]]$inputs) {
+  $sent = [Win32Input]::SendInput($inputs.Length, $inputs, [System.Runtime.InteropServices.Marshal]::SizeOf([type][Win32Input+INPUT]))
+  if ($sent -ne $inputs.Length) {
+    $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    Write-Error "SendInput injected only $sent of $($inputs.Length) real events (Win32 error $err) - the OS refused synthetic input, this process may lack interactive-desktop input permission"
+    exit 1
+  }
+}
 `;
 
+const MOUSEEVENTF_MOVE = 0x0001;
+const MOUSEEVENTF_ABSOLUTE = 0x8000;
 const MOUSEEVENTF_LEFTDOWN = 0x0002;
 const MOUSEEVENTF_LEFTUP = 0x0004;
 const MOUSEEVENTF_WHEEL = 0x0800;
@@ -112,12 +175,18 @@ const MOUSEEVENTF_WHEEL = 0x0800;
 export class WindowsController {
   async click(x: number, y: number): Promise<void> {
     await runPowerShell(`
-${WIN32_TYPE}
-[Win32Control]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})
+${WIN32_INPUT_TYPE}
+$screenW = [Win32Input]::GetSystemMetrics(0)
+$screenH = [Win32Input]::GetSystemMetrics(1)
+$normX = [int]([Math]::Round(${Math.round(x)} * 65535 / $screenW))
+$normY = [int]([Math]::Round(${Math.round(y)} * 65535 / $screenH))
+Send-JarvisInput @(
+  (New-JarvisMouseInput -flags (${MOUSEEVENTF_MOVE} -bor ${MOUSEEVENTF_ABSOLUTE}) -dx $normX -dy $normY)
+)
 Start-Sleep -Milliseconds 30
-[Win32Control]::mouse_event(${MOUSEEVENTF_LEFTDOWN}, 0, 0, 0, 0)
+Send-JarvisInput @((New-JarvisMouseInput -flags ${MOUSEEVENTF_LEFTDOWN}))
 Start-Sleep -Milliseconds 30
-[Win32Control]::mouse_event(${MOUSEEVENTF_LEFTUP}, 0, 0, 0, 0)
+Send-JarvisInput @((New-JarvisMouseInput -flags ${MOUSEEVENTF_LEFTUP}))
 `);
   }
 
@@ -274,11 +343,17 @@ if (-not $activated) {
   }
 
   async scroll(amount: number): Promise<void> {
-    // amount > 0 scrolls up, < 0 scrolls down, following the mouse_event WHEEL_DELTA convention (120 per notch).
+    // amount > 0 scrolls up, < 0 scrolls down, following the WHEEL_DELTA convention (120 per notch) - unchanged by the SendInput rewrite above.
     const delta = Math.round(amount) * 120;
+    // mouseData for a wheel event is a signed delta but the struct field
+    // (and New-JarvisMouseInput's -data param) is uint32 - converted to
+    // its real unsigned 32-bit representation here (JS's >>> 0) so
+    // PowerShell never has to do a signed->unsigned cast itself (which
+    // throws on a negative literal assigned to a uint32-typed parameter).
+    const unsignedDelta = delta >>> 0;
     await runPowerShell(`
-${WIN32_TYPE}
-[Win32Control]::mouse_event(${MOUSEEVENTF_WHEEL}, 0, 0, ${delta}, 0)
+${WIN32_INPUT_TYPE}
+Send-JarvisInput @((New-JarvisMouseInput -flags ${MOUSEEVENTF_WHEEL} -data ${unsignedDelta}))
 `);
   }
 }
