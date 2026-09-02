@@ -157,7 +157,8 @@ export class ConversationalIntelligence {
    */
   async processWithStreaming(
     utterance: string,
-    actionOutcome?: ActionOutcome
+    actionOutcome?: ActionOutcome,
+    visionContext?: string
   ): Promise<StreamingResponse> {
     // Phase 1: Conversation Engine preprocessing
     const { intention, reasoningPath } = await this.conversationEngine.processUserUtterance(
@@ -169,13 +170,14 @@ export class ConversationalIntelligence {
     const model = this.modelRouter.selectModel(intention, reasoningPath, context);
 
     // Phase 3: Assemble complete prompt with memory
-    const prompt = this.assemblePrompt(utterance, intention, context, actionOutcome);
+    const prompt = this.assemblePrompt(utterance, intention, context, actionOutcome, visionContext);
 
     // Phase 4: Check if we can use cached response
-    // Never serve a cached reply when a real action was just taken — a
-    // stale cached line has no idea Spotify just opened (or failed to),
-    // and would contradict what actually happened.
-    if (!actionOutcome && this.modelRouter.shouldUseCache(context)) {
+    // Never serve a cached reply when a real action was just taken, or a
+    // real screen was just looked at — a stale cached line has no idea
+    // Spotify just opened (or failed to) or what's actually on screen
+    // right now, and would contradict what actually happened.
+    if (!actionOutcome && !visionContext && this.modelRouter.shouldUseCache(context)) {
       const cached = this.checkMemoryCache(utterance);
       if (cached) {
         return this.createStreamFromText(cached, "memory");
@@ -200,7 +202,8 @@ export class ConversationalIntelligence {
     utterance: string,
     intention: string,
     context: ConversationContext,
-    actionOutcome?: ActionOutcome
+    actionOutcome?: ActionOutcome,
+    visionContext?: string
   ): string {
     const components: string[] = [];
 
@@ -241,6 +244,24 @@ export class ConversationalIntelligence {
             `recognized name), mention that naturally.`
         );
       }
+    }
+
+    // Real, live screen-vision result, if the user's utterance triggered
+    // one (see orchestrator.ts's parseScreenVisionIntent()/
+    // classifyScreenVisionIntent()) — a real screenshot was just taken and
+    // sent through the real Ollama/moondream vision provider before this
+    // reply was generated. Mirrors the actionOutcome pattern above: ground
+    // the reply in what JARVIS genuinely just saw instead of letting the
+    // model guess or claim it can't see the screen.
+    if (visionContext) {
+      components.push(
+        `\nYou just looked at the user's screen (real screenshot, analyzed just now) to help answer this. ` +
+          `What you saw:\n${visionContext}`
+      );
+      components.push(
+        `Answer using what you actually saw above. Speak naturally as if you just glanced at the screen — don't ` +
+          `mention "screenshot" or "vision provider" mechanics, just answer like you can see it, because you can.`
+      );
     }
 
     // Response-shape preferences - [UPDATE 2026-08-31] dropped the

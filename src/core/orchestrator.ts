@@ -13,6 +13,9 @@ import { IntelligentModelRouter } from "./model-router";
 import { identityEngine, type IdentityResult } from "./identity";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import { ScreenControl } from "../phase3/screen-control";
+import { ScreenCapture } from "../phase3/screen-capture";
+import { VisionSystem } from "../phase3/vision-system";
+import { OllamaVisionProvider } from "../phase3/ollama-vision-provider";
 import type { ModelProvider } from "../models/types";
 
 /**
@@ -68,6 +71,30 @@ export class Orchestrator {
   // classification task, not a conversational reply, so it deliberately
   // doesn't go through IntelligentModelRouter's reply-tiering.
   private modelProvider: ModelProvider;
+
+  // Real screen capture + vision, lazily constructed on first use (both
+  // are cheap to construct — the cost is in the actual capture/analyze
+  // calls, which only happen when a screen-vision intent is genuinely
+  // detected below). Shared VisionSystem instance so the OllamaVisionProvider
+  // connection only happens once per process, same pattern as
+  // cachedIdentity below.
+  private screenCapture?: ScreenCapture;
+  private visionSystem?: VisionSystem;
+
+  private getVisionSystem(): VisionSystem {
+    if (!this.visionSystem) {
+      this.visionSystem = new VisionSystem();
+      this.visionSystem.setProvider(new OllamaVisionProvider());
+    }
+    return this.visionSystem;
+  }
+
+  private getScreenCapture(): ScreenCapture {
+    if (!this.screenCapture) {
+      this.screenCapture = new ScreenCapture();
+    }
+    return this.screenCapture;
+  }
 
   // Resolved once per process, not per tool call — a real PIN-elevation
   // flow would refresh this; for now every tool call in a run shares the
@@ -425,12 +452,40 @@ export class Orchestrator {
       }
     }
 
+    // Screen-vision intent ("what's on my screen", "what's wrong with this
+    // code") — same two-tier free-regex-then-LLM-classifier pattern as
+    // app-control above, and deliberately skipped if an app-control intent
+    // already matched (one utterance realistically means one or the
+    // other, and app-control already ran a real action this turn). Added
+    // 2026-09-02 per Gavin's own Stage 4 example scenario, which was
+    // confirmed NOT to work before this — see screen-capture.ts's header
+    // comment for the fake-data finding that blocked it.
+    let visionContext: string | undefined;
+    if (!appControlIntent) {
+      let visionQuestion = this.parseScreenVisionIntent(userUtterance);
+      if (!visionQuestion) {
+        visionQuestion = await this.classifyScreenVisionIntent(userUtterance);
+      }
+      if (visionQuestion) {
+        console.log(`\n👁️  Screen-vision intent detected: "${visionQuestion}"`);
+        this.onActionStart?.();
+        try {
+          visionContext = await this.executeScreenVisionIntent(visionQuestion);
+        } finally {
+          this.onActionEnd?.();
+        }
+      }
+    }
+
     // Use conversational intelligence to process utterance, with the real
     // action outcome (if any) so the reply can confirm/deny it truthfully
-    // and proactively, instead of a canned template per app.
+    // and proactively, instead of a canned template per app — and the real
+    // screen-vision result (if any), so JARVIS answers from what it
+    // genuinely just saw instead of guessing.
     const stream = await this.conversationalIntelligence.processWithStreaming(
       userUtterance,
-      actionOutcome
+      actionOutcome,
+      visionContext
     );
 
     // In production: stream tokens to TTS
@@ -646,6 +701,138 @@ export class Orchestrator {
         success: false,
         detail: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * Free, instant, zero-LLM-cost regex tier for explicit screen-vision
+   * phrasing — anything that directly names the screen/monitor/display as
+   * what should be looked at. Deliberately narrow (same reasoning as
+   * parseAppControlIntent() above): a false negative here just falls
+   * through to classifyScreenVisionIntent() below, not to silence, so
+   * there's no cost to being conservative — a false POSITIVE would trigger
+   * a real screenshot + vision call for something unrelated, which is the
+   * side to guard against.
+   */
+  private parseScreenVisionIntent(utterance: string): string | null {
+    const text = utterance.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+    if (/\b(screen|monitor|display)\b/i.test(text) && /\?|^(what|can|is|are|do|does|look|check|read|tell)/i.test(text)) {
+      return text;
+    }
+    return null;
+  }
+
+  /**
+   * LLM fallback for indirect screen-vision phrasing — things that imply
+   * "look at what's visible right now" without ever saying the word
+   * "screen" ("what's wrong with this code", "can you check this error",
+   * "read this for me", "is this centered right"). Same fail-safe shape as
+   * classifyAppControlIntent(): any failure just falls through to plain
+   * conversation, never blocks a reply.
+   */
+  private async classifyScreenVisionIntent(utterance: string): Promise<string | null> {
+    const classifierPrompt =
+      "You are an intent classifier for JARVIS, a desktop voice assistant that can take a real screenshot and " +
+      "look at it when needed. Given what the user just said, determine whether answering requires JARVIS to " +
+      "actually look at the user's screen right now — including indirect references to something currently " +
+      "visible on screen that was never explicitly called \"the screen\" (e.g. \"what's wrong with this code\", " +
+      "\"can you check this error\", \"read this for me\", \"is this centered right\", \"what does this say\"). " +
+      "Respond with ONLY a single raw JSON object, no other text, no markdown code fences, matching exactly this " +
+      'shape:\n{"needsScreen": boolean}\n\n' +
+      "Rules:\n" +
+      "- needsScreen is true ONLY if answering genuinely requires seeing what's currently on screen right now — " +
+      "not for general knowledge questions, not for app-control requests (\"open Spotify\"), not for anything " +
+      "answerable from conversation alone.\n" +
+      '- Vague deixis referring to something visible ("this", "that error", "this code") strongly implies ' +
+      "needsScreen: true, since there's no other way to know what \"this\" refers to.\n\n" +
+      "Examples:\n" +
+      '"what\'s wrong with this code" -> {"needsScreen": true}\n' +
+      '"what\'s on my screen" -> {"needsScreen": true}\n' +
+      '"can you check this error message" -> {"needsScreen": true}\n' +
+      '"is this centered right" -> {"needsScreen": true}\n' +
+      '"open Spotify" -> {"needsScreen": false}\n' +
+      '"how\'s the weather" -> {"needsScreen": false}\n' +
+      '"what\'s the capital of France" -> {"needsScreen": false}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        {
+          temperature: 0,
+          maxTokens: 50,
+          responseFormat: { type: "json_object" },
+        }
+      );
+
+      const jsonText = this.extractJsonObject(response.content);
+      if (!jsonText) return null;
+
+      const parsed = JSON.parse(jsonText) as { needsScreen?: boolean };
+      return parsed.needsScreen === true ? utterance : null;
+    } catch (error) {
+      console.error(
+        "⚠ Screen-vision intent classification failed (falling back to plain conversation):",
+        error instanceof Error ? error.message : error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Actually captures a real screenshot (screen-capture.ts, real since the
+   * 2026-09-02 rewrite — see its header comment) and runs it through the
+   * real, connected vision provider to get a real description, plus real
+   * active-app/open-window data, for the conversational LLM to reason over.
+   *
+   * Real bug found and fixed live (2026-09-02): this originally called
+   * `visionSystem.answerVisualQuestion(screenshot, question)` — passing the
+   * user's raw phrasing straight to moondream. Confirmed directly against
+   * Ollama's raw API: moondream reliably returns an EMPTY response
+   * (eval_count: 1) for first-person/deictic phrasings like "what's on my
+   * screen right now" or "is this centered right", regardless of image
+   * content (reproduced against both a blank test image and a real
+   * generated shapes image) — the exact same "small model chokes on
+   * certain phrasing" failure mode already found and fixed once before in
+   * this file, for detectObjects(). A neutral "Describe this image in
+   * detail..." prompt (analyzeImage()'s prompt) reliably returns a real,
+   * non-empty answer instead.
+   *
+   * Fix: moondream's real job here is describing what's actually on
+   * screen (its confirmed strength) — the conversational LLM (a stronger
+   * general model, already receiving the user's exact question via
+   * assemblePrompt()) does the actual reasoning about what that means for
+   * their specific question. Same separation of concerns already used
+   * elsewhere: a small local model supplies real perception, a stronger
+   * model does the reasoning on top of it.
+   *
+   * Never throws: any failure (PowerShell error, vision provider timeout,
+   * Ollama not running) comes back as a clear, honest string so the
+   * conversational reply can report the real failure instead of silently
+   * pretending it can see the screen.
+   */
+  private async executeScreenVisionIntent(question: string): Promise<string> {
+    try {
+      const screenshot = await this.getScreenCapture().captureScreen();
+      const analysis = await this.getVisionSystem().analyzeImage(screenshot.data);
+      const windows = await this.getScreenCapture().getOpenWindows();
+
+      const parts = [`Screen description: ${analysis.text}`];
+      parts.push(
+        `Active application: ${screenshot.activeApplication ?? "unknown"} — "${screenshot.activeWindow ?? "unknown"}"`
+      );
+      if (windows.length > 0) {
+        parts.push(
+          `Other open windows: ${windows.map((w) => `${w.processName} ("${w.title}")`).join(", ")}`
+        );
+      }
+      return parts.join("\n");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("⚠ Screen-vision capture/analysis failed:", detail);
+      return `(Screen vision failed: ${detail} — tell the user honestly that you couldn't look at the screen just now, don't guess at what's there.)`;
     }
   }
 
