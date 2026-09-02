@@ -35,3 +35,11 @@ __pycache__/
 # above: built locally via setup-native-hud.ps1, not committed.
 native-hud/bin/
 native-hud/obj/
+
+# [ADDED 2026-09-02] Real runtime state from start-jarvis.ps1/stop-jarvis.ps1
+# (background/auto-run mode) - a live PID file and a graceful-shutdown flag
+# file cli.ts's `listen` command polls for (see its own comment). Neither
+# is source code and both are meaningless outside a live run.
+.jarvis.pid
+.jarvis-stop
+logs/

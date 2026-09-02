@@ -1,7 +1,9 @@
 using System;
 using System.Drawing;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -46,6 +48,32 @@ namespace JarvisHud
         private double _animScaleFrom = 1.0;
         private double _animScaleTo = 1.0;
         private DateTime _animStart;
+
+        // --- Pop-up-on-activity visibility ---
+        // [ADDED 2026-09-02] Per Gavin: "Jarvis is still a test when he
+        // should be running and pop up when asked not need to run a
+        // command when I want to talk to him." Real behavior change, not
+        // cosmetic: previously this window was visible continuously from
+        // the moment 'listen' started (showing the idle-state animation
+        // the whole time) - now it starts genuinely hidden and only
+        // appears once hud-server.ts's real /state moves off "idle"
+        // (wake word detected, thinking, acting, speaking), hiding again
+        // after a short real linger once it's back to idle. The WebView2
+        // instance and its page stay alive and warmed up the entire time,
+        // hidden or not - this only toggles on-screen visibility, it
+        // doesn't tear down/recreate anything, so there's no re-init
+        // latency when it pops back up.
+        private static readonly HttpClient _stateHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        private DispatcherTimer? _stateTimer;
+        private string _lastState = "idle";
+        private bool _visible = false;
+        private DateTime _lastNonIdleUtc = DateTime.UtcNow;
+        // Deliberate lag on the way DOWN only (not on the way up) - the
+        // "pop up" itself is immediate the moment state leaves idle, but
+        // hiding waits a few real seconds after returning to idle so it
+        // doesn't feel like it vanishes mid-beat right as a reply
+        // finishes speaking.
+        private static readonly TimeSpan HideDelay = TimeSpan.FromSeconds(3);
 
         public MainWindow(string url)
         {
@@ -98,6 +126,57 @@ namespace JarvisHud
             // "[hud-reposition]" lines later means "nothing ever needed
             // to move," not "the feature never started."
             Console.WriteLine("[hud-reposition] Screen-awareness repositioning active (polling every 500ms).");
+
+            _stateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+            _stateTimer.Tick += StateTimer_Tick;
+            _stateTimer.Start();
+            Console.WriteLine("[hud-visibility] Pop-up-on-activity active (hidden at idle, appears on real state change, polling every 400ms).");
+        }
+
+        /// <summary>
+        /// Real poll of hud-server.ts's own /state endpoint (the same one
+        /// hud.html's JS already polls to animate) - a second, independent
+        /// consumer of it, not a new mechanism. A transient poll failure
+        /// (server not up yet, momentary hiccup) is treated as "no change"
+        /// rather than forcing a hide/show flicker - the next tick tries
+        /// again in well under half a second.
+        /// </summary>
+        private async void StateTimer_Tick(object? sender, EventArgs e)
+        {
+            string state;
+            try
+            {
+                var json = await _stateHttp.GetStringAsync($"{_url.TrimEnd('/')}/state");
+                using var doc = JsonDocument.Parse(json);
+                state = doc.RootElement.GetProperty("state").GetString() ?? "idle";
+            }
+            catch
+            {
+                return;
+            }
+
+            if (state != _lastState)
+            {
+                Console.WriteLine($"[hud-visibility] state: {_lastState} -> {state}");
+                _lastState = state;
+            }
+
+            if (state != "idle")
+            {
+                _lastNonIdleUtc = DateTime.UtcNow;
+                if (!_visible)
+                {
+                    Console.WriteLine("[hud-visibility] showing");
+                    Show();
+                    _visible = true;
+                }
+            }
+            else if (_visible && (DateTime.UtcNow - _lastNonIdleUtc) >= HideDelay)
+            {
+                Console.WriteLine("[hud-visibility] hiding (idle)");
+                Hide();
+                _visible = false;
+            }
         }
 
         private void Window_KeyDown(object sender, KeyEventArgs e)

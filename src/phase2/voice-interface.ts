@@ -33,6 +33,25 @@ import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 // noise never reads as "silent").
 const END_OF_TURN_SILENCE_MS = 3000;
 
+// [ADDED 2026-09-02] Real, live-discovered bug, found while testing
+// background/auto-run mode (start-jarvis.ps1): hitSilenceCutoff above
+// requires turnHasSpeech to be true FIRST - correct for a normal turn,
+// but if the wake word fires and NOTHING crosses the speech-energy
+// threshold afterward (a false trigger on ambient noise, or Gavin just
+// says "Jarvis" with no follow-up), turnHasSpeech never flips true and
+// turnSilenceMs climbs forever with no cutoff, all the way to the full
+// maxTurnDuration backstop (5 minutes by default) - confirmed live in a
+// real background run's log, silence counting past 20+ seconds with
+// "speech detected this turn: false" the whole way. That's a real problem
+// specifically for the new pop-up-on-activity HUD behavior: the HUD would
+// stay popped up (and the mic pipeline stuck mid-turn) for up to 5 real
+// minutes after a single false wake-word trigger, not a quick recovery.
+// A much shorter, separate timeout for this specific "never actually
+// heard anything" case - handleUserSpeech() checks turnEndedWithNoSpeech
+// (set when this fires) and skips generating a spoken reply entirely,
+// since there's nothing real to respond to.
+const NO_SPEECH_TIMEOUT_MS = 8000;
+
 // [UPDATE 2026-08-30] A fixed RMS number here turned out not to
 // survive contact with a real mic gain change: mic_capture.py's
 // wake-word-triggered gain fix (audio.micGain) pushed real ambient
@@ -221,6 +240,12 @@ export class VoiceInterface {
   // handleWakeWord() - so the log/stop only fires once per turn, exactly
   // as intended, regardless of how long the reply takes to generate.
   private turnEndingTriggered: boolean = false;
+  // Set alongside turnEndingTriggered when the turn ends via
+  // NO_SPEECH_TIMEOUT_MS (see its own comment above) rather than a normal
+  // post-speech silence cutoff - handleUserSpeech() reads this to skip
+  // generating a spoken reply to what was never real speech in the first
+  // place. Reset in handleWakeWord() with the rest of the per-turn state.
+  private turnEndedWithNoSpeech: boolean = false;
   // Rolling window of real energy readings taken while idle (see
   // IDLE_NOISE_WINDOW_CHUNKS above) - this is what handleWakeWord() reads
   // from to compute turnSpeechThreshold fresh for each turn, instead of
@@ -453,6 +478,7 @@ export class VoiceInterface {
     this.turnHasSpeech = false;
     this.turnStartedAt = Date.now();
     this.turnEndingTriggered = false;
+    this.turnEndedWithNoSpeech = false;
 
     // Real per-turn calibration (2026-08-30) - see IDLE_NOISE_WINDOW_CHUNKS
     // above for why this replaced a fixed SPEECH_RMS_THRESHOLD: whatever
@@ -554,11 +580,20 @@ export class VoiceInterface {
 
     const turnDurationMs = Date.now() - this.turnStartedAt;
     const hitSilenceCutoff = this.turnHasSpeech && this.turnSilenceMs >= END_OF_TURN_SILENCE_MS;
+    // See NO_SPEECH_TIMEOUT_MS's own comment above - a real, live-found
+    // bug: without this, a false wake-word trigger with no follow-up
+    // speech never hit hitSilenceCutoff (turnHasSpeech stays false) and
+    // the turn stayed open until the full 5-minute maxTurnDuration
+    // backstop instead.
+    const hitNoSpeechTimeout = !this.turnHasSpeech && this.turnSilenceMs >= NO_SPEECH_TIMEOUT_MS;
     const hitMaxDuration = turnDurationMs >= this.config.conversation.maxTurnDuration * 1000;
 
-    if ((hitSilenceCutoff || hitMaxDuration) && this.speechRecognizer && !this.turnEndingTriggered) {
+    if ((hitSilenceCutoff || hitNoSpeechTimeout || hitMaxDuration) && this.speechRecognizer && !this.turnEndingTriggered) {
       this.turnEndingTriggered = true;
-      console.log(`   ⏹️  ending turn (${hitSilenceCutoff ? "silence cutoff" : "max turn duration reached"})`);
+      this.turnEndedWithNoSpeech = hitNoSpeechTimeout;
+      console.log(
+        `   ⏹️  ending turn (${hitSilenceCutoff ? "silence cutoff" : hitNoSpeechTimeout ? "no speech detected after wake word" : "max turn duration reached"})`
+      );
       try {
         await this.speechRecognizer.stopStreaming();
       } catch {
@@ -643,6 +678,35 @@ export class VoiceInterface {
     // compares against this snapshot.
     const myTurnId = this.turnId;
 
+    // Real, live-found fix (2026-09-02) - see NO_SPEECH_TIMEOUT_MS's own
+    // comment: the turn ended because NOTHING was ever heard after the
+    // wake word (a false trigger, or Gavin just said "Jarvis" with no
+    // follow-up), not because of real speech followed by silence.
+    // Whatever `result.text` is here (Whisper transcribing near-silence
+    // often produces empty text, or occasionally a short hallucinated
+    // fragment) isn't a real utterance worth an LLM round-trip or a
+    // spoken reply to - skip straight to resuming listening, same as the
+    // "not directed at JARVIS" bailout below but without even running
+    // that classifier, since there's no real text to classify.
+    if (this.turnEndedWithNoSpeech) {
+      console.log(`   🤷 No speech detected after wake word - resuming listening without a reply`);
+      this.context.isActive = false;
+      // Real, related bug fixed alongside this one: without this,
+      // hud.setState("thinking") (fired above from "user-speech-recognized")
+      // would never get followed by anything that sets it back to "idle" -
+      // the HUD would stay stuck showing "thinking" indefinitely after
+      // every false-trigger turn, which defeats the entire point of
+      // pop-up-on-activity (see native-hud/'s own 2026-09-02 comment) -
+      // it would just stay permanently popped up after the first false
+      // trigger instead of hiding again. "interaction-complete" is the
+      // one event cli.ts already maps to hud.setState("idle").
+      this.emit("interaction-complete", { input: result.text, response: "" });
+      if (this.wakeWordDetector && this.isRunning) {
+        await this.wakeWordDetector.startListening();
+      }
+      return;
+    }
+
     // Real environmental-audio-awareness check (2026-09-02): the wake
     // word is deliberately tuned to fire on bare "Jarvis" anywhere in
     // speech (sensitivity 0.05, per Gavin), which is exactly what makes
@@ -663,6 +727,13 @@ export class VoiceInterface {
         console.log(`   🙉 Not directed at JARVIS - ignoring, resuming listening`);
         this.emit("speech-not-directed", result);
         this.context.isActive = false;
+        // Same real HUD-stuck-on-"thinking" bug fixed here as the
+        // no-speech-timeout bailout above - see its comment for the full
+        // reasoning. This bailout existed before that fix but had the
+        // same gap; closing both together since they're the same root
+        // cause (an early return with no event that maps back to
+        // hud.setState("idle")).
+        this.emit("interaction-complete", { input: result.text, response: "" });
         if (this.wakeWordDetector && this.isRunning) {
           await this.wakeWordDetector.startListening();
         }

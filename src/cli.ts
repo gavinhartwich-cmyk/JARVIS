@@ -25,7 +25,7 @@ import { runAllMonitors } from "./core/system-monitors";
 import { sendSms } from "./core/sms";
 import { sendEmail } from "./core/email-sender";
 import { runProactiveScheduler } from "./core/proactive-scheduler";
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -539,7 +539,7 @@ async function main() {
           };
           pipeStream(hudNativeProc.stdout as ReadableStream<Uint8Array> | null);
           pipeStream(hudNativeProc.stderr as ReadableStream<Uint8Array> | null);
-          console.log(`\n🖥️  Native HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
+          console.log(`\n🖥️  Native HUD process started (${hud.url}) - hidden until it's actually needed (wake word/thinking/acting/speaking), pops up on its own; closes automatically when 'listen' stops.`);
         } catch (err) {
           console.log(`\n⚠️  Could not launch the native HUD (${nativeHudExe}): ${err instanceof Error ? err.message : err}`);
           hudNativeProc = null;
@@ -624,10 +624,46 @@ async function main() {
             // (see the launch comment above for when that can happen).
           }
         }
+        try {
+          if (stopFilePath && existsSync(stopFilePath)) unlinkSync(stopFilePath);
+        } catch {
+          // Best-effort cleanup - a leftover stop-file just means the
+          // next start-jarvis.ps1 run clears it before launching anyway.
+        }
         process.exit(0);
       };
       process.on("SIGINT", shutdown);
       process.on("SIGTERM", shutdown);
+
+      // [ADDED 2026-09-02] Real graceful-stop mechanism for when this runs
+      // detached/hidden in the background (see start-jarvis.ps1/
+      // stop-jarvis.ps1) - per Gavin: "should be running... not need to
+      // run a command when I want to talk to him." A hidden, no-console
+      // background process on Windows genuinely can't be sent a real
+      // SIGINT/SIGTERM from another process the way `kill` does on POSIX
+      // (confirmed via research, not assumed - Windows has no equivalent
+      // cross-process signal-delivery API for a console-less process);
+      // Stop-Process from PowerShell only force-terminates, which would
+      // skip this exact shutdown() above and leak the mic/wake-word/
+      // Chatterbox/native-HUD child processes it exists to clean up.
+      // File-existence polling is a real, simple, reliable substitute:
+      // stop-jarvis.ps1 just touches this file, this loop notices within
+      // a second and runs the SAME real shutdown() everything else here
+      // already uses - no new cleanup path to keep in sync, no OS-signal
+      // uncertainty.
+      const stopFilePath = join(process.cwd(), ".jarvis-stop");
+      try {
+        if (existsSync(stopFilePath)) unlinkSync(stopFilePath); // clear any stale flag from a previous run
+      } catch {
+        // Non-fatal - worst case the stop-check below fires once
+        // immediately, which is still a correct (if surprising) shutdown.
+      }
+      const stopFileCheck = setInterval(() => {
+        if (existsSync(stopFilePath)) {
+          clearInterval(stopFileCheck);
+          shutdown();
+        }
+      }, 1000);
 
       mic.start(
         (chunk) => {
