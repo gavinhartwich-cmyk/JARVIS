@@ -94,6 +94,10 @@ namespace JarvisHud
             _positionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _positionTimer.Tick += PositionTimer_Tick;
             _positionTimer.Start();
+            // Confirms the loop is genuinely running - so a log with no
+            // "[hud-reposition]" lines later means "nothing ever needed
+            // to move," not "the feature never started."
+            Console.WriteLine("[hud-reposition] Screen-awareness repositioning active (polling every 500ms).");
         }
 
         private void Window_KeyDown(object sender, KeyEventArgs e)
@@ -162,6 +166,21 @@ namespace JarvisHud
 
             if (targetCorner != _currentCorner || Math.Abs(targetScale - _currentScale) > 0.001)
             {
+                // [ADDED 2026-09-02] Real diagnostic logging, not just
+                // silent behavior - added specifically because the
+                // previous pass couldn't confirm this worked live
+                // (automated attempts to force real OS foreground focus
+                // onto a test window were blocked by Windows itself).
+                // cli.ts now pipes this process's stdout back into the
+                // same console 'listen' runs in (prefixed [native-hud]),
+                // so the next live test can prove this from the log
+                // instead of relying on eyeballing screen position - a
+                // line here every time the decision actually changes,
+                // not spammed every 500ms tick.
+                Console.WriteLine(
+                    $"[hud-reposition] {_currentCorner}@{_currentScale:0.00} -> {targetCorner}@{targetScale:0.00} " +
+                    $"(foreground window bounds: {(fgBounds is Rect r ? $"{r.X:0},{r.Y:0} {r.Width:0}x{r.Height:0}" : "none")})"
+                );
                 _currentCorner = targetCorner;
                 _currentScale = targetScale;
                 AnimateTo(CornerRect(targetCorner, targetScale, workArea), targetScale);

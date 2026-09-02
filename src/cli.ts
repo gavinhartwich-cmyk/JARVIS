@@ -414,10 +414,41 @@ async function main() {
       );
       if (existsSync(nativeHudExe)) {
         try {
+          // 2026-09-02: stdout/stderr used to be "ignore" - meaning
+          // native-hud/'s new screen-awareness diagnostic logging (see
+          // MainWindow.xaml.cs's "[hud-reposition]" lines, added
+          // specifically because the previous pass couldn't confirm that
+          // feature live) had nowhere to go. Piped and forwarded with a
+          // prefix instead, same pattern as the Chatterbox subprocess's
+          // "[chatterbox]"-prefixed stderr elsewhere in this file, so the
+          // next live 'listen' run can actually see it.
           hudNativeProc = Bun.spawn([nativeHudExe, hud.url], {
-            stdout: "ignore",
-            stderr: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
           });
+          const pipeStream = async (stream: ReadableStream<Uint8Array> | null) => {
+            if (!stream) return;
+            const reader = stream.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                let newlineIndex: number;
+                while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+                  const line = buffer.slice(0, newlineIndex).trim();
+                  buffer = buffer.slice(newlineIndex + 1);
+                  if (line) console.log(`   [native-hud] ${line}`);
+                }
+              }
+            } catch {
+              // Process exited/pipe closed - nothing left to forward.
+            }
+          };
+          pipeStream(hudNativeProc.stdout as ReadableStream<Uint8Array> | null);
+          pipeStream(hudNativeProc.stderr as ReadableStream<Uint8Array> | null);
           console.log(`\n🖥️  Native HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
         } catch (err) {
           console.log(`\n⚠️  Could not launch the native HUD (${nativeHudExe}): ${err instanceof Error ? err.message : err}`);

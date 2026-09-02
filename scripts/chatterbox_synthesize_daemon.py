@@ -56,7 +56,32 @@ def main() -> int:
         print(json.dumps({"error": f"failed to load Chatterbox model (device={device}): {e}"}))
         return 1
 
-    print(json.dumps({"ready": True, "sample_rate": model.sr}), flush=True)
+    # [ADDED 2026-09-02] Real, measured fix found after the first live
+    # `bun run dev listen` round trip: chatterbox's own generate() (see
+    # tts_turbo.py) calls prepare_conditionals() on EVERY invocation
+    # whenever audio_prompt_path is passed - which the previous version of
+    # this daemon always did, on every single request. prepare_conditionals
+    # does a full librosa load+resample of the reference clip PLUS two
+    # separate GPU model forward passes (the voice encoder and s3gen's
+    # embed_ref) to re-derive the exact same speaker conditioning every
+    # time, even though the reference clip (jarvis-voice.wav) never
+    # changes for the life of this daemon. tts_turbo.py's own generate()
+    # signature confirms this is unnecessary repeat work, not required
+    # behavior: `else: assert self.conds is not None, "...or specify
+    # audio_prompt_path"` - conditioning can legitimately be prepared once
+    # and reused. Fixed by calling prepare_conditionals() exactly once
+    # here, then omitting audio_prompt_path from every generate() call
+    # below so it reuses self.conds instead of recomputing it. Real
+    # measured effect not yet isolated in isolation (needs a live
+    # before/after run to quantify), but this removes genuine redundant
+    # GPU work on every single turn, not a guessed optimization.
+    conditioning_start = time.time()
+    model.prepare_conditionals(reference_audio_path)
+    conditioning_ms = (time.time() - conditioning_start) * 1000
+    print(
+        json.dumps({"ready": True, "sample_rate": model.sr, "conditioning_ms": conditioning_ms}),
+        flush=True,
+    )
 
     for line in sys.stdin:
         line = line.strip()
@@ -71,8 +96,21 @@ def main() -> int:
             continue
 
         try:
+            # No audio_prompt_path here (2026-09-02 change, see the
+            # prepare_conditionals comment above) - reuses model.conds,
+            # prepared exactly once at startup, instead of recomputing the
+            # same speaker conditioning on every request. Deliberately
+            # calling the library's own public generate() as-is rather
+            # than reimplementing its internals for finer-grained timing -
+            # a first attempt at that duplicated tts_turbo.py's generate()
+            # by hand and got it subtly wrong (wrong S3GEN_SIL import
+            # path, missing the punc_norm(text) call generate() itself
+            # applies) - exactly the kind of fragile drift this project
+            # already got burned by once (the numpy patch). Not worth the
+            # risk for diagnostic-only value; total wall time is still
+            # real, measured, useful data on its own.
             start = time.time()
-            wav = model.generate(text, audio_prompt_path=reference_audio_path)
+            wav = model.generate(text)
             ta.save(out_path, wav, model.sr)
             duration_ms = (time.time() - start) * 1000
             print(json.dumps({"done": True, "out_path": out_path, "duration_ms": duration_ms}), flush=True)

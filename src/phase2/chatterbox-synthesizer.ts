@@ -111,7 +111,14 @@ export class ChatterboxSynthesizer implements ISpeechSynthesizer {
 
           if (parsed.ready && !readyResolved) {
             readyResolved = true;
-            console.log(`   🎭 Chatterbox model loaded (sample rate: ${parsed.sample_rate}Hz)`);
+            // [2026-09-02] conditioning_ms is new - the daemon now
+            // prepares the reference-clip conditioning exactly once at
+            // startup instead of on every request (see
+            // chatterbox_synthesize_daemon.py's own comment on this),
+            // so this is a real one-time cost, not per-turn.
+            const conditioningNote =
+              typeof parsed.conditioning_ms === "number" ? `, voice conditioning: ${parsed.conditioning_ms.toFixed(0)}ms (one-time)` : "";
+            console.log(`   🎭 Chatterbox model loaded (sample rate: ${parsed.sample_rate}Hz${conditioningNote})`);
             resolve();
           } else if (parsed.error) {
             if (this.pendingRequest) {
