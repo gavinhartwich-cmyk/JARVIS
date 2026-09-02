@@ -49,7 +49,15 @@ ${
 
 ${input.constraints ? `Constraints:\n${input.constraints.join("\n")}` : ""}
 
-Be precise, show your reasoning, and rate your confidence in your answer (0-1).`;
+Be precise and show your reasoning. After your COMPLETE answer, end your
+response on its own final line with EXACTLY this format and nothing else
+on that line:
+<<<CONFIDENCE: X.XX>>>
+where X.XX is your genuine self-assessed confidence in the answer above,
+from 0.00 (no confidence) to 1.00 (certain). This line is stripped out
+before your answer is used, so it will never appear inside a file, a
+code block, or any content you're producing — always add it as the true
+final line regardless of what format the rest of your answer takes.`;
 
       // Create messages for the model
       const messages: ModelMessage[] = [
@@ -72,18 +80,44 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
 
       const duration = Date.now() - startTime;
 
-      // Confidence should come from the provider's structured output
-      // (real, model-reported). Regex-parsing prose is a fallback for a
-      // provider that doesn't support structured output, not the primary
-      // path — that's what silently produced identical fake-looking 70%
-      // scores across every agent before this was fixed.
+      // [2026-09-02] Real fix for a real, confirmed bug: this used to ask
+      // for confidence in free prose ("rate your confidence... 0-1") and
+      // hope a regex caught it - it usually didn't. Confirmed directly:
+      // omniroute-provider.ts (the primary, most-used provider) never
+      // populates response.confidence at all, so most agent runs
+      // silently fell all the way through to the hardcoded 0.7 fallback
+      // below - not a rare edge case, the common path.
+      //
+      // Real fix: the system prompt above now asks for a small,
+      // distinctive trailing marker (<<<CONFIDENCE: X.XX>>>) instead of
+      // free prose - reliably extractable with a simple end-anchored
+      // regex. Deliberately NOT a full JSON-wrapped response (the
+      // obvious-looking alternative): that would have broken the Coder/
+      // Debugger agents' raw ===FILE===/===EDIT=== block output, which
+      // developer.ts's parseFileBlocks()/parseEditBlocks() regex-parse
+      // directly from response.content (see patch.ts) - wrapping that in
+      // JSON would corrupt exactly the agents most prone to already
+      // struggling with output-format compliance. The marker is always
+      // stripped from content below before anything downstream sees it,
+      // so no agent's real output changes shape - only how reliably its
+      // confidence is captured.
       let confidence: number;
       let confidenceSource: string;
+      let content = response.content;
+
+      const markerMatch = content.match(/\n?<<<\s*CONFIDENCE\s*:\s*([0-9.]+)\s*>>>\s*$/i);
       if (typeof response.confidence === "number") {
         confidence = response.confidence;
         confidenceSource = "provider (structured output)";
+        if (markerMatch) content = content.slice(0, markerMatch.index).trimEnd();
+      } else if (markerMatch) {
+        let val = parseFloat(markerMatch[1]);
+        if (val > 1) val = val / 100; // tolerate an accidental percentage
+        confidence = Math.min(Math.max(val, 0), 1);
+        confidenceSource = "trailing marker (real, model-reported)";
+        content = content.slice(0, markerMatch.index).trimEnd();
       } else {
-        const confidenceMatch = response.content.match(/confidence[:\s]+([0-9.]+)/i);
+        const confidenceMatch = content.match(/confidence[:\s]+([0-9.]+)/i);
         if (confidenceMatch) {
           let val = parseFloat(confidenceMatch[1]);
           if (val > 1) val = val / 100; // Handle percentages
@@ -91,7 +125,7 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
           confidenceSource = "regex fallback (parsed from prose)";
         } else {
           confidence = 0.7;
-          confidenceSource = "hardcoded fallback — provider gave no structured confidence and prose parsing failed";
+          confidenceSource = "hardcoded fallback — provider gave no structured confidence, no marker, and prose parsing failed";
           console.warn(`   ⚠️  ${this.name}: ${confidenceSource}. This is not a real score.`);
         }
       }
@@ -99,8 +133,8 @@ Be precise, show your reasoning, and rate your confidence in your answer (0-1).`
       const output: AgentOutput = {
         taskId: input.taskId,
         agentName: this.name,
-        content: response.content,
-        reasoning: response.content, // Full response contains reasoning
+        content,
+        reasoning: content, // Full response contains reasoning
         confidence,
         tokensUsed: response.tokensUsed,
         finishReason: response.finishReason,
