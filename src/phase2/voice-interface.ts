@@ -170,6 +170,24 @@ export class VoiceInterface {
   private turnSilenceMs: number = 0;
   private turnHasSpeech: boolean = false;
   private turnStartedAt: number = 0;
+  // [ADDED 2026-09-02] Real live bug found running 'listen' end to end
+  // with Chatterbox as the TTS provider: context.isActive only flips back
+  // to false once handleUserSpeech() finishes ENTIRELY (filler synthesis
+  // + the real LLM/app-control/Chatterbox-synthesis call), which - now
+  // that Chatterbox genuinely takes 30-100+s (see the master doc's
+  // 2026-09-01 thirteenth-pass entry) - is a long window during which
+  // mic chunks keep arriving. Without this flag, processMicChunk()'s
+  // hitSilenceCutoff check (turnHasSpeech stays true, turnSilenceMs only
+  // grows) re-evaluated to true on EVERY subsequent chunk for that whole
+  // window, logging "ending turn" and calling stopStreaming() again every
+  // ~250ms - confirmed live: over 100 repeats in a single turn, all
+  // harmlessly caught (stopStreaming() throws when nothing's streaming),
+  // but alarming log spam that looked like a stuck/broken pipeline when
+  // it was actually just working slowly. Set true the first time the
+  // cutoff fires, reset alongside the rest of the per-turn VAD state in
+  // handleWakeWord() - so the log/stop only fires once per turn, exactly
+  // as intended, regardless of how long the reply takes to generate.
+  private turnEndingTriggered: boolean = false;
   // Rolling window of real energy readings taken while idle (see
   // IDLE_NOISE_WINDOW_CHUNKS above) - this is what handleWakeWord() reads
   // from to compute turnSpeechThreshold fresh for each turn, instead of
@@ -379,6 +397,7 @@ export class VoiceInterface {
     this.turnSilenceMs = 0;
     this.turnHasSpeech = false;
     this.turnStartedAt = Date.now();
+    this.turnEndingTriggered = false;
 
     // Real per-turn calibration (2026-08-30) - see IDLE_NOISE_WINDOW_CHUNKS
     // above for why this replaced a fixed SPEECH_RMS_THRESHOLD: whatever
@@ -468,7 +487,8 @@ export class VoiceInterface {
     const hitSilenceCutoff = this.turnHasSpeech && this.turnSilenceMs >= END_OF_TURN_SILENCE_MS;
     const hitMaxDuration = turnDurationMs >= this.config.conversation.maxTurnDuration * 1000;
 
-    if ((hitSilenceCutoff || hitMaxDuration) && this.speechRecognizer) {
+    if ((hitSilenceCutoff || hitMaxDuration) && this.speechRecognizer && !this.turnEndingTriggered) {
+      this.turnEndingTriggered = true;
       console.log(`   ⏹️  ending turn (${hitSilenceCutoff ? "silence cutoff" : "max turn duration reached"})`);
       try {
         await this.speechRecognizer.stopStreaming();
