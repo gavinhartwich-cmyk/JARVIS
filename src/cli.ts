@@ -21,6 +21,7 @@ import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
 import { proactivityEngine } from "./core/proactivity";
 import { runAllMonitors } from "./core/system-monitors";
 import { sendSms } from "./core/sms";
+import { sendEmail } from "./core/email-sender";
 import { runProactiveScheduler } from "./core/proactive-scheduler";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -297,6 +298,26 @@ async function main() {
       // Jarvis." Runs forever, Ctrl+C to stop, same lifecycle pattern as
       // `listen`.
       await runProactiveScheduler();
+    } else if (command === "email-test") {
+      // bun run dev email-test <to-address> [subject] -- <body>
+      const [to, ...rest] = args.slice(1);
+      const joined = rest.join(" ");
+      const [subject, body] = joined.includes("--") ? joined.split("--").map((s) => s.trim()) : ["Test from JARVIS", joined || "This is a real test email from JARVIS."];
+      console.log("\n" + "=".repeat(70));
+      console.log("📧 EMAIL SEND TEST (real Gmail API send - see core/email-sender.ts)");
+      console.log("=".repeat(70));
+      if (!to) {
+        console.log('\nUsage: bun run dev email-test <to-address> [subject] -- <body>');
+      } else {
+        console.log(`\nSending to: ${to}\nSubject: ${subject}\nBody: ${body}`);
+        try {
+          await sendEmail({ to, subject, body });
+          console.log("\n✅ Sent via GMAIL_REFRESH_TOKEN_1 (business account, confirmed send scope).");
+        } catch (err) {
+          console.log(`\n❌ Failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      console.log("\n" + "=".repeat(70));
     } else if (command === "sms-test") {
       const text = args.slice(1).join(" ") || "This is a real test text from JARVIS.";
       console.log("\n" + "=".repeat(70));
