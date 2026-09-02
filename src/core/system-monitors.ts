@@ -66,13 +66,15 @@ export async function checkDiskSpace(): Promise<MonitoredEvent[]> {
 
 /**
  * Every real monitor this codebase currently has - see this file's own
- * header for what's deliberately not here yet. Calendar (checkUpcomingMeetings,
- * calendar-monitor.ts) is real too as of 2026-09-02, kept in its own file
- * since it's a real external API integration, not local-only like the
- * monitors above.
+ * header for what's deliberately not here yet. Calendar
+ * (checkUpcomingMeetings, calendar-monitor.ts) and email
+ * (checkUnreadEmail, email-monitor.ts) are real too as of 2026-09-02,
+ * kept in their own files since they're real external API integrations,
+ * not local-only like the monitor above.
  */
 export async function runAllMonitors(): Promise<MonitoredEvent[]> {
   const { checkUpcomingMeetings } = await import("./calendar-monitor");
-  const results = await Promise.all([checkDiskSpace(), checkUpcomingMeetings()]);
+  const { checkUnreadEmail } = await import("./email-monitor");
+  const results = await Promise.all([checkDiskSpace(), checkUpcomingMeetings(), checkUnreadEmail()]);
   return results.flat();
 }
