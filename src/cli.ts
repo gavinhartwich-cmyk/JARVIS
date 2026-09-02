@@ -20,6 +20,8 @@ import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
 import { proactivityEngine } from "./core/proactivity";
 import { runAllMonitors } from "./core/system-monitors";
+import { sendSms } from "./core/sms";
+import { runProactiveScheduler } from "./core/proactive-scheduler";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -287,6 +289,25 @@ async function main() {
           console.log(`   relevance=${event.relevance} urgency=${event.urgency} → ${decision.outcome}${decision.timing ? ` (${decision.timing})` : ""}`);
           console.log(`   ${decision.reason}`);
         }
+      }
+      console.log("\n" + "=".repeat(70));
+    } else if (command === "proactive-loop") {
+      // Real adaptive scheduler (core/proactive-scheduler.ts) - per
+      // Gavin: "The scheduler should run whenever is needed decided by
+      // Jarvis." Runs forever, Ctrl+C to stop, same lifecycle pattern as
+      // `listen`.
+      await runProactiveScheduler();
+    } else if (command === "sms-test") {
+      const text = args.slice(1).join(" ") || "This is a real test text from JARVIS.";
+      console.log("\n" + "=".repeat(70));
+      console.log("📱 SMS TEST (real email-to-SMS gateway send - see core/sms.ts)");
+      console.log("=".repeat(70));
+      console.log(`\nSending: "${text}"`);
+      try {
+        await sendSms(text);
+        console.log("\n✅ Sent - check your phone. (Delivery via carrier gateway isn't instant or guaranteed - see core/sms.ts's own disclosed reliability caveat.)");
+      } catch (err) {
+        console.log(`\n❌ Failed: ${err instanceof Error ? err.message : err}`);
       }
       console.log("\n" + "=".repeat(70));
     } else if (command === "control-test") {
