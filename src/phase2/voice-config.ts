@@ -92,6 +92,18 @@ export interface VoiceConfig {
     allowInterruption: boolean;
     interruptionThreshold: number; // 0-1, sensitivity for detecting user trying to interrupt
     responseStreaming: boolean; // Stream response as it's generated
+    // [ADDED 2026-09-02] Real environmental-audio-awareness gap closed:
+    // the wake-word detector is deliberately tuned low (sensitivity 0.05,
+    // per Gavin's own request) to fire on bare "Jarvis" ANYWHERE in
+    // speech, not just "hey Jarvis" - a real, disclosed tradeoff that
+    // makes it easier to also fire on ambient/incidental speech that
+    // merely contains the name (a TV/radio mention, someone else in the
+    // room named Jarvis, talking ABOUT JARVIS rather than TO it). See
+    // voice-interface.ts's classifyDirectedAtJarvis() for the real LLM
+    // check this gates. Defaults on; exists as a real off-switch (not
+    // just a hardcoded true) in case it ever costs more in false
+    // negatives (a real command wrongly ignored) than it saves.
+    directedAtJarvisCheck: boolean;
   };
 
   // Background operation
@@ -256,6 +268,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     allowInterruption: true,
     interruptionThreshold: 0.7,
     responseStreaming: true,
+    directedAtJarvisCheck: true,
   },
   backgroundOperation: {
     enabled: true,

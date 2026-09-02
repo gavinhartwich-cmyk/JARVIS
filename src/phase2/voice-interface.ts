@@ -289,6 +289,7 @@ export class VoiceInterface {
     this.listeners.set("wake-word-detected", []);
     this.listeners.set("user-speech-recognized", []);
     this.listeners.set("jarvis-responding", []);
+    this.listeners.set("speech-not-directed", []);
     this.listeners.set("acting", []);
     this.listeners.set("acting-done", []);
     this.listeners.set("audio-ready", []);
@@ -642,6 +643,33 @@ export class VoiceInterface {
     // compares against this snapshot.
     const myTurnId = this.turnId;
 
+    // Real environmental-audio-awareness check (2026-09-02): the wake
+    // word is deliberately tuned to fire on bare "Jarvis" anywhere in
+    // speech (sensitivity 0.05, per Gavin), which is exactly what makes
+    // it also fire on speech that merely CONTAINS the name without being
+    // addressed to JARVIS at all - a TV/radio mention, someone else in
+    // the room named Jarvis, a person talking ABOUT JARVIS rather than
+    // TO it. Run before the filler/response below so a false wake-word
+    // trigger doesn't cost a real LLM call, TTS synthesis, or an
+    // out-of-place spoken reply to overheard conversation.
+    if (this.config.conversation.directedAtJarvisCheck) {
+      const directed = await this.classifyDirectedAtJarvis(result.text);
+      // A barge-in during this classification call already started a
+      // whole new turn (handleWakeWord() ran, turnId moved on) - bail
+      // out rather than act on a stale classification for a turn that's
+      // no longer current, same pattern as every other await point below.
+      if (this.turnId !== myTurnId) return;
+      if (!directed) {
+        console.log(`   🙉 Not directed at JARVIS - ignoring, resuming listening`);
+        this.emit("speech-not-directed", result);
+        this.context.isActive = false;
+        if (this.wakeWordDetector && this.isRunning) {
+          await this.wakeWordDetector.startListening();
+        }
+        return;
+      }
+    }
+
     // Real "thinking" acknowledgment (2026-08-31) - see fillerAudio's own
     // comment above for the full story. Played and awaited BEFORE the
     // slow respondToText() call below, not overlapping it - this stays
@@ -704,6 +732,87 @@ export class VoiceInterface {
     // Resume listening for next wake word
     if (this.wakeWordDetector && this.isRunning) {
       await this.wakeWordDetector.startListening();
+    }
+  }
+
+  /**
+   * Real environmental-audio-awareness classifier: is this transcribed
+   * utterance genuinely addressed to JARVIS as a command/question, or
+   * incidental/ambient speech that happened to contain the wake word (or
+   * got captured in the listening window alongside it)? A small, fast,
+   * cheap LLM classification call - same JSON-object pattern used by
+   * orchestrator.ts's classifyAppControlIntent()/classifyScreenVisionIntent(),
+   * duplicated locally rather than imported (this codebase's established
+   * own-helper-per-file convention - see e.g. screen-capture.ts's own
+   * WIN32_WINDOW_TYPE).
+   *
+   * Deliberately biased toward "true" on genuine ambiguity: the cost of
+   * one unwanted reply to overheard conversation is far lower than the
+   * cost of silently ignoring a real request, so this only suppresses a
+   * turn when the model is fairly confident it's NOT directed at JARVIS.
+   * Same fail-safe shape as the other classifiers in this codebase: any
+   * failure (provider error, malformed JSON) defaults to `true` (treat it
+   * as directed, respond normally) rather than ever silently dropping a
+   * real command because a classifier call hiccupped.
+   */
+  private async classifyDirectedAtJarvis(utterance: string): Promise<boolean> {
+    const classifierPrompt =
+      "You are a filter for JARVIS, a wake-word-activated voice assistant. The wake word (\"Jarvis\") was just " +
+      "detected in the room's audio, and this is the speech that followed. JARVIS's wake-word detector is " +
+      "deliberately tuned to fire on the bare word \"Jarvis\" ANYWHERE in speech, not just \"hey Jarvis\" as a " +
+      "clean address - which means it can also fire on speech that merely CONTAINS the name without actually " +
+      "being addressed to an AI assistant: a TV/radio mention, a different person in the room also named " +
+      "Jarvis, or someone talking ABOUT JARVIS in the third person rather than TO it directly.\n\n" +
+      "Decide: is this utterance genuinely a command or question directed AT the assistant, or is it " +
+      "incidental/ambient speech not meant for it? Respond with ONLY a single raw JSON object, no other text, " +
+      "no markdown code fences, matching exactly this shape:\n" +
+      '{"directedAtJarvis": boolean}\n\n' +
+      "Rules:\n" +
+      "- Default to true (directedAtJarvis: true) whenever it's genuinely ambiguous - a real request wrongly " +
+      "ignored is worse than one unwanted reply to overheard conversation.\n" +
+      "- Only answer false when there's a real, specific signal this ISN'T addressed to the assistant: it " +
+      'names/addresses a different person (e.g. "no Jarvis stop that" said to a person, a pet, a character), ' +
+      'refers to JARVIS in the third person ("that new Jarvis movie", "did you see Jarvis earlier"), or is ' +
+      "plainly a continuation of an unrelated human conversation with no command/question shape at all.\n" +
+      "- A plain command or question with no explicit address at all (e.g. \"what's the weather\", \"open " +
+      "Spotify\") is directedAtJarvis: true - the wake word already fired, so no repeated \"Jarvis\" is needed " +
+      "in the utterance itself.\n\n" +
+      "Examples:\n" +
+      '"Jarvis, open Spotify" -> {"directedAtJarvis": true}\n' +
+      '"what\'s the weather like today" -> {"directedAtJarvis": true}\n' +
+      '"can you check my email" -> {"directedAtJarvis": true}\n' +
+      '"no Jarvis, stop pulling on that" -> {"directedAtJarvis": false}\n' +
+      '"have you seen that new Jarvis movie yet" -> {"directedAtJarvis": false}\n' +
+      '"anyway, so I told her, and Jarvis just laughed" -> {"directedAtJarvis": false}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        {
+          temperature: 0,
+          maxTokens: 50,
+          responseFormat: { type: "json_object" },
+        }
+      );
+
+      const trimmed = response.content.trim();
+      const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      const candidate = fenced ? fenced[1].trim() : trimmed;
+      const start = candidate.indexOf("{");
+      const end = candidate.lastIndexOf("}");
+      if (start === -1 || end === -1 || end < start) return true;
+
+      const parsed = JSON.parse(candidate.slice(start, end + 1)) as { directedAtJarvis?: boolean };
+      return parsed.directedAtJarvis !== false; // default true unless explicitly false
+    } catch (error) {
+      console.error(
+        "⚠ Directed-at-JARVIS classification failed (defaulting to true - treating as a real request):",
+        error instanceof Error ? error.message : error
+      );
+      return true;
     }
   }
 
