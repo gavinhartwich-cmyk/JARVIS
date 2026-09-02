@@ -196,28 +196,28 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     // Chatterbox's audio loader isn't documented to reliably handle
     // .webm) and confirmed an NVIDIA GPU.
     //
-    // [UPDATE 2026-09-02] Flipped back to "piper" as the default. Real,
-    // live-measured reason, not a guess: after fixing Chatterbox's real
-    // redundant-conditioning bug (13-45s -> 1.4-2.4s in a clean isolated
-    // test - a genuine, verified fix, see chatterbox_synthesize_daemon.py's
-    // own comment), a second live `listen` session still saw real,
-    // highly variable per-request latency (12-54s), even after ruling
-    // out an actual confound found along the way (orphaned duplicate
-    // daemon processes from this session's own testing, competing for
-    // the same 4GB GPU). With those cleaned up, GPU telemetry showed no
-    // thermal throttling (35°C) but a mid power-state (P2, not P0/full
-    // boost) - the GPU isn't ramping to full clock for this kind of
-    // bursty, single-request autoregressive workload, which is a real,
-    // largely hardware-bound characteristic of a 350M-parameter model on
-    // a 4GB card, not something more code changes can reliably fix
-    // without real risk (a first attempt at deeper profiling already
-    // introduced a subtle bug once this session - see the daemon's own
-    // comment on that). Per Gavin, delay/thinking time is "the biggest
-    // issue" - Chatterbox stays fully implemented and one line away
-    // (flip this back to "chatterbox") for whenever the cloned voice
-    // matters more than speed; tts-provider.ts's fallback wrapper means
-    // switching back doesn't need any other code change.
-    provider: "piper",
+    // [UPDATE 2026-09-02] Briefly flipped to "piper" this same pass over
+    // a real, measured latency concern (a second live `listen` session
+    // saw highly variable Chatterbox latency, 12-54s, even after the
+    // redundant-conditioning fix and after ruling out a real confound -
+    // orphaned duplicate daemon processes from this session's own
+    // testing competing for the same 4GB GPU; with those cleaned up, GPU
+    // telemetry showed no thermal throttling but a mid power-state, P2
+    // not P0, for this bursty single-request autoregressive workload -
+    // a real, largely hardware-bound characteristic on this card, not
+    // something more code changes can reliably fix without real risk).
+    // Reverted back to "chatterbox" the same pass, per Gavin, directly:
+    // "the jarvis voice is one of the biggest things without it its not
+    // the same" - the cloned voice is the priority, not raw speed, and
+    // that's his call to make, not this codebase's default to flip
+    // unilaterally. What DOES stay from the latency investigation: the
+    // real conditioning-cache fix itself (still a genuine 13-45s -> 1.4s+
+    // improvement, see chatterbox_synthesize_daemon.py's own comment),
+    // and the filler acknowledgment now always uses a separate, fast
+    // Piper path regardless of this setting (see
+    // voice-interface.ts's fillerSynthesizer) - so "one moment" is heard
+    // instantly either way, only the real reply's timing depends on this.
+    provider: "chatterbox",
     fishAudio: {
       referenceId: "049975dde0a14889ad219f24a95e3a4f",
     },
