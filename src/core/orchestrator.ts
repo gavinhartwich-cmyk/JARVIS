@@ -18,6 +18,7 @@ import { VisionSystem } from "../phase3/vision-system";
 import { OllamaVisionProvider } from "../phase3/ollama-vision-provider";
 import { VideoAnalyzer } from "../phase3/video-analyzer";
 import { CameraCapture } from "../phase3/camera-capture";
+import { searchWeb } from "./web-search";
 import { existsSync } from "node:fs";
 import type { ModelProvider } from "../models/types";
 
@@ -569,15 +570,42 @@ export class Orchestrator {
       }
     }
 
+    // Web-search intent ("search for X", "what's the latest on X", "who
+    // won last night") — checked only once nothing above already needs a
+    // reply (an app-control/click action, or a vision/video/camera
+    // result already answers the turn). Added 2026-09-02 as part of
+    // Phase 5 (Digital Ecosystem): JARVIS previously had zero internet
+    // access at all — any current/real-world question could only be
+    // guessed at or honestly refused. Same two-tier pattern as the rest
+    // of this funnel; see web-search.ts for the real $0 DuckDuckGo-based
+    // mechanism.
+    let searchContext: string | undefined;
+    if (!appControlIntent && !clickIntent && !visionContext) {
+      let searchQuery = this.parseSearchIntent(userUtterance);
+      if (!searchQuery) {
+        searchQuery = await this.classifySearchIntent(userUtterance);
+      }
+      if (searchQuery) {
+        console.log(`\n🔎 Web-search intent detected: "${searchQuery}"`);
+        this.onActionStart?.();
+        try {
+          searchContext = await this.executeSearchIntent(searchQuery);
+        } finally {
+          this.onActionEnd?.();
+        }
+      }
+    }
+
     // Use conversational intelligence to process utterance, with the real
     // action outcome (if any) so the reply can confirm/deny it truthfully
-    // and proactively, instead of a canned template per app — and the real
-    // screen-vision result (if any), so JARVIS answers from what it
-    // genuinely just saw instead of guessing.
+    // and proactively, the real vision/video/camera result (if any), and
+    // the real web search result (if any), so JARVIS answers from what it
+    // genuinely just did/saw/found instead of guessing.
     const stream = await this.conversationalIntelligence.processWithStreaming(
       userUtterance,
       actionOutcome,
-      visionContext
+      visionContext,
+      searchContext
     );
 
     // In production: stream tokens to TTS
@@ -1149,6 +1177,105 @@ export class Orchestrator {
       const detail = error instanceof Error ? error.message : String(error);
       console.error("⚠ Screen-vision capture/analysis failed:", detail);
       return `(Screen vision failed: ${detail} — tell the user honestly that you couldn't look at the screen just now, don't guess at what's there.)`;
+    }
+  }
+
+  /**
+   * Free, instant, zero-LLM-cost regex tier for explicit search phrasing.
+   */
+  private parseSearchIntent(utterance: string): string | null {
+    const text = utterance.trim().replace(/^(?:hey\s+)?jarvis[,:]?\s*/i, "").trim();
+    const match = text.match(
+      /^(?:can you\s+|could you\s+|would you\s+|please\s+)*(?:search(?: the web)? for|look up|google|look that up about)\s+(.+?)[.!?]*$/i
+    );
+    if (match?.[1]) return match[1].trim();
+    // "look that up" with no object - use the utterance itself as a weak
+    // fallback query only if it's genuinely just that phrase; otherwise
+    // let the LLM classifier below handle indirect phrasing instead of
+    // guessing a query here.
+    if (/^(?:can you\s+|please\s+)?look that up[.!?]*$/i.test(text)) return null;
+    return null;
+  }
+
+  /**
+   * LLM fallback for indirect search phrasing ("what's the weather like",
+   * "who won the game last night", "what's bitcoin trading at"). Unlike
+   * every other classifier in this funnel, this one is deliberately
+   * biased toward FALSE on ambiguity, not true: a missed search just
+   * means JARVIS answers from its own knowledge (fine for anything
+   * stable - general/historical facts, math, how-to questions), while an
+   * unnecessary search adds real latency (a live HTTP round trip) to
+   * every ordinary question it's wrongly triggered on. The other
+   * classifiers bias toward true because a false negative there means
+   * silently ignoring a real request; here a false negative just falls
+   * back to a normal conversational answer, a much cheaper miss.
+   */
+  private async classifySearchIntent(utterance: string): Promise<string | null> {
+    const classifierPrompt =
+      "You are an intent classifier for JARVIS, a desktop voice assistant that can search the real web when " +
+      "needed. Given what the user just said, determine whether answering it CORRECTLY genuinely requires " +
+      "current, real-time, or external information a general knowledge model would not reliably know or could " +
+      "easily have out of date (weather, live scores/results, current prices, breaking news, \"latest\"/\"right " +
+      "now\"/\"today\" facts about a changing situation). Respond with ONLY a single raw JSON object, no other " +
+      "text, no markdown code fences, matching exactly this shape:\n" +
+      '{"needsSearch": boolean, "query": string | null}\n\n' +
+      "Rules:\n" +
+      "- Default to false when genuinely ambiguous - stable facts (history, geography, math, general how-to, " +
+      "definitions) should be answered directly, not searched.\n" +
+      "- needsSearch is true only for something that is genuinely time-sensitive or changes over time.\n" +
+      "- query should be a short, real search-engine-style query capturing what to look up - not the full " +
+      "sentence verbatim.\n\n" +
+      "Examples:\n" +
+      '"what\'s the weather like in Chicago" -> {"needsSearch": true, "query": "weather Chicago"}\n' +
+      '"who won the game last night" -> {"needsSearch": true, "query": "game score last night"}\n' +
+      '"what\'s bitcoin trading at right now" -> {"needsSearch": true, "query": "bitcoin price"}\n' +
+      '"what\'s the capital of France" -> {"needsSearch": false, "query": null}\n' +
+      '"what\'s 12 times 8" -> {"needsSearch": false, "query": null}\n' +
+      '"how do I restart a Windows service" -> {"needsSearch": false, "query": null}';
+
+    try {
+      const response = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: utterance },
+        ],
+        { temperature: 0, maxTokens: 100, responseFormat: { type: "json_object" } }
+      );
+
+      const jsonText = this.extractJsonObject(response.content);
+      if (!jsonText) return null;
+
+      const parsed = JSON.parse(jsonText) as { needsSearch?: boolean; query?: string | null };
+      if (parsed.needsSearch === true && typeof parsed.query === "string" && parsed.query.trim().length > 0) {
+        return parsed.query.trim();
+      }
+      return null;
+    } catch (error) {
+      console.error(
+        "⚠ Search intent classification failed (falling back to plain conversation):",
+        error instanceof Error ? error.message : error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Actually runs a real web search (web-search.ts - real DuckDuckGo
+   * results, not fabricated) and formats the results as searchContext
+   * text for the conversational reply to synthesize an answer from.
+   * Never throws: any failure (network error, DuckDuckGo markup change)
+   * comes back as a clear, honest string so the reply can say it
+   * couldn't search instead of guessing at an answer.
+   */
+  private async executeSearchIntent(query: string): Promise<string> {
+    try {
+      const results = await searchWeb(query, 5);
+      const lines = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}\n   (${r.url})`);
+      return `Search: "${query}"\n${lines.join("\n")}`;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("⚠ Web search failed:", detail);
+      return `(Web search for "${query}" failed: ${detail} — tell the user honestly that you couldn't search just now, don't guess at an answer.)`;
     }
   }
 
