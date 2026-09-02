@@ -18,6 +18,8 @@ import { HudServer } from "./phase2/hud-server";
 import { runPowerShell } from "./phase3/windows-control";
 import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
+import { proactivityEngine } from "./core/proactivity";
+import { runAllMonitors } from "./core/system-monitors";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -241,6 +243,50 @@ async function main() {
         console.log(`   admin-risk action with PIN: ${adminWithPin.decision} — ${adminWithPin.reason}`);
       } else {
         console.log(`\n   (run "bun run dev whoami --pin YOUR_PIN" to test Level 3 verification, once JARVIS_PIN is set in .env)`);
+      }
+      console.log("\n" + "=".repeat(70));
+    } else if (command === "proactive-check") {
+      // Phase 4 (master plan Part 7) - one real pass: run every real
+      // monitor this codebase has, evaluate each event through the real
+      // relevance/urgency/permission/device-routing decision engine
+      // (proactivity.ts), print what it actually decided. A cron/loop
+      // wrapper around calling this repeatedly is real follow-up work
+      // (see the master doc's Phase 4 status) - this command is the
+      // honest, testable core: does the real funnel produce sane
+      // decisions against real data, right now.
+      console.log("\n" + "=".repeat(70));
+      console.log("🔔 PROACTIVE CHECK (Phase 4 - real monitors + real decision engine)");
+      console.log("=".repeat(70));
+
+      // Real presence baseline, same as `whoami` - routeCommunication()
+      // inside proactivityEngine.evaluate() needs at least one
+      // registered/heartbeating device to route to.
+      await presenceEngine.registerDevice("pc", "pc", ["voice", "screen", "notification"]);
+      await presenceEngine.heartbeat("pc");
+
+      console.log("\n🔍 Running monitors...");
+      const events = await runAllMonitors();
+      console.log(`   ${events.length} real event(s) found (before dedup/scoring)`);
+
+      if (events.length === 0) {
+        console.log("\n✅ Nothing to report - all monitors ran clean.");
+      } else {
+        for (const event of events) {
+          const decision = await proactivityEngine.evaluate(event);
+          const icon =
+            decision.outcome === "notified"
+              ? "🔔"
+              : decision.outcome === "needs_permission"
+                ? "🔒"
+                : decision.outcome === "archived"
+                  ? "📥"
+                  : decision.outcome === "queued_no_device"
+                    ? "⏳"
+                    : "🔕";
+          console.log(`\n${icon} [${event.source}] ${event.summary}`);
+          console.log(`   relevance=${event.relevance} urgency=${event.urgency} → ${decision.outcome}${decision.timing ? ` (${decision.timing})` : ""}`);
+          console.log(`   ${decision.reason}`);
+        }
       }
       console.log("\n" + "=".repeat(70));
     } else if (command === "control-test") {
