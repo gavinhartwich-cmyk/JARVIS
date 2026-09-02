@@ -18,7 +18,7 @@ import { HudServer } from "./phase2/hud-server";
 import { runPowerShell } from "./phase3/windows-control";
 import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
-import { writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -391,6 +391,39 @@ async function main() {
       voice.on("acting-done", () => hud.setState("thinking"));
       voice.on("audio-ready", () => hud.setState("speaking"));
       voice.on("interaction-complete", () => hud.setState("idle"));
+      // [2026-09-02] Native HUD (native-hud/, WPF+WebView2) replaces the
+      // Edge --app-mode window below wherever it's actually been built -
+      // real, borderless, always-on-top, no taskbar/Alt-Tab entry,
+      // transparent background (only the rings are visible, not a
+      // rectangle), same public/hud.html animation unchanged inside it.
+      // Not a hard requirement: setup-native-hud.ps1 has to be run once
+      // (needs the .NET 8 SDK) to produce the exe, so this checks for it
+      // and falls back to the Edge window - unchanged, still real - if
+      // it's missing, exactly like this project's existing TTS-provider
+      // fallback pattern (Chatterbox -> Piper), not a silent downgrade.
+      let hudProcessId: number | null = null;
+      let hudNativeProc: ReturnType<typeof Bun.spawn> | null = null;
+      const nativeHudExe = join(
+        import.meta.dir,
+        "..",
+        "native-hud",
+        "bin",
+        "Release",
+        "net8.0-windows",
+        "JarvisHud.exe"
+      );
+      if (existsSync(nativeHudExe)) {
+        try {
+          hudNativeProc = Bun.spawn([nativeHudExe, hud.url], {
+            stdout: "ignore",
+            stderr: "ignore",
+          });
+          console.log(`\n🖥️  Native HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
+        } catch (err) {
+          console.log(`\n⚠️  Could not launch the native HUD (${nativeHudExe}): ${err instanceof Error ? err.message : err}`);
+          hudNativeProc = null;
+        }
+      }
       // 2026-08-31, per Gavin: "the jarvis window doesn't close once
       // it's stopped so I had like 7 opened" - real problem confirmed
       // over repeated test runs, not a one-off. Root cause: Start-Process
@@ -407,20 +440,25 @@ async function main() {
       // PID may not be the one actually owning the visible window - the
       // common case (no other Edge instance active) is what this fixes;
       // watch for whether windows still pile up if Edge is your daily
-      // browser too.
-      let hudProcessId: number | null = null;
-      try {
-        const { stdout } = await runPowerShell(
-          `$p = Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420" -PassThru; $p.Id`
-        );
-        const parsedPid = parseInt(stdout.trim(), 10);
-        if (!Number.isNaN(parsedPid)) {
-          hudProcessId = parsedPid;
+      // browser too. Only reached now if the native HUD above isn't
+      // built yet.
+      if (!hudNativeProc) {
+        if (!existsSync(nativeHudExe)) {
+          console.log(`\nℹ️  Native HUD not built yet (run .\\setup-native-hud.ps1) - falling back to the Edge app-mode window.`);
         }
-        console.log(`\n🖥️  HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
-      } catch (err) {
-        console.log(`\n⚠️  Could not open the HUD window automatically: ${err instanceof Error ? err.message : err}`);
-        console.log(`   You can open it yourself: ${hud.url}`);
+        try {
+          const { stdout } = await runPowerShell(
+            `$p = Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420" -PassThru; $p.Id`
+          );
+          const parsedPid = parseInt(stdout.trim(), 10);
+          if (!Number.isNaN(parsedPid)) {
+            hudProcessId = parsedPid;
+          }
+          console.log(`\n🖥️  HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
+        } catch (err) {
+          console.log(`\n⚠️  Could not open the HUD window automatically: ${err instanceof Error ? err.message : err}`);
+          console.log(`   You can open it yourself: ${hud.url}`);
+        }
       }
 
       // Sourced from the same DEFAULT_VOICE_CONFIG the VoiceInterface above
@@ -449,7 +487,14 @@ async function main() {
         mic.stop();
         hud.stop();
         await voice.stop();
-        if (hudProcessId !== null) {
+        if (hudNativeProc) {
+          try {
+            hudNativeProc.kill();
+          } catch {
+            // Best-effort - harmless if it already exited or Gavin closed
+            // it by hand (the native window's own Esc handler).
+          }
+        } else if (hudProcessId !== null) {
           try {
             await runPowerShell(`Stop-Process -Id ${hudProcessId} -Force -ErrorAction SilentlyContinue`);
           } catch {

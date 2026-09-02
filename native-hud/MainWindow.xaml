@@ -1,0 +1,24 @@
+<Window x:Class="JarvisHud.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="JARVIS"
+        Width="380" Height="420"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        KeyDown="Window_KeyDown">
+    <Grid Background="Transparent">
+        <!-- No Background attribute here - Microsoft.Web.WebView2.Wpf's
+             WebView2 control has no such dependency property (confirmed
+             by a real build error: MC3072). The transparent-background
+             effect is set in code-behind instead, via
+             Web.DefaultBackgroundColor - see MainWindow.xaml.cs's
+             Loaded handler. -->
+        <wv2:WebView2 x:Name="Web" />
+    </Grid>
+</Window>

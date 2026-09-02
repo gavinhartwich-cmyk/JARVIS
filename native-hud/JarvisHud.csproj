@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Native JARVIS HUD overlay - replaces the previous Edge "app mode"
+    browser window (see src/cli.ts's 'listen' command) with a real WPF
+    desktop window: borderless, always-on-top, no taskbar/Alt-Tab entry,
+    transparent background so only the rings themselves are visible over
+    the desktop, not a rectangular browser chrome.
+
+    Windows-only by design (WPF has no cross-platform equivalent) -
+    unlike setup-voice.ps1/setup-chatterbox.ps1's .ps1+.sh pairs, there is
+    deliberately no .sh companion for setup-native-hud.ps1.
+
+    Hosts public/hud.html (unchanged animation/state logic) inside a
+    WebView2 control rather than reimplementing the rings as native XAML
+    vector art - keeps every already-tuned animation exactly as it is,
+    the real native-vs-web gap this project had (an Edge browser window
+    with visible chrome, a taskbar entry, and no always-on-top guarantee)
+    is what this project actually closes.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>JarvisHud</AssemblyName>
+    <RootNamespace>JarvisHud</RootNamespace>
+    <!-- Framework-dependent, not self-contained: keeps the build fast and
+         the output out of git (see .gitignore), same reasoning as
+         tools/piper, tools/whisper, tools/chatterbox being gitignored
+         builds rather than committed binaries. Requires the .NET 8
+         runtime on the machine that runs it - already true here since
+         building this at all requires the .NET 8 SDK, which includes it. -->
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+</Project>

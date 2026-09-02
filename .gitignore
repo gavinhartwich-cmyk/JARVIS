@@ -29,3 +29,9 @@ assets/voice/
 # wakeword_detect.py, whisper_transcribe.py)
 __pycache__/
 *.pyc
+
+# [ADDED 2026-09-02] Native JARVIS HUD (native-hud/) - real C#/WPF source
+# is tracked, but its build output isn't, same pattern as tools/piper etc.
+# above: built locally via setup-native-hud.ps1, not committed.
+native-hud/bin/
+native-hud/obj/

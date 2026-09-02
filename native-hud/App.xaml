@@ -1,0 +1,7 @@
+<Application x:Class="JarvisHud.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- No StartupUri: App.xaml.cs's OnStartup constructs MainWindow
+         itself so it can pass through the HUD URL from argv - see the
+         comment there. -->
+</Application>
