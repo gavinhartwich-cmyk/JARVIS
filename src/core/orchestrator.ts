@@ -16,6 +16,8 @@ import { ScreenControl } from "../phase3/screen-control";
 import { ScreenCapture } from "../phase3/screen-capture";
 import { VisionSystem } from "../phase3/vision-system";
 import { OllamaVisionProvider } from "../phase3/ollama-vision-provider";
+import { VideoAnalyzer } from "../phase3/video-analyzer";
+import { existsSync } from "node:fs";
 import type { ModelProvider } from "../models/types";
 
 /**
@@ -80,6 +82,7 @@ export class Orchestrator {
   // cachedIdentity below.
   private screenCapture?: ScreenCapture;
   private visionSystem?: VisionSystem;
+  private videoAnalyzer?: VideoAnalyzer;
 
   private getVisionSystem(): VisionSystem {
     if (!this.visionSystem) {
@@ -94,6 +97,17 @@ export class Orchestrator {
       this.screenCapture = new ScreenCapture();
     }
     return this.screenCapture;
+  }
+
+  private getVideoAnalyzer(): VideoAnalyzer {
+    if (!this.videoAnalyzer) {
+      // Shares this Orchestrator's one VisionSystem/OllamaVisionProvider
+      // connection (getVisionSystem() above) rather than each constructing
+      // its own - same reasoning as cachedIdentity: one real connection
+      // per process, not one per feature.
+      this.videoAnalyzer = new VideoAnalyzer(this.getVisionSystem());
+    }
+    return this.videoAnalyzer;
   }
 
   // Resolved once per process, not per tool call — a real PIN-elevation
@@ -462,17 +476,39 @@ export class Orchestrator {
     // comment for the fake-data finding that blocked it.
     let visionContext: string | undefined;
     if (!appControlIntent) {
-      let visionQuestion = this.parseScreenVisionIntent(userUtterance);
-      if (!visionQuestion) {
-        visionQuestion = await this.classifyScreenVisionIntent(userUtterance);
-      }
-      if (visionQuestion) {
-        console.log(`\n👁️  Screen-vision intent detected: "${visionQuestion}"`);
+      // Video intent checked first: a real, resolvable video file path
+      // named in the utterance is a stronger, more specific signal than
+      // generic screen phrasing, and the two are mutually exclusive in
+      // practice (one utterance isn't going to ask about both a video
+      // file and the live screen). Added 2026-09-02 per the video-
+      // understanding Stage 4 gap identified in the twenty-fourth pass's
+      // audit — see video-analyzer.ts for why frame-sampling was the
+      // real, buildable approach (no local $0 model understands video
+      // directly).
+      const videoIntent = this.parseVideoIntent(userUtterance);
+      if (videoIntent) {
+        console.log(`\n🎬 Video intent detected: "${videoIntent.path}" — "${videoIntent.question}"`);
         this.onActionStart?.();
         try {
-          visionContext = await this.executeScreenVisionIntent(visionQuestion);
+          visionContext = await this.executeVideoIntent(videoIntent.path, videoIntent.question);
         } finally {
           this.onActionEnd?.();
+        }
+      }
+
+      if (!visionContext) {
+        let visionQuestion = this.parseScreenVisionIntent(userUtterance);
+        if (!visionQuestion) {
+          visionQuestion = await this.classifyScreenVisionIntent(userUtterance);
+        }
+        if (visionQuestion) {
+          console.log(`\n👁️  Screen-vision intent detected: "${visionQuestion}"`);
+          this.onActionStart?.();
+          try {
+            visionContext = await this.executeScreenVisionIntent(visionQuestion);
+          } finally {
+            this.onActionEnd?.();
+          }
         }
       }
     }
@@ -701,6 +737,81 @@ export class Orchestrator {
         success: false,
         detail: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * Free, instant, zero-LLM-cost regex tier for video understanding: only
+   * triggers when a real, resolvable video file path is actually named in
+   * the utterance (a much more specific, deliberate signal than screen
+   * phrasing, so no LLM classifier fallback tier exists for this one — if
+   * no real path is present, there's genuinely nothing for an LLM to
+   * "find" either; that's a real, honest reason to ask the user for a
+   * path in conversation rather than a gap to close with a second tier).
+   * Requires a common intent verb nearby, same conservative-false-negative
+   * reasoning as parseAppControlIntent()/parseScreenVisionIntent() - a
+   * miss here just means no video analysis runs, not a wrong one.
+   * existsSync() confirms the path is real BEFORE paying for a real
+   * ffprobe/ffmpeg/vision round trip - a typo'd or half-remembered path
+   * fails fast and honestly here instead of deep inside video-analyzer.ts.
+   */
+  private parseVideoIntent(utterance: string): { path: string; question: string } | null {
+    const pathMatch = utterance.match(
+      /"([^"]+\.(?:mp4|mov|avi|mkv|webm|m4v|wmv))"|'([^']+\.(?:mp4|mov|avi|mkv|webm|m4v|wmv))'|(\S+\.(?:mp4|mov|avi|mkv|webm|m4v|wmv))/i
+    );
+    if (!pathMatch) return null;
+
+    const path = (pathMatch[1] ?? pathMatch[2] ?? pathMatch[3]).trim();
+    if (!existsSync(path)) {
+      console.log(`   ⚠️  Video path mentioned but not found on disk, skipping: "${path}"`);
+      return null;
+    }
+
+    if (!/\b(look|watch|check|see|analyz|describe|explain|happen|tell me|what'?s in|what is in)\b/i.test(utterance)) {
+      return null;
+    }
+
+    // Whatever's left after removing the path token becomes the question;
+    // falls back to a generic "describe it" ask if nothing meaningful
+    // remains (e.g. the utterance was just "check out clip.mp4").
+    const remainder = utterance
+      .replace(pathMatch[0], " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^[,.\s]+|[,.\s]+$/g, "");
+    const question = remainder.length > 3 ? remainder : "Describe what happens in this video, in order.";
+
+    return { path, question };
+  }
+
+  /**
+   * Actually runs real video understanding (video-analyzer.ts - real
+   * ffprobe/ffmpeg frame sampling + real per-frame vision analysis, see
+   * its own header comment) and formats the result as a visionContext
+   * string for the conversational reply to reason over. Deliberately does
+   * NOT run its own second LLM synthesis call here (unlike the
+   * `video-test` CLI command, which does, for a real standalone result) -
+   * the conversational reply generated right after this already makes one
+   * real LLM call with the user's exact utterance in context, so handing
+   * it the raw per-frame descriptions and letting THAT call reason over
+   * them avoids paying for a redundant second one.
+   */
+  private async executeVideoIntent(path: string, question: string): Promise<string> {
+    try {
+      const analysis = await this.getVideoAnalyzer().analyzeVideo(path);
+      const frameLines = analysis.frames
+        .map((f) => `  [${f.timestampSeconds.toFixed(1)}s] ${f.description}`)
+        .join("\n");
+      return (
+        `Video analysis (${analysis.frames.length} real frames sampled across ${analysis.durationSeconds.toFixed(1)}s ` +
+        `of "${path}", each independently described by a vision model with no awareness of the others - reason ` +
+        `about what's changing/staying the same across them to infer motion/events; the user's specific question ` +
+        `about it is: "${question}"):\n${frameLines}`
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("⚠ Video analysis failed:", detail);
+      return `(Video analysis of "${path}" failed: ${detail} — tell the user honestly that you couldn't analyze the video just now, don't guess at its contents.)`;
     }
   }
 

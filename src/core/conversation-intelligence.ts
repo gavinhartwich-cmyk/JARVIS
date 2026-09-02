@@ -246,21 +246,27 @@ export class ConversationalIntelligence {
       }
     }
 
-    // Real, live screen-vision result, if the user's utterance triggered
-    // one (see orchestrator.ts's parseScreenVisionIntent()/
-    // classifyScreenVisionIntent()) — a real screenshot was just taken and
-    // sent through the real Ollama/moondream vision provider before this
-    // reply was generated. Mirrors the actionOutcome pattern above: ground
-    // the reply in what JARVIS genuinely just saw instead of letting the
-    // model guess or claim it can't see the screen.
+    // Real, live vision result, if the user's utterance triggered one -
+    // either screen vision (orchestrator.ts's parseScreenVisionIntent()/
+    // classifyScreenVisionIntent(), a real screenshot analyzed via
+    // OllamaVisionProvider) or video understanding (parseVideoIntent()/
+    // executeVideoIntent(), real ffmpeg-sampled frames each analyzed the
+    // same way — see video-analyzer.ts). Generic wording here on purpose:
+    // visionContext's own content already says what was actually looked
+    // at ("Screen description: ..." vs. "Video analysis (N frames over
+    // Ts): ..."), so this wrapper doesn't need to assume which. Mirrors
+    // the actionOutcome pattern above: ground the reply in what JARVIS
+    // genuinely just perceived instead of letting the model guess or
+    // claim it can't see/watch anything.
     if (visionContext) {
       components.push(
-        `\nYou just looked at the user's screen (real screenshot, analyzed just now) to help answer this. ` +
-          `What you saw:\n${visionContext}`
+        `\nYou just used real vision (screen capture and/or video frame sampling, analyzed just now, whichever ` +
+          `applies below) to help answer this. What you saw:\n${visionContext}`
       );
       components.push(
-        `Answer using what you actually saw above. Speak naturally as if you just glanced at the screen — don't ` +
-          `mention "screenshot" or "vision provider" mechanics, just answer like you can see it, because you can.`
+        `Answer using what you actually saw above. Speak naturally as if you genuinely looked/watched — don't ` +
+          `mention "screenshot"/"frames"/"vision provider" mechanics, just answer like you can see it, because ` +
+          `you can. If the description leaves something genuinely ambiguous, say so honestly rather than guessing.`
       );
     }
 

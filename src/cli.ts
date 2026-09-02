@@ -18,6 +18,7 @@ import { HudServer } from "./phase2/hud-server";
 import { runPowerShell } from "./phase3/windows-control";
 import { VisionSystem } from "./phase3/vision-system";
 import { OllamaVisionProvider } from "./phase3/ollama-vision-provider";
+import { VideoAnalyzer } from "./phase3/video-analyzer";
 import { proactivityEngine } from "./core/proactivity";
 import { runAllMonitors } from "./core/system-monitors";
 import { sendSms } from "./core/sms";
@@ -710,6 +711,61 @@ async function main() {
 
         console.log("\n" + "=".repeat(70));
       }
+    } else if (command === "video-test") {
+      // bun run dev video-test <path-to-video> ["<question>"]
+      // Exercises the new Phase 3 video understanding (src/phase3/
+      // video-analyzer.ts) - real ffprobe/ffmpeg frame extraction at even
+      // real timestamps, each frame run through the same real
+      // VisionSystem/OllamaVisionProvider vision-test above uses. No local
+      // $0 model understands video directly, so the per-frame descriptions
+      // are handed to the real conversational LLM gateway to synthesize a
+      // single answer about what happens across the whole clip - same
+      // "small model perceives each frame, big model reasons over the
+      // sequence" split used for screen-vision in orchestrator.ts.
+      // Requires ffmpeg/ffprobe on PATH and Ollama running with moondream
+      // pulled (same requirement as vision-test above).
+      const videoPath = args[1];
+      const question = args.slice(2).join(" ") || "Describe what happens in this video, in order.";
+      if (!videoPath) {
+        console.log('\nUsage: bun run dev video-test <path-to-video> ["<question>"]');
+        console.log("  Pass any local video file (mp4/mov/avi/mkv/webm).");
+        console.log("  Requires ffmpeg/ffprobe on PATH, and Ollama running locally with: ollama pull moondream");
+      } else {
+        console.log("\n" + "=".repeat(70));
+        console.log("🎬 VIDEO TEST (real ffmpeg frame sampling + real Ollama vision per frame)");
+        console.log("=".repeat(70));
+
+        const analyzer = new VideoAnalyzer();
+        const analysis = await analyzer.analyzeVideo(videoPath);
+
+        console.log(`\n📋 Per-frame descriptions (${analysis.frames.length} real frames, ${analysis.durationSeconds.toFixed(1)}s total):`);
+        for (const frame of analysis.frames) {
+          console.log(`   [${frame.timestampSeconds.toFixed(1)}s] ${frame.description}`);
+        }
+
+        const frameLines = analysis.frames
+          .map((f) => `[${f.timestampSeconds.toFixed(1)}s] ${f.description}`)
+          .join("\n");
+        const synthesisPrompt =
+          `You were given a real video, ${analysis.durationSeconds.toFixed(1)} seconds long, as a series of ` +
+          `still frames sampled in order over time (not the full video - you're reasoning from these ` +
+          `snapshots). Each frame was independently described by a vision model with no awareness of the ` +
+          `others. Frame descriptions, in chronological order:\n\n${frameLines}\n\n` +
+          `Based on this sequence, answer: ${question}\n` +
+          `Reason about what's changing or staying the same across frames to infer motion/events. If the ` +
+          `frames don't give enough to answer confidently, say so honestly rather than guessing.`;
+
+        const gateway = createDefaultGateway();
+        const modelProvider = new GatewayModelProvider(gateway);
+        const synthesis = await modelProvider.complete(
+          [{ role: "user", content: synthesisPrompt }],
+          { temperature: 0.3, maxTokens: 500 }
+        );
+
+        console.log(`\n🧠 Question: ${question}`);
+        console.log(`\n💬 Answer: ${synthesis.content.trim()}`);
+        console.log("\n" + "=".repeat(70));
+      }
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -726,6 +782,7 @@ async function main() {
       console.log('  bun run dev listen - Real always-on voice assistant: say "Jarvis", it listens, thinks, and speaks back (Windows only, needs scripts/setup-voice.ps1 run first)');
       console.log('  bun run dev conversation "<text>" - Phase 1.5 conversational intelligence, real LLM + memory/context');
       console.log("  bun run dev vision-test <path>   - Real Ollama vision model on a real image (Phase 3)");
+      console.log('  bun run dev video-test <path> ["<question>"] - Real frame-sampled video understanding (Phase 3)');
     }
   } finally {
     await closeDatabase();
