@@ -79,15 +79,37 @@ export class OllamaVisionProvider implements VisionProvider {
   }
 
   async detectObjects(imageBuffer: Buffer): Promise<Array<{ label: string; confidence: number }>> {
+    // [2026-09-02] Real live bug found and fixed: the previous prompt
+    // ("List only the distinct physical objects... no descriptions or
+    // punctuation") got a genuinely EMPTY response from moondream every
+    // time - confirmed directly against Ollama's raw API (eval_count: 1,
+    // response: ""), not a parsing bug in this file. moondream is a
+    // small model and doesn't handle that terse an imperative well. A
+    // plain, natural question gets a real (if still sometimes
+    // incomplete - moondream can still miss an object in a busy scene,
+    // a genuine model-capability ceiling, not fixable by more prompt
+    // tweaking) answer instead of nothing.
     const text = await this.generate(
       imageBuffer,
-      "List only the distinct physical objects visible in this image, one per line, no descriptions or punctuation."
+      "What objects are in this image? List each one on its own line."
     );
 
+    // [2026-09-02] Real bug found live: the new, more natural prompt
+    // above gets moondream to actually answer (vs. the old prompt's
+    // empty response - see the comment above), but its phrasing is
+    // wordier than the old "no descriptions" instruction expected - a
+    // genuine, correct answer like "Three red circles on a white
+    // background." is 41 characters, one over the old <40 cap, and was
+    // being silently discarded here. Confirmed directly: the raw Ollama
+    // response was non-empty and correct, this filter alone is what
+    // turned it into "(none)". Raised to 120 so a real one-sentence
+    // object description survives; still filters out an actual multi-
+    // sentence paragraph the model might occasionally return instead of
+    // a real list.
     const labels = text
       .split("\n")
       .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
-      .filter((line) => line.length > 0 && line.length < 40);
+      .filter((line) => line.length > 0 && line.length < 120);
 
     // confidence: 1.0 is an explicit placeholder, not a real score — see
     // class header comment.
