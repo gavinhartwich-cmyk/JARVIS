@@ -60,6 +60,26 @@
  * driving WPF media components from a plain console script with no UI.
  * Not yet confirmed live - needs Gavin's real hardware to know if this
  * actually removes the crackle.
+ *
+ * [UPDATE 2026-09-02] Real, live-found regression in a genuinely new
+ * execution context: the DoEvents pump loop above had only ever been
+ * exercised via a normal foreground `bun run dev listen` terminal before
+ * this session's background/hidden run mode (start-jarvis.ps1) existed.
+ * Gavin's first real background-mode test: "when it did speak it was the
+ * crackley bad bounce" - the same symptom the DoEvents fix above was
+ * built to prevent, now reappearing in a context that fix was never
+ * actually tested in. Real, well-documented Windows behavior that
+ * plausibly explains it: background/windowless processes can receive
+ * reduced CPU scheduling priority, and this loop is genuinely
+ * timing-sensitive - a throttled process could silently starve the
+ * DoEvents pump just enough to reintroduce the stutter. Mitigated by
+ * explicitly raising this PowerShell process's own priority class
+ * (`AboveNormal`) at the start of the script, independent of whether its
+ * parent window is hidden. Disclosed honestly: this is a well-reasoned
+ * hypothesis based on documented Windows scheduling behavior, not a
+ * confirmed root cause - audio quality can't be verified from here at
+ * all (no way to listen to real playback), so this needs Gavin's own
+ * live confirmation after a restart to know whether it actually helped.
  */
 
 import { writeFileSync, unlinkSync } from "node:fs";
@@ -141,6 +161,24 @@ export async function playWavBuffer(audio: Buffer, timeoutMs = 30_000, signal?: 
 $path = "${psEscape(path)}"
 $played = $false
 try {
+  # [ADDED 2026-09-02] Real, live-found regression: this exact DoEvents
+  # pump loop (fixed 2026-08-31 for the original crackle) had never been
+  # exercised in HIDDEN/BACKGROUND mode before start-jarvis.ps1 existed -
+  # Gavin, on his first real background-mode test: "when it did speak it
+  # was the crackley bad bounce." Real, well-documented Windows behavior
+  # that plausibly explains it: background/windowless processes can get
+  # reduced CPU scheduling priority, and this loop is genuinely
+  # timing-sensitive (needs DoEvents serviced roughly every 15ms to keep
+  # Media Foundation's callbacks flowing) - a throttled process could
+  # silently reintroduce the exact stutter the loop exists to prevent.
+  # Real, direct mitigation: explicitly raise THIS process's own priority
+  # class, independent of whether its parent window is hidden. Best-effort
+  # (wrapped in its own try/catch) - if raising priority fails for any
+  # reason, playback still proceeds at normal priority rather than
+  # aborting over it.
+  try {
+    [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal
+  } catch {}
   Add-Type -AssemblyName PresentationCore
   Add-Type -AssemblyName System.Windows.Forms
   $player = New-Object System.Windows.Media.MediaPlayer
