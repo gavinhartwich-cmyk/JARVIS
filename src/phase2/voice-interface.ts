@@ -454,6 +454,33 @@ export class VoiceInterface {
     // wants to say" logic a cold wake word already needed, so a
     // barge-in transitions straight into it, no separate code path.
     const wasInterruption = this.isSpeaking;
+
+    // [ADDED 2026-09-02] Real, live-found fix - see
+    // config.wakeWord.interruptionConfidenceThreshold's own comment for
+    // the full data: a real ambient-house-noise trigger (60.2%
+    // confidence) wrongly aborted an in-progress real reply. Gavin:
+    // "it could also be that it thought i was interupting when i wasnt
+    // it was just the sounds of my house." Only the INTERRUPTION case
+    // gets this higher bar - the initial idle->active wake word stays as
+    // sensitive as Gavin wants it (sensitivity: 0.05, unchanged); this
+    // only filters a candidate trigger that arrives WHILE JARVIS is
+    // already speaking. A low-confidence hit here is simply ignored -
+    // not logged as a real interruption, playback keeps going - rather
+    // than treated as a real (but likely false) barge-in.
+    if (wasInterruption && event.confidence < this.config.wakeWord.interruptionConfidenceThreshold) {
+      console.log(
+        `\n🙉 Wake-word trigger during playback ignored - confidence ${(event.confidence * 100).toFixed(1)}% ` +
+          `is below the ${(this.config.wakeWord.interruptionConfidenceThreshold * 100).toFixed(0)}% bar for treating ` +
+          `it as a real interruption (likely ambient noise, not a deliberate "Jarvis"). Reply continues.`
+      );
+      // Real re-arm (see wake-word-detector.ts's rearm() comment): without
+      // this, the detector's own one-shot latch stays "used up" for the
+      // rest of this reply's playback, silently blocking a genuine
+      // follow-up interruption attempt from ever firing again.
+      this.wakeWordDetector?.rearm();
+      return;
+    }
+
     if (wasInterruption) {
       console.log(`\n⏹️  Interrupted mid-speech - stopping and listening now.`);
       this.currentPlaybackAbort?.abort();

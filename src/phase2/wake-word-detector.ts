@@ -203,6 +203,26 @@ export class WakeWordDetector {
   }
 
   /**
+   * [ADDED 2026-09-02] Real, minimal latch reset - does none of
+   * startListening()'s other work (no daemon spawn/warm-up wait, no
+   * isListening/listening-started state change), just clears the
+   * one-shot `triggered` flag. Needed for a real, live-found case:
+   * during isSpeaking, processAudioChunk() is called directly (see
+   * voice-interface.ts's processMicChunk()) without an intervening
+   * startListening()/stopListening() cycle - if a candidate trigger
+   * fires but voice-interface.ts decides it's too low-confidence to
+   * treat as a real interruption (see its own
+   * interruptionConfidenceThreshold comment), the latch would otherwise
+   * stay "used up" for the rest of that reply, silently preventing a
+   * real follow-up interruption attempt from ever firing again until
+   * the next full turn. This re-arms detection without restarting
+   * anything else.
+   */
+  rearm(): void {
+    this.triggered = false;
+  }
+
+  /**
    * Start listening for wake word
    */
   async startListening(): Promise<void> {

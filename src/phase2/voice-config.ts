@@ -11,6 +11,28 @@ export interface VoiceConfig {
     keyword: string; // "jarvis" or custom keyword
     sensitivity: number; // 0-1, higher = more sensitive
     modelPath?: string; // Path to openWakeWord model
+    // [ADDED 2026-09-02] Real, live-found problem, not hypothetical: with
+    // `sensitivity` deliberately this low (0.05, per Gavin's own earlier
+    // request, so a bare "Jarvis" anywhere in speech reliably starts a
+    // NEW conversation from idle), the exact same low bar also applies
+    // when a wake-word event fires WHILE JARVIS is already mid-reply
+    // (isSpeaking) - which is treated as a real barge-in interruption
+    // (see voice-interface.ts's handleWakeWord()). Confirmed directly
+    // from a real live session's log: a genuine ambient-house-noise
+    // false trigger scored 60.2% confidence and wrongly aborted an
+    // in-progress real reply - Gavin: "it could also be that it thought
+    // i was interupting when i wasnt it was just the sounds of my
+    // house." Checking every real trigger in that same log showed the
+    // confidence distributions genuinely OVERLAP (deliberate cold-start
+    // triggers scored as low as 5.5%, the false interruption scored
+    // 60.2%) - a single universal threshold can't cleanly separate them.
+    // This is a SEPARATE, higher bar specifically for treating a
+    // mid-reply trigger as a real interruption (not for the initial
+    // idle->active detection, which stays as sensitive as Gavin wants
+    // it) - a deliberate, disclosed, adjustable trade-off: losing a real
+    // in-progress reply to ambient noise is worse than occasionally
+    // needing to say "Jarvis" more clearly to actually interrupt one.
+    interruptionConfidenceThreshold: number;
   };
 
   // Speech recognition (Whisper)
@@ -156,6 +178,19 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     // or MIC_GAIN) rather than lowering this further into the noise
     // floor, which would just trade missed wake-ups for false triggers.
     sensitivity: 0.05,
+    // [ADDED 2026-09-02] See this field's own interface comment above for
+    // the full real finding - a real ambient-noise false trigger scored
+    // 60.2% and wrongly interrupted an in-progress reply. 0.75 is set
+    // meaningfully above that one observed false positive, while still
+    // below the very top of the genuine cold-start range (99.9% was seen
+    // for an unambiguous deliberate "Jarvis"). Real, disclosed
+    // uncertainty, same honesty as the sensitivity value above: this is
+    // one real data point, not a large validated data set - if genuine
+    // mid-reply interruption attempts start getting missed, that means
+    // this is set too high for Gavin's real room/mic and should come
+    // down; if ambient noise still interrupts real replies, it needs to
+    // go higher.
+    interruptionConfidenceThreshold: 0.75,
   },
   speechRecognition: {
     enabled: true,
