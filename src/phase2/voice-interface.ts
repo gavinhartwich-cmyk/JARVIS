@@ -707,17 +707,60 @@ export class VoiceInterface {
       return;
     }
 
+    // [2026-09-02] Real, live-found bug fixed: directedAtJarvisCheck used
+    // to run BEFORE the filler acknowledgment - meaning the one thing
+    // built specifically to eliminate dead air (the "one moment" filler,
+    // 2026-08-31) had a brand-new LLM call sitting in front of it,
+    // guaranteeing real dead air before even that instant feedback could
+    // play. Confirmed live in Gavin's own first real background-mode
+    // test: a full session's worth of turns never produced a single
+    // audible reply or visible "🤖 JARVIS processing" log line - every
+    // turn stalled silently after STT, and he gave up and barged in
+    // (correctly detected as a real interruption) before anything ever
+    // got a chance to speak. Reordered: play the filler FIRST (same real
+    // instant-feedback purpose as before), THEN run the directed-at-
+    // JARVIS check while any further "thinking" latency is already
+    // covered by having said *something* real to the user. Real,
+    // disclosed trade-off: a rare "not directed" utterance will now have
+    // already gotten a "one moment" filler spoken before JARVIS
+    // recognizes it wasn't for him - a minor UX inconsistency, not a
+    // dishonesty problem (classifyDirectedAtJarvis is deliberately biased
+    // toward "true" already, so this case is meant to be rare).
+    //
+    // Real timing diagnostics added in the same pass (not just a
+    // reorder) - every stage below now logs its own real elapsed time,
+    // so if something IS still slow, the next live log shows exactly
+    // which stage, instead of another silent multi-second gap with
+    // nothing to go on.
+    const fillerStart = Date.now();
+    const filler = await this.ensureFillerAudio();
+    if (filler) {
+      try {
+        await this.playInterruptible(filler.audio);
+      } catch (err) {
+        console.log(`   ⚠️  Filler playback failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+      }
+      console.log(`   ⏱️  Filler ack: ${Date.now() - fillerStart}ms`);
+      // A barge-in during the filler already started a whole new turn
+      // (handleWakeWord() ran, turnId moved on) - stop here rather than
+      // generate/speak a reply to a question that's no longer current.
+      if (this.turnId !== myTurnId) return;
+    }
+
     // Real environmental-audio-awareness check (2026-09-02): the wake
     // word is deliberately tuned to fire on bare "Jarvis" anywhere in
     // speech (sensitivity 0.05, per Gavin), which is exactly what makes
     // it also fire on speech that merely CONTAINS the name without being
     // addressed to JARVIS at all - a TV/radio mention, someone else in
     // the room named Jarvis, a person talking ABOUT JARVIS rather than
-    // TO it. Run before the filler/response below so a false wake-word
-    // trigger doesn't cost a real LLM call, TTS synthesis, or an
-    // out-of-place spoken reply to overheard conversation.
+    // TO it. Now runs AFTER the filler (see the reorder comment above)
+    // so a false wake-word trigger still costs a short filler synthesis,
+    // but not a real LLM reply/TTS synthesis or an out-of-place spoken
+    // answer to overheard conversation.
     if (this.config.conversation.directedAtJarvisCheck) {
+      const classifyStart = Date.now();
       const directed = await this.classifyDirectedAtJarvis(result.text);
+      console.log(`   ⏱️  Directed-at-JARVIS check: ${Date.now() - classifyStart}ms (result: ${directed})`);
       // A barge-in during this classification call already started a
       // whole new turn (handleWakeWord() ran, turnId moved on) - bail
       // out rather than act on a stale classification for a turn that's
@@ -741,27 +784,9 @@ export class VoiceInterface {
       }
     }
 
-    // Real "thinking" acknowledgment (2026-08-31) - see fillerAudio's own
-    // comment above for the full story. Played and awaited BEFORE the
-    // slow respondToText() call below, not overlapping it - this stays
-    // within the existing sequential LISTEN -> THINK -> SPEAK -> WAIT
-    // design; it just adds one more real, short SPEAK step ahead of the
-    // slow one instead of dead air. Best-effort: a filler synthesis/
-    // playback failure is logged but never blocks the real response.
-    const filler = await this.ensureFillerAudio();
-    if (filler) {
-      try {
-        await this.playInterruptible(filler.audio);
-      } catch (err) {
-        console.log(`   ⚠️  Filler playback failed (non-fatal): ${err instanceof Error ? err.message : err}`);
-      }
-      // A barge-in during the filler already started a whole new turn
-      // (handleWakeWord() ran, turnId moved on) - stop here rather than
-      // generate/speak a reply to a question that's no longer current.
-      if (this.turnId !== myTurnId) return;
-    }
-
+    const respondStart = Date.now();
     const { response, audio } = await this.respondToText(result.text);
+    console.log(`   ⏱️  Real response generation (LLM + any real action + TTS synthesis): ${Date.now() - respondStart}ms`);
     // The "thinking" gap itself (the real LLM/app-control/TTS-synthesis
     // call above) isn't currently interruptible - JARVIS isn't speaking
     // during it, so there's nothing playing to barge in on; a wake word
