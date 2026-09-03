@@ -396,6 +396,20 @@ export class VoiceInterface {
 
     this.isRunning = true;
 
+    // [ADDED 2026-09-02] Real fix for a real, live-found problem: kick off
+    // TTS warm-up now, NOT awaited - see ISpeechSynthesizer.warmUp?()'s
+    // own comment for the full story (Chatterbox's real one-time model-
+    // load/voice-conditioning cost, confirmed live at ~65s, was
+    // previously paid silently in the middle of the first real reply).
+    // Deliberately fire-and-forget: wake-word listening below starts
+    // immediately regardless, so this doesn't delay JARVIS being ready to
+    // hear "Jarvis" - it just means the voice model is very likely warm
+    // by the time a real reply actually needs it, instead of guaranteed
+    // cold.
+    this.speechSynthesizer?.warmUp?.().catch((err) => {
+      console.log(`   ⚠️  TTS warm-up failed (non-fatal, will retry lazily on first real use): ${err instanceof Error ? err.message : err}`);
+    });
+
     if (this.wakeWordDetector) {
       console.log(`\n🎤 Waiting for wake word: "${this.config.wakeWord.keyword}"`);
       await this.wakeWordDetector.startListening();

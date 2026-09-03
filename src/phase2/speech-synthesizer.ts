@@ -51,6 +51,17 @@ export interface ISpeechSynthesizer {
   // a fresh subprocess per call and Fish Audio is plain HTTP, so neither
   // implements this - added 2026-08-31 alongside Chatterbox.
   shutdown?(): void;
+  // [ADDED 2026-09-02] Real, live-found gap: without this, the Chatterbox
+  // daemon's one-time model-load + voice-conditioning cost (confirmed
+  // live: ~65s wall time, mostly process spawn + PyTorch/CUDA model
+  // loading, not the ~2s of actual per-request inference) was paid
+  // silently in the middle of the FIRST real user request after every
+  // `listen` restart - dead air for over a minute before anything could
+  // speak, which is exactly what startled Gavin on his own live restart
+  // ("jump scare"). Optional (same reasoning as shutdown?() above) since
+  // only a persistent-daemon backend has a real cold-start cost worth
+  // paying early; Piper/Fish Audio don't implement this.
+  warmUp?(): Promise<void>;
 }
 
 function resolvePiperPaths(config: SynthesizerConfig) {

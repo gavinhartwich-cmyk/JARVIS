@@ -254,6 +254,23 @@ export class ChatterboxSynthesizer implements ISpeechSynthesizer {
     this.speakingRate = Math.max(0.5, Math.min(2.0, rate));
   }
 
+  /**
+   * [ADDED 2026-09-02] Real, live-found fix: just calls the same real
+   * ensureDaemonStarted() a normal synthesize() call would lazily trigger
+   * on its own - the only difference is WHEN. Called proactively by
+   * cli.ts's `listen` command right after startup (not awaited/blocking -
+   * fired in the background so mic/wake-word detection isn't held up
+   * waiting for it) so the real ~65s one-time model-load/voice-
+   * conditioning cost gets paid during the "just started, nobody's
+   * talking yet" window instead of silently during the first real
+   * request. If a real request DOES arrive before this finishes, nothing
+   * breaks - synthesize() below awaits the exact same daemonReady promise
+   * either way, it just won't have gotten a head start.
+   */
+  async warmUp(): Promise<void> {
+    await this.ensureDaemonStarted();
+  }
+
   /** Real persistent-process teardown - called once at full session end
    * (VoiceInterface.stop()), NOT between turns. */
   shutdown(): void {
