@@ -15,9 +15,8 @@ import type { ModelProvider } from "../models/types";
 import { findCachedAnswer, recordCacheableEpisode } from "../core/episode-cache";
 import { telemetry, Stage } from "../core/telemetry";
 import { classifyIntent, type KnownAction } from "../core/intent-router";
-import { ScreenControl } from "../phase3/screen-control";
 import { identityEngine } from "../core/identity";
-import { recordAction, inverseOfScreenControlAction } from "../core/action-journal";
+import { capabilityRegistry } from "../core/capability-registry";
 
 const JARVIS_SYSTEM_PROMPT =
   "You are JARVIS, a helpful voice assistant. Keep replies short and " +
@@ -74,7 +73,6 @@ export class VoiceInterface {
   private speechRecognizer?: SpeechRecognizer;
   private speechSynthesizer?: SpeechSynthesizer;
   private modelProvider: ModelProvider;
-  private screenControl: ScreenControl;
   private deepHandler?: DeepHandler;
 
   private context: VoiceInteractionContext;
@@ -92,7 +90,6 @@ export class VoiceInterface {
     // Same Gemini -> Ollama -> OpenRouter gateway Phase 1 uses, so a voice
     // reply degrades to the local model instead of dying on a 429 too.
     this.modelProvider = modelProvider || new GatewayModelProvider(createDefaultGateway());
-    this.screenControl = new ScreenControl();
     this.deepHandler = deepHandler;
     this.context = {
       conversationId: `conversation-${Date.now()}`,
@@ -415,33 +412,18 @@ export class VoiceInterface {
 
   /**
    * TOOL path executor (architecture update section 8): runs a known
-   * action deterministically through ScreenControl — no model call at all,
-   * matching or failing exactly as the underlying automation does. Only
-   * open/close are wired to a real executor today; extending this to more
-   * verbs belongs with building each one's executor (capability registry,
-   * architecture doc step 8), not with guessing here that one exists.
+   * action deterministically through the capability registry
+   * (core/capability-registry.ts) — no model call at all, matching or
+   * failing exactly as the underlying executor does. VoiceInterface no
+   * longer needs to know ScreenControl exists, or that action-journal
+   * recording happens — that's the point of section 14's registry: adding
+   * a new capability shouldn't mean editing this branch.
    */
   private async executeKnownAction(action: KnownAction, traceId?: string): Promise<string> {
     let result: { success: boolean; error?: string };
     try {
       const identity = await identityEngine.resolveFromDeviceSession();
-      result =
-        action.name === "open_app"
-          ? await this.screenControl.openApp(action.target, identity)
-          : await this.screenControl.closeApp(action.target, identity);
-      // Action journal (architecture update sections 10-11): open/close
-      // have a clean, always-defined inverse (swap the verb) — recorded
-      // even on failure (with no inverse) so the journal reflects what was
-      // actually attempted, not just what succeeded.
-      void recordAction({
-        system: "screen_control",
-        tool: action.name,
-        parameters: { target: action.target },
-        success: result.success,
-        result: result.success ? undefined : { error: result.error },
-        riskTier: "normal",
-        inverseAction: result.success ? inverseOfScreenControlAction(action.name, action.target) : null,
-      });
+      result = await capabilityRegistry.execute(action.name, { target: action.target }, identity);
     } catch (error) {
       // Covers both a failed automation call and a failed identity
       // resolution (e.g. no database configured) — either way this must
