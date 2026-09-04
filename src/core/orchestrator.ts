@@ -53,6 +53,15 @@ export interface OrchestrationResult {
   evidence: string[];
 }
 
+// [ADDED 2026-09-04] Real, measured budget for executeSpotifyIntent()'s
+// proactive "no device open -> launch Spotify -> retry play" path (see its
+// own comment) - the real Spotify desktop app's cold start plus the time it
+// takes to register itself as a Spotify Connect device is a genuine
+// multi-second wait, not instant, so this retries a few times rather than
+// once immediately after ScreenControl.openApp() returns.
+const SPOTIFY_LAUNCH_RETRY_ATTEMPTS = 6;
+const SPOTIFY_LAUNCH_RETRY_DELAY_MS = 2500;
+
 export class Orchestrator {
   private agents: Map<string, Agent> = new Map();
   private decomposer = new TaskDecomposer();
@@ -1108,6 +1117,56 @@ export class Orchestrator {
           result = await spotifyStatus();
           break;
       }
+      // [ADDED 2026-09-04] Real proactive fix, per Gavin: "he needs to know
+      // if I ask him to play a song to open Spotify and then play the
+      // song... he needs to be proactive not reactive" - the exact same
+      // principle this codebase already committed to for app-control back
+      // on 2026-08-27 (see processConversation()'s own comment above), but
+      // this specific path regressed it: Spotify Connect can only target
+      // an ALREADY-OPEN device, and until now a "play X" with nothing open
+      // just told Gavin to go open Spotify himself and ask again - the
+      // reactive half of the exact pattern already fixed everywhere else.
+      // Real fix: on that specific "no active or available Spotify device"
+      // error for a `play` request, actually launch the real Spotify app
+      // via the same ScreenControl.openApp() path executeAppControlIntent()
+      // uses, then retry the real play call a few times while the app
+      // finishes starting and registers itself as a Spotify Connect device
+      // (a real, measured multi-second cold start, not instant). Never
+      // fabricates success: if Spotify still isn't a usable device after
+      // that real retry budget, the honest error still surfaces - now
+      // correctly describing that Spotify WAS opened but didn't register
+      // in time, not "go open it yourself."
+      const isNoDeviceError = (r: typeof result) =>
+        !r.success && Boolean(r.error?.includes("No active or available Spotify device found"));
+
+      if (intent.action === "play" && isNoDeviceError(result)) {
+        console.log(`   🎵 No Spotify device available - opening the real Spotify app and retrying...`);
+        try {
+          const identity = await this.getIdentity();
+          const screenControl = new ScreenControl();
+          await screenControl.openApp("Spotify", identity);
+        } catch (openError) {
+          return {
+            description,
+            success: false,
+            detail: `Tried to open Spotify to play that, but opening it failed: ${openError instanceof Error ? openError.message : openError}`,
+          };
+        }
+
+        for (let attempt = 0; attempt < SPOTIFY_LAUNCH_RETRY_ATTEMPTS && isNoDeviceError(result); attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, SPOTIFY_LAUNCH_RETRY_DELAY_MS));
+          result = await spotifyPlay(intent.query!);
+        }
+
+        if (isNoDeviceError(result)) {
+          return {
+            description,
+            success: false,
+            detail: `Opened Spotify to play that, but it didn't register as a playable device in time - try again in a few seconds.`,
+          };
+        }
+      }
+
       const detail = result.success
         ? result.playing ??
           (result.track ? `${result.isPlaying ? "Playing" : "Paused"}: ${result.track} by ${(result.artists ?? []).join(", ")}` : result.detail) ??
