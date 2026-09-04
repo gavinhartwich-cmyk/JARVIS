@@ -51,6 +51,16 @@ namespace JarvisHud
             // (0/1) instead, a simpler, better-supported WPF operation on
             // an already-live window.
             window.Show();
+
+            // [ADDED 2026-09-03] Real, separate full-screen overlay - see
+            // ScreenGlowWindow.xaml.cs's own doc comment for why this is a
+            // distinct window from MainWindow rather than just a bigger
+            // version of the corner HUD: it needs real click-through
+            // (WS_EX_TRANSPARENT) so it never blocks Gavin's own mouse or
+            // JARVIS's own UI Automation clicks while "acting" is true, and
+            // it polls the same real /state endpoint independently.
+            var glowWindow = new ScreenGlowWindow(url);
+            glowWindow.Show();
         }
     }
 }

@@ -1,0 +1,52 @@
+<Window x:Class="JarvisHud.ScreenGlowWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="JARVIS Screen Glow"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        ShowActivated="False"
+        Opacity="0"
+        IsHitTestVisible="False">
+    <!-- Real, click-through full-screen border - four thin edge strips,
+         each fading from a solid orange line at the very edge to fully
+         transparent a short distance inward, so it reads as a soft glow
+         around the screen rather than a hard rectangle. Real Win32
+         click-through (WS_EX_TRANSPARENT) is set in code-behind, not
+         achievable from XAML alone - see ScreenGlowWindow.xaml.cs. -->
+    <Grid>
+        <Grid.Resources>
+            <LinearGradientBrush x:Key="TopGlow" StartPoint="0,0" EndPoint="0,1">
+                <GradientStop Color="#FFB84D" Offset="0" />
+                <GradientStop Color="#00FFB84D" Offset="1" />
+            </LinearGradientBrush>
+            <LinearGradientBrush x:Key="BottomGlow" StartPoint="0,1" EndPoint="0,0">
+                <GradientStop Color="#FFB84D" Offset="0" />
+                <GradientStop Color="#00FFB84D" Offset="1" />
+            </LinearGradientBrush>
+            <LinearGradientBrush x:Key="LeftGlow" StartPoint="0,0" EndPoint="1,0">
+                <GradientStop Color="#FFB84D" Offset="0" />
+                <GradientStop Color="#00FFB84D" Offset="1" />
+            </LinearGradientBrush>
+            <LinearGradientBrush x:Key="RightGlow" StartPoint="1,0" EndPoint="0,0">
+                <GradientStop Color="#FFB84D" Offset="0" />
+                <GradientStop Color="#00FFB84D" Offset="1" />
+            </LinearGradientBrush>
+        </Grid.Resources>
+        <Rectangle VerticalAlignment="Top" Height="14" Fill="{StaticResource TopGlow}" />
+        <Rectangle VerticalAlignment="Bottom" Height="14" Fill="{StaticResource BottomGlow}" />
+        <Rectangle HorizontalAlignment="Left" Width="14" Fill="{StaticResource LeftGlow}" />
+        <Rectangle HorizontalAlignment="Right" Width="14" Fill="{StaticResource RightGlow}" />
+        <!-- A crisp 2px solid line right at the very edge on top of the
+             soft gradient, so the boundary itself reads clearly even on a
+             bright/busy desktop background, not just a vague fade. -->
+        <Rectangle VerticalAlignment="Top" Height="2" Fill="#FFB84D" />
+        <Rectangle VerticalAlignment="Bottom" Height="2" Fill="#FFB84D" />
+        <Rectangle HorizontalAlignment="Left" Width="2" Fill="#FFB84D" />
+        <Rectangle HorizontalAlignment="Right" Width="2" Fill="#FFB84D" />
+    </Grid>
+</Window>
