@@ -15,6 +15,7 @@ import { VoiceInterface } from "./phase2/voice-interface";
 import { DEFAULT_VOICE_CONFIG } from "./phase2/voice-config";
 import { runLiveHarness } from "./prototypes/gemini-live/cli-harness";
 import { runComparison } from "./prototypes/gemini-live/compare-latency";
+import { undoLastActions } from "./core/action-journal";
 import { writeFileSync } from "node:fs";
 
 /**
@@ -327,6 +328,23 @@ async function main() {
         "Say hello.",
       ];
       await runComparison(prompts, 3);
+    } else if (command === "undo") {
+      // Architecture update sections 10-11 (Action Journal + Undo).
+      const count = args[1] ? parseInt(args[1], 10) : 1;
+      console.log("\n" + "=".repeat(70));
+      console.log(`↩️  UNDO — reversing the last ${count} reversible action(s)`);
+      console.log("=".repeat(70));
+
+      const identity = await identityEngine.resolveFromDeviceSession();
+      const results = await undoLastActions(count, identity);
+
+      if (results.length === 0) {
+        console.log("\nNothing to undo — no recent reversible actions found.");
+      }
+      for (const r of results) {
+        console.log(r.success ? `\n✅ Undid "${r.tool}" (action ${r.actionId})` : `\n❌ Failed to undo "${r.tool}": ${r.error}`);
+      }
+      console.log("=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -342,6 +360,7 @@ async function main() {
       console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
       console.log('  bun run dev live-prototype "<text>" [--resume <handle>] - Gemini Live prototype (step 4, unverified, needs GEMINI_API_KEY)');
       console.log('  bun run dev compare-latency ["<text>"] - Current JARVIS vs Gemini Live latency comparison (step 5)');
+      console.log("  bun run dev undo [count]  - Undo the last [count] (default 1) reversible actions (step 7)");
     }
   } finally {
     await closeDatabase();

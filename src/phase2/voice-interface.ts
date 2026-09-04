@@ -17,6 +17,7 @@ import { telemetry, Stage } from "../core/telemetry";
 import { classifyIntent, type KnownAction } from "../core/intent-router";
 import { ScreenControl } from "../phase3/screen-control";
 import { identityEngine } from "../core/identity";
+import { recordAction, inverseOfScreenControlAction } from "../core/action-journal";
 
 const JARVIS_SYSTEM_PROMPT =
   "You are JARVIS, a helpful voice assistant. Keep replies short and " +
@@ -428,6 +429,19 @@ export class VoiceInterface {
         action.name === "open_app"
           ? await this.screenControl.openApp(action.target, identity)
           : await this.screenControl.closeApp(action.target, identity);
+      // Action journal (architecture update sections 10-11): open/close
+      // have a clean, always-defined inverse (swap the verb) — recorded
+      // even on failure (with no inverse) so the journal reflects what was
+      // actually attempted, not just what succeeded.
+      void recordAction({
+        system: "screen_control",
+        tool: action.name,
+        parameters: { target: action.target },
+        success: result.success,
+        result: result.success ? undefined : { error: result.error },
+        riskTier: "normal",
+        inverseAction: result.success ? inverseOfScreenControlAction(action.name, action.target) : null,
+      });
     } catch (error) {
       // Covers both a failed automation call and a failed identity
       // resolution (e.g. no database configured) — either way this must
