@@ -109,3 +109,33 @@ export function normalizeNumbersForSpeech(text: string): string {
     return numberToWords(value);
   });
 }
+
+/**
+ * [ADDED 2026-09-03] Real sentence splitter for pipelined TTS - see
+ * voice-interface.ts's speakPipelined(). Deliberately called on the RAW
+ * LLM response text, BEFORE normalizeNumbersForSpeech() runs on each
+ * resulting chunk individually - numberToWords() above inserts its own
+ * mid-number "." breaks (the mumbling mitigation) specifically to look
+ * like a sentence boundary to the TTS model, which would wrongly
+ * fragment a real chunk if this splitter ran on already-normalized text
+ * ("seventy-eight thousand" and "seven hundred twenty" would end up as
+ * two separate synthesis+playback chunks instead of one number spoken
+ * together).
+ *
+ * A real, disclosed heuristic, not a full NLP-grade sentence segmenter:
+ * splits on ./!/? followed by whitespace and a capital letter, quote, or
+ * digit (the start of a plausible next sentence). Decimals ("3.14") are
+ * naturally safe - there's never whitespace between the decimal point
+ * and the following digit, so the required `\s+` lookahead never
+ * matches there. Known, accepted limitation: a mid-sentence abbreviation
+ * ("Mr. Smith", "e.g. this") can still cause an over-split - JARVIS's
+ * own formal, terse phrasing rarely produces these, and a wrong split
+ * here only costs an extra pause between two playback chunks, not lost
+ * or corrupted text (every chunk is still spoken, just separately).
+ */
+export function splitIntoSentences(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const parts = trimmed.split(/(?<=[.!?])\s+(?=[A-Z0-9"'“])/);
+  return parts.map((s) => s.trim()).filter((s) => s.length > 0);
+}

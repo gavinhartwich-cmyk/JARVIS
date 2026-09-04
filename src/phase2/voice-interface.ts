@@ -16,7 +16,7 @@ import type { ModelProvider } from "../models/types";
 import { playWavBuffer, PlaybackInterruptedError } from "./audio-player";
 import type { Orchestrator } from "../core/orchestrator";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
-import { normalizeNumbersForSpeech } from "./text-normalizer";
+import { normalizeNumbersForSpeech, splitIntoSentences } from "./text-normalizer";
 
 // Real end-of-turn detection (2026-08-30): nothing previously ever called
 // speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
@@ -942,37 +942,34 @@ export class VoiceInterface {
     }
 
     const respondStart = Date.now();
-    const { response, audio } = await this.respondToText(result.text);
-    console.log(`   ⏱️  Real response generation (LLM + any real action + TTS synthesis): ${Date.now() - respondStart}ms`);
-    // The "thinking" gap itself (the real LLM/app-control/TTS-synthesis
-    // call above) isn't currently interruptible - JARVIS isn't speaking
-    // during it, so there's nothing playing to barge in on; a wake word
-    // said during this gap is handled as an ordinary new turn once this
-    // one's stale response is discarded here, not as a special case.
+    // [UPDATE 2026-09-03] Real speed feature: LLM text generation still
+    // has to finish completely first (no true incremental LLM streaming
+    // reaches this layer yet - see conversation-intelligence.ts's own
+    // streamFromModel() comment), but speaking it no longer waits for
+    // the WHOLE reply to finish synthesizing as one buffer -
+    // speakPipelined() below starts playing sentence 1 as soon as it's
+    // ready and synthesizes the rest while earlier sentences play. Was
+    // respondToText() (still used by respondToText()'s other real
+    // caller, the `voice-reply` CLI command - see that method's own
+    // comment for why it keeps the single-buffer behavior).
+    const response = await this.generateAndRecordResponse(result.text);
+    console.log(`   ⏱️  Real response generation (LLM + any real action): ${Date.now() - respondStart}ms`);
+    // The "thinking" gap itself (the real LLM/app-control call above)
+    // isn't currently interruptible - JARVIS isn't speaking during it,
+    // so there's nothing playing to barge in on; a wake word said during
+    // this gap is handled as an ordinary new turn once this one's stale
+    // response is discarded here, not as a special case.
     if (this.turnId !== myTurnId) return;
 
-    if (audio) {
-      const peakAmplitude = computeWavPeakAmplitude(audio.audio);
-      const peakDesc =
-        peakAmplitude < 0
-          ? "unrecognized WAV format"
-          : peakAmplitude < 0.02
-            ? `${peakAmplitude.toFixed(4)} - SUSPICIOUSLY QUIET, likely a dead/near-silent synthesis, not a playback-routing issue`
-            : peakAmplitude.toFixed(4);
-      console.log(`\n🔊 Response ready: ${audio.duration}ms, peak amplitude: ${peakDesc}`);
-      // Block on real playback (see playInterruptible's own comment for
-      // what makes this interruptible now, unlike a plain playWavBuffer
-      // call).
-      try {
-        await this.playInterruptible(audio.audio);
-      } catch (err) {
-        console.log(`   ⚠️  Playback failed: ${err instanceof Error ? err.message : err}`);
-      }
+    const speakStart = Date.now();
+    const completed = await this.speakPipelined(response, myTurnId);
+    console.log(`   ⏱️  Pipelined TTS synthesis + playback: ${Date.now() - speakStart}ms`);
+    if (!completed) {
       // A barge-in mid-reply already started a whole new turn - don't
       // also run this turn's own completion/resume-listening logic
       // below, which would fight handleWakeWord()'s already-in-progress
       // state for the new turn.
-      if (this.turnId !== myTurnId) return;
+      return;
     }
 
     // Interaction complete
@@ -1076,13 +1073,15 @@ export class VoiceInterface {
   }
 
   /**
-   * Run one text-in, text-and-audio-out turn: push the user turn, get a
-   * real JARVIS response, synthesize it if TTS is enabled, push the
-   * assistant turn. Shared by the mic pipeline (handleUserSpeech) and any
-   * text-only caller (e.g. the `voice-reply` CLI command, which has no
-   * mic to drive the wake-word/STT half of the pipeline).
+   * [ADDED 2026-09-03] Shared text-generation half of a turn - push the
+   * user turn, get a real JARVIS response, push the assistant turn.
+   * Extracted out of respondToText() so the mic pipeline
+   * (handleUserSpeech) can use the SAME real response-generation/history
+   * bookkeeping while diverging on what happens to the audio
+   * (speakPipelined() below, not a single whole-reply synthesize() call)
+   * - see speakPipelined()'s own comment for why.
    */
-  async respondToText(userText: string): Promise<{ response: string; audio?: SynthesisResult }> {
+  private async generateAndRecordResponse(userText: string): Promise<string> {
     this.context.messageHistory.push({
       role: "user",
       content: userText,
@@ -1096,6 +1095,22 @@ export class VoiceInterface {
       content: response,
       timestamp: new Date(),
     });
+
+    return response;
+  }
+
+  /**
+   * Run one text-in, text-and-audio-out turn: get a real JARVIS response,
+   * synthesize the WHOLE reply as one buffer if TTS is enabled. Used by
+   * any text-only caller that wants one complete `SynthesisResult` back
+   * (e.g. the `voice-reply` CLI command, which saves it straight to a
+   * file - there's nothing to "play sentence by sentence" for that use
+   * case). The real mic pipeline (handleUserSpeech) does NOT use this -
+   * see speakPipelined() below for why real-time playback pipelines
+   * sentence-by-sentence instead.
+   */
+  async respondToText(userText: string): Promise<{ response: string; audio?: SynthesisResult }> {
+    const response = await this.generateAndRecordResponse(userText);
 
     let audio: SynthesisResult | undefined;
     if (this.speechSynthesizer) {
@@ -1113,6 +1128,102 @@ export class VoiceInterface {
     }
 
     return { response, audio };
+  }
+
+  /**
+   * [ADDED 2026-09-03] Real speed feature, per Gavin: "do both" (reply-
+   * length constraint + this). Speaks a real multi-sentence reply as a
+   * PIPELINE instead of one big buffer: synthesize sentence 1 and play
+   * it while sentence 2 is already being synthesized, then sentence 2
+   * plays while sentence 3 synthesizes, and so on. Chatterbox's own
+   * per-request synthesis time doesn't change - this doesn't make the
+   * model faster - but "time until Gavin hears the FIRST word" drops
+   * from "however long the whole reply takes to synthesize" down to
+   * "however long just the first sentence takes," and because the
+   * previous pass's maxTokens cut means most real replies are now only
+   * 1-3 sentences, this and that fix compound rather than duplicate each
+   * other (short replies still get whatever head start pipelining gives
+   * the first sentence; a reply that does run longer no longer forces
+   * total silence for its entire length).
+   *
+   * Deliberately NOT used by respondToText() (see its own comment) -
+   * this exists specifically for handleUserSpeech()'s real-time mic
+   * pipeline, where "say something as soon as possible" actually
+   * matters; a caller that wants one saved WAV file has no use for
+   * chunked playback.
+   *
+   * splitIntoSentences() runs on the RAW response text - each resulting
+   * chunk is normalized (normalizeNumbersForSpeech) independently right
+   * before its own synthesize() call, same as respondToText() already
+   * does for the whole reply. Returns false the moment a barge-in
+   * changes turnId mid-pipeline (caller should stop, same convention as
+   * every other turnId check in this file) or true on a clean finish.
+   */
+  private async speakPipelined(text: string, myTurnId: number): Promise<boolean> {
+    if (!this.speechSynthesizer) return true;
+
+    const sentences = splitIntoSentences(text);
+    if (sentences.length === 0) return true;
+
+    const synthesizeSentence = async (sentence: string): Promise<SynthesisResult | null> => {
+      try {
+        return await this.speechSynthesizer!.synthesize(normalizeNumbersForSpeech(sentence));
+      } catch (err) {
+        console.log(`   ⚠️  Sentence synthesis failed (skipping just this sentence, continuing with the rest): ${err instanceof Error ? err.message : err}`);
+        return null;
+      }
+    };
+
+    // The first sentence has nothing to overlap with yet - this await IS
+    // the real "time to first audio" cost pipelining is meant to shrink
+    // (down from the whole reply to just this one sentence).
+    let pending = synthesizeSentence(sentences[0]);
+
+    for (let i = 0; i < sentences.length; i++) {
+      if (this.turnId !== myTurnId) return false;
+      const current = await pending;
+      if (this.turnId !== myTurnId) return false;
+
+      // Kick off the NEXT sentence's synthesis now, before awaiting this
+      // one's playback below - it runs concurrently with playback, which
+      // is the entire point of pipelining. Chatterbox's daemon only
+      // handles one synthesize() at a time (by design - see
+      // chatterbox-synthesizer.ts's isSynthesizing guard), but that's
+      // fine here: this call happens after `current`'s own synthesis
+      // already resolved, so there's never two in flight at once, just
+      // this one overlapping with `current`'s playback instead of
+      // waiting for it to finish first.
+      if (i + 1 < sentences.length) {
+        pending = synthesizeSentence(sentences[i + 1]);
+      }
+
+      if (!current) continue; // this sentence's synthesis failed - real, disclosed gap in this one reply, not fatal to the rest
+
+      // [2026-09-03] cli.ts's ONLY hud.setState("speaking") trigger is
+      // this event - respondToText() used to fire it once per whole
+      // reply; fired here once, on the first real sentence, so the HUD
+      // still transitions to "speaking" (and does so as soon as actual
+      // audio exists, slightly earlier than before, not later).
+      if (i === 0) this.emit("audio-ready", current);
+
+      const peakAmplitude = computeWavPeakAmplitude(current.audio);
+      const peakDesc =
+        peakAmplitude < 0
+          ? "unrecognized WAV format"
+          : peakAmplitude < 0.02
+            ? `${peakAmplitude.toFixed(4)} - SUSPICIOUSLY QUIET, likely a dead/near-silent synthesis, not a playback-routing issue`
+            : peakAmplitude.toFixed(4);
+      console.log(`\n🔊 Sentence ${i + 1}/${sentences.length} ready: ${current.duration}ms, peak amplitude: ${peakDesc}`);
+
+      try {
+        await this.playInterruptible(current.audio);
+      } catch (err) {
+        console.log(`   ⚠️  Sentence playback failed: ${err instanceof Error ? err.message : err}`);
+      }
+      if (this.turnId !== myTurnId) return false;
+    }
+
+    return true;
   }
 
   /**
