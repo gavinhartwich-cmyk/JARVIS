@@ -430,6 +430,13 @@ export class VoiceInterface {
     this.speechSynthesizer?.warmUp?.().catch((err) => {
       console.log(`   ⚠️  TTS warm-up failed (non-fatal, will retry lazily on first real use): ${err instanceof Error ? err.message : err}`);
     });
+    // [ADDED 2026-09-03] Same real fix, same reasoning, for STT: the
+    // Whisper daemon's own one-time model-load cost (~1s, measured live)
+    // is now paid here instead of silently during the first real
+    // utterance - see speech-recognizer.ts's warmUp().
+    this.speechRecognizer?.warmUp?.().catch((err) => {
+      console.log(`   ⚠️  STT warm-up failed (non-fatal, will retry lazily on first real use): ${err instanceof Error ? err.message : err}`);
+    });
 
     if (this.wakeWordDetector) {
       console.log(`\n🎤 Waiting for wake word: "${this.config.wakeWord.keyword}"`);
@@ -470,6 +477,12 @@ export class VoiceInterface {
       } catch {
         // Ignore error if not currently recognizing
       }
+      // Same real-process-teardown reasoning as the wake-word detector
+      // and Chatterbox above (added 2026-09-03) - the Whisper daemon is
+      // now a persistent process too and needs the same explicit cleanup
+      // at full session end, or it would leak past this VoiceInterface's
+      // own lifetime.
+      this.speechRecognizer.shutdown();
     }
   }
 

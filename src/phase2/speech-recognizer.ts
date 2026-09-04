@@ -2,15 +2,27 @@
  * Phase 2: Speech Recognition
  *
  * Converts speech to text using a real local Whisper model (faster-whisper,
- * via scripts/whisper_transcribe.py — see recognizeAudio()), not a
+ * via scripts/whisper_transcribe_daemon.py — see runWhisper()), not a
  * simulation. "Streaming" here means audio chunks are buffered as they
  * arrive and the whole buffer is transcribed once recognition stops —
  * there is no true incremental/partial transcription yet, so
  * processStreamingChunk() does not emit fabricated partial-result text
  * anymore; that's a real follow-up, not built here.
+ *
+ * [UPDATE 2026-09-03] Real live-testing finding, per Gavin's "were stul
+ * SUPER slow": runWhisper() used to spawn a brand-new
+ * `python whisper_transcribe.py` process and reload the whole faster-
+ * whisper model from scratch on EVERY single utterance - measured live
+ * at ~1.18s of model-load cost paid again every turn, for a model,
+ * device, and compute_type that never actually change mid-session.
+ * Rewritten to the same persistent-daemon pattern already proven for
+ * Chatterbox (chatterbox-synthesizer.ts) and the wake-word detector: one
+ * long-lived `whisper_transcribe_daemon.py` process, one JSON
+ * request/response per stdin/stdout line, model loaded exactly once.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, ChildProcessByStdio } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,14 +45,14 @@ export interface SpeechRecognizerConfig {
   responseFormat: "text" | "json" | "verbose_json";
   sampleRate: number;
   pythonPath?: string; // Path to the venv python with faster-whisper installed
-  scriptPath?: string; // Path to scripts/whisper_transcribe.py
+  scriptPath?: string; // Path to scripts/whisper_transcribe_daemon.py
 }
 
 function resolveWhisperPaths(config: { pythonPath?: string; scriptPath?: string }) {
   const pythonPath =
     config.pythonPath || process.env.WHISPER_PYTHON_PATH || "tools/whisper/venv/bin/python";
   const scriptPath =
-    config.scriptPath || process.env.WHISPER_SCRIPT_PATH || "scripts/whisper_transcribe.py";
+    config.scriptPath || process.env.WHISPER_DAEMON_SCRIPT_PATH || "scripts/whisper_transcribe_daemon.py";
   return { pythonPath, scriptPath };
 }
 
@@ -97,6 +109,12 @@ export class SpeechRecognizer {
   private isProcessing: boolean = false;
   private audioBuffer: Buffer = Buffer.alloc(0);
   private startTime: Date = new Date();
+
+  // Persistent daemon state - see this file's header comment.
+  private daemonProc: ChildProcessByStdio<Writable, Readable, Readable> | null = null;
+  private daemonReady: Promise<void> | null = null;
+  private daemonStdoutBuffer = "";
+  private pendingRequest: { resolve: (v: WhisperScriptResult) => void; reject: (e: Error) => void } | null = null;
 
   constructor(config: SpeechRecognizerConfig) {
     this.model = config.model;
@@ -251,42 +269,111 @@ export class SpeechRecognizer {
   }
 
   /**
-   * Write the raw PCM buffer to a temp WAV file and run the real
-   * faster-whisper subprocess against it.
+   * Start (if not already starting/started) the persistent Whisper daemon
+   * and resolve once it reports {"ready": true}. Mirrors
+   * chatterbox-synthesizer.ts's ensureDaemonStarted() exactly - same
+   * newline-delimited-JSON stdin/stdout protocol shape, same
+   * single-pending-request assumption (fine here since runWhisper() is
+   * always awaited to completion by its one caller, recognizeAudio(),
+   * before the next call can start).
+   */
+  private ensureDaemonStarted(): Promise<void> {
+    if (this.daemonReady) return this.daemonReady;
+
+    const { pythonPath, scriptPath } = resolveWhisperPaths({});
+
+    this.daemonReady = new Promise((resolve, reject) => {
+      const proc = spawn(pythonPath, [scriptPath, this.model, this.language], {
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessByStdio<Writable, Readable, Readable>;
+      this.daemonProc = proc;
+
+      let readyResolved = false;
+
+      proc.stdout.on("data", (chunk: Buffer) => {
+        this.daemonStdoutBuffer += chunk.toString("utf-8");
+        let newlineIndex: number;
+        while ((newlineIndex = this.daemonStdoutBuffer.indexOf("\n")) !== -1) {
+          const line = this.daemonStdoutBuffer.slice(0, newlineIndex).trim();
+          this.daemonStdoutBuffer = this.daemonStdoutBuffer.slice(newlineIndex + 1);
+          if (!line) continue;
+
+          let parsed: any;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue; // not a JSON status line - ignore rather than crash
+          }
+
+          if (parsed.ready && !readyResolved) {
+            readyResolved = true;
+            console.log(`   📝 Whisper-${this.model} model loaded (persistent daemon, warm for the rest of this session)`);
+            resolve();
+          } else if (parsed.error) {
+            if (this.pendingRequest) {
+              this.pendingRequest.reject(new Error(parsed.error));
+              this.pendingRequest = null;
+            } else if (!readyResolved) {
+              readyResolved = true;
+              reject(new Error(parsed.error));
+            } else {
+              console.error(`   ⚠️  Whisper daemon error: ${parsed.error}`);
+            }
+          } else if (parsed.text !== undefined && this.pendingRequest) {
+            this.pendingRequest.resolve(parsed as WhisperScriptResult);
+            this.pendingRequest = null;
+          }
+        }
+      });
+
+      proc.stderr.on("data", (chunk: Buffer) => {
+        console.error(`   [whisper] ${chunk.toString("utf-8").trim()}`);
+      });
+
+      proc.on("error", (err) => {
+        this.daemonProc = null;
+        this.daemonReady = null;
+        if (!readyResolved) {
+          readyResolved = true;
+          reject(new Error(`Failed to launch whisper daemon at "${pythonPath}": ${err.message}. Run scripts/setup-voice.sh first.`));
+        }
+      });
+
+      proc.on("close", (code) => {
+        this.daemonProc = null;
+        this.daemonReady = null;
+        if (this.pendingRequest) {
+          this.pendingRequest.reject(new Error(`Whisper daemon exited (code ${code}) mid-request`));
+          this.pendingRequest = null;
+        }
+        if (!readyResolved) {
+          readyResolved = true;
+          reject(new Error(`Whisper daemon exited (code ${code}) before becoming ready`));
+        }
+      });
+    });
+
+    return this.daemonReady;
+  }
+
+  /**
+   * Write the raw PCM buffer to a temp WAV file and send one
+   * request/response round trip to the persistent Whisper daemon.
    */
   private async runWhisper(pcm: Buffer): Promise<WhisperScriptResult> {
-    const { pythonPath, scriptPath } = resolveWhisperPaths({});
     const wav = pcmToWav(pcm, this.sampleRate);
     const tempPath = join(tmpdir(), `jarvis-stt-${randomUUID()}.wav`);
     writeFileSync(tempPath, wav);
 
     try {
+      await this.ensureDaemonStarted();
+      if (!this.daemonProc) {
+        throw new Error("Whisper daemon is not running");
+      }
+
       return await new Promise<WhisperScriptResult>((resolve, reject) => {
-        const proc = spawn(pythonPath, [scriptPath, this.model, tempPath, this.language]);
-        const stdoutChunks: Buffer[] = [];
-        const stderrChunks: Buffer[] = [];
-        proc.stdout.on("data", (c: Buffer) => stdoutChunks.push(c));
-        proc.stderr.on("data", (c: Buffer) => stderrChunks.push(c));
-
-        proc.on("error", (err) => {
-          reject(new Error(`Failed to launch whisper at "${pythonPath}": ${err.message}. Run scripts/setup-voice.sh first.`));
-        });
-
-        proc.on("close", () => {
-          const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
-          let parsed: WhisperScriptResult;
-          try {
-            parsed = JSON.parse(stdout);
-          } catch {
-            reject(new Error(`whisper_transcribe.py produced non-JSON output: ${stdout || Buffer.concat(stderrChunks).toString("utf-8")}`));
-            return;
-          }
-          if (parsed.error) {
-            reject(new Error(`whisper_transcribe.py error: ${parsed.error}`));
-            return;
-          }
-          resolve(parsed);
-        });
+        this.pendingRequest = { resolve, reject };
+        this.daemonProc!.stdin.write(JSON.stringify({ audio_path: tempPath, language: this.language }) + "\n");
       });
     } finally {
       try {
@@ -294,6 +381,28 @@ export class SpeechRecognizer {
       } catch {
         // best-effort cleanup
       }
+    }
+  }
+
+  /**
+   * [ADDED 2026-09-03] Proactive daemon start, mirroring
+   * ChatterboxSynthesizer.warmUp() exactly - called fire-and-forget from
+   * voice-interface.ts's start() so the real ~1s model-load cost is paid
+   * during the "just started, nobody's talking yet" window instead of
+   * silently during the first real utterance.
+   */
+  async warmUp(): Promise<void> {
+    await this.ensureDaemonStarted();
+  }
+
+  /** Real persistent-process teardown - called once at full session end
+   * (VoiceInterface.stop()), NOT between turns. */
+  shutdown(): void {
+    if (this.daemonProc) {
+      this.daemonProc.stdin.end();
+      this.daemonProc.kill();
+      this.daemonProc = null;
+      this.daemonReady = null;
     }
   }
 
@@ -318,10 +427,22 @@ export class SpeechRecognizer {
 
   /**
    * Change model
+   *
+   * The daemon's model size is fixed at spawn time (unlike `language`,
+   * which is sent fresh on every request and needs no restart) - real
+   * limitation, not faked: kill the running daemon so the next
+   * transcription respawns it with the new size, same tradeoff
+   * ChatterboxSynthesizer.setVoice() already documents for its own
+   * daemon.
    */
   setModel(model: "tiny" | "base" | "small" | "medium" | "large") {
     this.model = model;
-    console.log(`🔄 Model changed to Whisper-${model}`);
+    if (this.daemonProc) {
+      this.daemonProc.kill();
+      this.daemonProc = null;
+      this.daemonReady = null;
+    }
+    console.log(`🔄 Model changed to Whisper-${model} (daemon will restart on next transcription)`);
   }
 
   /**
