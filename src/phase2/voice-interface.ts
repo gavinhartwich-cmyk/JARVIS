@@ -16,6 +16,7 @@ import type { ModelProvider } from "../models/types";
 import { playWavBuffer, PlaybackInterruptedError } from "./audio-player";
 import type { Orchestrator } from "../core/orchestrator";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
+import { normalizeNumbersForSpeech } from "./text-normalizer";
 
 // Real end-of-turn detection (2026-08-30): nothing previously ever called
 // speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
@@ -992,7 +993,16 @@ export class VoiceInterface {
 
     let audio: SynthesisResult | undefined;
     if (this.speechSynthesizer) {
-      audio = await this.speechSynthesizer.synthesize(response);
+      // [ADDED 2026-09-03] Real bug found live: Chatterbox mispronounced
+      // a real, correct answer ("78,720") as garbled nonsense - Gavin
+      // heard it as "78 7twane." Comma-formatted/large numbers are a
+      // real, known TTS weakness generally, not something JARVIS's own
+      // code was introducing - see text-normalizer.ts's own header
+      // comment. Only the audio gets the spelled-out version
+      // ("seventy-eight thousand, seven hundred twenty") - `response`
+      // itself stays as real, normal text for message history/logging/
+      // anything else that reads it as text, not speech.
+      audio = await this.speechSynthesizer.synthesize(normalizeNumbersForSpeech(response));
       this.emit("audio-ready", audio);
     }
 
