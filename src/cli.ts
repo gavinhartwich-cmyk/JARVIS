@@ -14,6 +14,7 @@ import { JARVISDeveloper } from "./phase1/developer";
 import { VoiceInterface } from "./phase2/voice-interface";
 import { DEFAULT_VOICE_CONFIG } from "./phase2/voice-config";
 import { runLiveHarness } from "./prototypes/gemini-live/cli-harness";
+import { runComparison } from "./prototypes/gemini-live/compare-latency";
 import { writeFileSync } from "node:fs";
 
 /**
@@ -316,6 +317,16 @@ async function main() {
         }
       }
       console.log("=".repeat(70));
+    } else if (command === "compare-latency") {
+      // Architecture update step 5. Needs a real GEMINI_API_KEY and at
+      // least one of Ollama/Gemini/OmniRoute reachable to produce anything
+      // but "unreachable" for both paths — see compare-latency.ts's header.
+      const prompts = args.length > 1 ? [args.slice(1).join(" ")] : [
+        "What's the capital of France?",
+        "How many ounces are in a pound?",
+        "Say hello.",
+      ];
+      await runComparison(prompts, 3);
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -330,6 +341,7 @@ async function main() {
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
       console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
       console.log('  bun run dev live-prototype "<text>" [--resume <handle>] - Gemini Live prototype (step 4, unverified, needs GEMINI_API_KEY)');
+      console.log('  bun run dev compare-latency ["<text>"] - Current JARVIS vs Gemini Live latency comparison (step 5)');
     }
   } finally {
     await closeDatabase();
