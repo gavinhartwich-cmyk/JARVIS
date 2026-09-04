@@ -55,7 +55,7 @@ function resolveChatterboxPaths(config: ChatterboxSynthesizerConfig) {
 }
 
 interface PendingRequest {
-  resolve: (v: { duration_ms: number }) => void;
+  resolve: (v: { duration_ms: number; vram_allocated_mb?: number; vram_reserved_mb?: number }) => void;
   reject: (e: Error) => void;
 }
 
@@ -131,7 +131,11 @@ export class ChatterboxSynthesizer implements ISpeechSynthesizer {
               console.error(`   ⚠️  Chatterbox daemon error: ${parsed.error}`);
             }
           } else if (parsed.done && this.pendingRequest) {
-            this.pendingRequest.resolve({ duration_ms: parsed.duration_ms });
+            this.pendingRequest.resolve({
+              duration_ms: parsed.duration_ms,
+              vram_allocated_mb: parsed.vram_allocated_mb,
+              vram_reserved_mb: parsed.vram_reserved_mb,
+            });
             this.pendingRequest = null;
           }
         }
@@ -189,7 +193,11 @@ export class ChatterboxSynthesizer implements ISpeechSynthesizer {
         throw new Error("Chatterbox daemon is not running");
       }
 
-      const { duration_ms } = await new Promise<{ duration_ms: number }>((resolve, reject) => {
+      const { duration_ms, vram_allocated_mb, vram_reserved_mb } = await new Promise<{
+        duration_ms: number;
+        vram_allocated_mb?: number;
+        vram_reserved_mb?: number;
+      }>((resolve, reject) => {
         this.pendingRequest = { resolve, reject };
         this.daemonProc!.stdin.write(JSON.stringify({ text, out_path: outPath }) + "\n");
       });
@@ -206,8 +214,19 @@ export class ChatterboxSynthesizer implements ISpeechSynthesizer {
         timestamp: new Date(),
       };
 
+      // [ADDED 2026-09-03] Real VRAM numbers now logged every request -
+      // see chatterbox_synthesize_daemon.py's own comment on why: a real,
+      // live-found ~60-100x within-session slowdown (2.1s -> 125.8s
+      // model time across one long `listen` run) needs real data to
+      // confirm or rule out GPU memory fragmentation as the cause, not
+      // another guess - this is what makes that checkable from the next
+      // long session's log instead of needing to reproduce it live.
+      const vramNote =
+        vram_allocated_mb !== undefined && vram_reserved_mb !== undefined
+          ? `, VRAM: ${vram_allocated_mb.toFixed(0)}MB allocated / ${vram_reserved_mb.toFixed(0)}MB reserved`
+          : "";
       console.log(
-        `✅ Chatterbox synthesis complete: ${audio.length} bytes (${wallTime}ms wall time, ${duration_ms.toFixed(0)}ms model time)`
+        `✅ Chatterbox synthesis complete: ${audio.length} bytes (${wallTime}ms wall time, ${duration_ms.toFixed(0)}ms model time${vramNote})`
       );
       return result;
     } finally {

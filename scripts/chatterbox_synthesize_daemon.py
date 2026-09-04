@@ -35,6 +35,7 @@ def main() -> int:
     device = sys.argv[2] if len(sys.argv) > 2 else "cuda"
 
     try:
+        import torch
         import torchaudio as ta
         # Turbo model (English, 350M params) - chosen over the base
         # ChatterboxTTS model specifically for lower per-response latency
@@ -113,7 +114,41 @@ def main() -> int:
             wav = model.generate(text)
             ta.save(out_path, wav, model.sr)
             duration_ms = (time.time() - start) * 1000
-            print(json.dumps({"done": True, "out_path": out_path, "duration_ms": duration_ms}), flush=True)
+
+            # [ADDED 2026-09-03] Real, live-found investigation: Gavin's
+            # own jarvis.log showed model.generate() itself (not wall
+            # time, not queueing - the model's own reported duration_ms)
+            # getting progressively slower across ONE long-lived session -
+            # 2149ms, 1254ms, 4416ms, 14800ms, then 125753ms for
+            # comparable-length text, a real ~60-100x slowdown within a
+            # single continuous `listen` run, not explainable by input
+            # length. This daemon is deliberately long-lived (loads the
+            # model once, stays warm - see this file's own header), which
+            # means it's also the first time this project has run MANY
+            # sequential generate() calls through one persistent PyTorch
+            # CUDA process rather than a fresh one per request - a real,
+            # well-documented pattern for GPU memory fragmentation to
+            # accumulate over time (each variable-length generation can
+            # leave the CUDA caching allocator holding oddly-sized freed
+            # blocks it can't efficiently reuse for the next call's
+            # different shape), which would show up as exactly this kind
+            # of gradual, cumulative slowdown rather than a fixed per-call
+            # cost. Real vram_allocated_mb/vram_reserved_mb now logged
+            # every request specifically so the NEXT long session can
+            # confirm or rule this out from real numbers instead of
+            # guessing again; torch.cuda.empty_cache() releases reserved-
+            # but-unused memory back to the driver after every request as
+            # a real, standard, low-risk mitigation for long-running
+            # inference processes - does not affect model weights or
+            # voice conditioning (self.conds, prepared once at startup),
+            # only transient allocator state.
+            mem_info = {}
+            if torch.cuda.is_available():
+                mem_info["vram_allocated_mb"] = torch.cuda.memory_allocated() / (1024 * 1024)
+                mem_info["vram_reserved_mb"] = torch.cuda.memory_reserved() / (1024 * 1024)
+                torch.cuda.empty_cache()
+
+            print(json.dumps({"done": True, "out_path": out_path, "duration_ms": duration_ms, **mem_info}), flush=True)
         except Exception as e:
             print(json.dumps({"error": str(e)}), flush=True)
 
