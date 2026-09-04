@@ -77,6 +77,34 @@ const SPEECH_ABOVE_FLOOR_MULTIPLIER = 2.5; // "speech" = at least this many time
 const MIN_SPEECH_THRESHOLD = 150; // absolute backstop under the floor - guards a near-dead-silent room from producing an unrealistically tiny threshold that any faint sound would cross
 const FALLBACK_SPEECH_THRESHOLD = 500; // only used if a turn starts with zero idle samples collected yet - the old static guess, now a safety net instead of the primary mechanism
 
+// [ADDED 2026-09-04] Real, live-found bug, per Gavin: "had to stop
+// because im leaving but it took very long and didnt ge to play
+// anything." Confirmed from his own log - NOT a repeat of the Spotify
+// daemon slowness (that path actually responded fast and correctly:
+// intent detected, "no active device" honestly reported almost
+// immediately). The real holdup: after that spoken reply,
+// startFollowUpListening() called beginActiveTurn() (which computes
+// turnSpeechThreshold fresh from idleEnergyWindow) immediately - but
+// idleEnergyWindow is ONLY ever refreshed while genuinely idle
+// (processMicChunk()'s `!context.isActive` branch), and a follow-up turn
+// skips that idle phase entirely (isSpeaking -> immediately active
+// again, no real gap). Confirmed live in the log: one follow-up turn ran
+// 129+ real seconds with "speech threshold: 1420" frozen the whole time
+// while real measured energy climbed from ~1200 to ~4800 (the room's
+// real ambient noise rising over the session) - meaning every follow-up
+// turn all session long was reusing whatever idleEnergyWindow happened
+// to hold from the very first wake-word trigger, never the room as it
+// actually is now, so the 3s silence cutoff could never fire. Real fix:
+// give the mic an explicit, bounded real window of genuinely current
+// idle audio to refill idleEnergyWindow before recomputing the
+// threshold - see startFollowUpListening(). Same ~5s duration as
+// IDLE_NOISE_WINDOW_CHUNKS's own framing, kept consistent rather than
+// inventing a shorter/weaker one. Disclosed, deliberate cost: every
+// follow-up turn now waits this long after JARVIS stops speaking before
+// it's really listening again, in exchange for silence detection
+// actually working instead of a multi-minute stuck turn.
+const FOLLOWUP_RECALIBRATION_MS = 5000;
+
 /** Root-mean-square energy of a 16-bit PCM buffer - simple, real, cheap voice-activity signal (not a trained VAD model). */
 function computeRmsEnergy(pcm16: Buffer): number {
   if (pcm16.length < 2) return 0;
@@ -695,6 +723,20 @@ export class VoiceInterface {
       return;
     }
     console.log(`\n💬 Still listening - no "Jarvis" needed if you're continuing the conversation.`);
+    // See FOLLOWUP_RECALIBRATION_MS's own comment for the real bug this
+    // fixes. context.isActive is already false here (set by the caller
+    // just before this) and isSpeaking is false too (playback already
+    // finished) - so real mic chunks arriving during this wait flow
+    // through processMicChunk()'s existing idle branch and refill
+    // idleEnergyWindow with genuinely current samples, the same real
+    // mechanism pre-wake-word idle listening always used; this just
+    // clears out the stale window first and gives it an explicit chance
+    // to do that instead of skipping straight past it.
+    this.idleEnergyWindow = [];
+    if (this.isRunning) {
+      await new Promise((resolve) => setTimeout(resolve, FOLLOWUP_RECALIBRATION_MS));
+    }
+    if (!this.isRunning) return;
     await this.beginActiveTurn();
     this.isFollowUpTurn = true;
     // Real HUD signal: the SAME event cli.ts already maps to
