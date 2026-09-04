@@ -523,6 +523,22 @@ export class VoiceInterface {
       await this.wakeWordDetector.stopListening();
     }
 
+    await this.beginActiveTurn();
+    this.emit("wake-word-detected", event);
+  }
+
+  /**
+   * [ADDED 2026-09-03] Real shared turn-start logic, extracted from
+   * handleWakeWord() unchanged - everything a new turn needs (turnId
+   * bump, VAD state reset, real per-turn speech threshold calibration,
+   * starting the speech recognizer) regardless of whether it was
+   * triggered by a real wake word or by startFollowUpListening() below
+   * (a continuing conversation, no "Jarvis" needed). handleWakeWord()
+   * still owns anything wake-word-SPECIFIC (the interruption-confidence
+   * gate, stopping the wake-word detector, emitting "wake-word-detected"
+   * with the real event) - this only owns what both paths share.
+   */
+  private async beginActiveTurn(): Promise<void> {
     this.turnId++;
     this.context.isActive = true;
     this.context.lastWakeWordTime = new Date();
@@ -535,7 +551,7 @@ export class VoiceInterface {
     // Real per-turn calibration (2026-08-30) - see IDLE_NOISE_WINDOW_CHUNKS
     // above for why this replaced a fixed SPEECH_RMS_THRESHOLD: whatever
     // this exact mic/gain/room just measured as "quiet" in the few
-    // seconds before this wake word fired is the real baseline to compare
+    // seconds before this turn started is the real baseline to compare
     // against, not a number picked once on different hardware.
     if (this.idleEnergyWindow.length > 0) {
       const measuredFloor = Math.min(...this.idleEnergyWindow);
@@ -546,16 +562,56 @@ export class VoiceInterface {
     } else {
       this.turnSpeechThreshold = FALLBACK_SPEECH_THRESHOLD;
       console.log(
-        `   🎚️  turn speech threshold: ${this.turnSpeechThreshold.toFixed(0)} (fallback - no idle samples collected yet, e.g. wake word fired right at startup)`
+        `   🎚️  turn speech threshold: ${this.turnSpeechThreshold.toFixed(0)} (fallback - no idle samples collected yet, e.g. this turn started right at startup)`
       );
     }
-
-    this.emit("wake-word-detected", event);
 
     // Start listening for speech
     if (this.speechRecognizer) {
       await this.speechRecognizer.startStreaming();
     }
+  }
+
+  /**
+   * [ADDED 2026-09-03] Real feature, per Gavin: "we need to make it that
+   * he still know if im talking to him so i don thav eto say jarvis
+   * evrytime if th econversation is continueing." Previously EVERY turn,
+   * even an immediate follow-up question right after JARVIS finished
+   * answering, required saying "Jarvis" again from scratch - a real,
+   * disclosed gap, not how the master doc's own Part 5.1 conversational
+   * design was meant to feel. Real mechanism: after a normal turn
+   * completes (not a bailout - see the two call sites below), this opens
+   * a new active turn directly via beginActiveTurn() - same real VAD/
+   * speech-recognition path a wake word starts, just without requiring
+   * one. If real speech arrives, it flows through the exact same
+   * handleUserSpeech() pipeline as always, continuing the conversation.
+   * If nothing is said, the EXISTING NO_SPEECH_TIMEOUT_MS bailout (built
+   * for the "false wake-word trigger" case) already does exactly the
+   * right thing here too - gives up cleanly after a real, bounded wait
+   * and reverts to normal wake-word-gated idle listening, no separate
+   * mechanism needed. Real, disclosed off-switch: config.conversation.
+   * followUpListening, default true - JARVIS keeps LISTENING (feeding
+   * real mic energy into a real VAD window) for a real few seconds after
+   * every reply regardless of whether this is enabled, since idle
+   * listening already does that for the wake-word detector; the only
+   * thing this changes is whether real speech in that window needs
+   * "Jarvis" first.
+   */
+  private async startFollowUpListening(): Promise<void> {
+    if (!this.config.conversation.followUpListening) {
+      if (this.wakeWordDetector && this.isRunning) {
+        await this.wakeWordDetector.startListening();
+      }
+      return;
+    }
+    console.log(`\n💬 Still listening - no "Jarvis" needed if you're continuing the conversation.`);
+    await this.beginActiveTurn();
+    // Real HUD signal: the SAME event cli.ts already maps to
+    // hud.setState("listening") - a follow-up window is genuinely the
+    // same real state (JARVIS is actively listening for real speech) as
+    // a fresh wake-word trigger, just without a real WakeWordEvent to
+    // pass through (there wasn't one - that's the whole point).
+    this.emit("wake-word-detected", { keyword: this.config.wakeWord.keyword, confidence: 1, timestamp: new Date() });
   }
 
   /**
@@ -882,9 +938,15 @@ export class VoiceInterface {
       response,
     });
 
-    // Resume listening for next wake word
-    if (this.wakeWordDetector && this.isRunning) {
-      await this.wakeWordDetector.startListening();
+    // [UPDATE 2026-09-03] Real conversational-continuity feature - see
+    // startFollowUpListening()'s own comment. Only reached here, the
+    // NORMAL full-reply completion path - the two early-return bailouts
+    // above (no speech detected, not directed at JARVIS) still go
+    // straight back to plain wake-word-gated idle listening, correctly:
+    // neither of those was a real exchange worth staying primed for a
+    // follow-up to.
+    if (this.isRunning) {
+      await this.startFollowUpListening();
     }
   }
 

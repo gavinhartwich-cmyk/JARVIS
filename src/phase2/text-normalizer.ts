@@ -71,7 +71,20 @@ function numberToWords(n: number): string {
     remaining = Math.floor(remaining / 1000);
     scaleIndex++;
   }
-  return groups.join(", ");
+  // [ADDED 2026-09-03] Real, live-found mitigation: Gavin confirmed the
+  // mumbling happened specifically on the LATTER HALF of a longer
+  // spelled-out number ("seventy-eight thousand, seven hundred twenty")
+  // while a shorter one ("six thousand") came out clean - a real,
+  // well-documented autoregressive-TTS weakness (quality/attention can
+  // drift over a longer generated span, not specific to Chatterbox).
+  // Not fixable by more text preprocessing alone, but a period between
+  // the thousands/millions group and the remainder (instead of a comma)
+  // gives the model a real, stronger sentence-boundary signal to
+  // potentially treat as more independent segments, rather than one
+  // long unbroken phrase - a real, disclosed, NOT-guaranteed attempt at
+  // mitigation, not a confirmed fix (can't verify audio output from
+  // here at all).
+  return groups.join(groups.length > 1 ? ". " : ", ");
 }
 
 // Matches a real comma-thousands-formatted number (e.g. "78,720" or

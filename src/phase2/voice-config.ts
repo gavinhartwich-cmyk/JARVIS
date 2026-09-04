@@ -126,6 +126,19 @@ export interface VoiceConfig {
     // just a hardcoded true) in case it ever costs more in false
     // negatives (a real command wrongly ignored) than it saves.
     directedAtJarvisCheck: boolean;
+    // [ADDED 2026-09-03] Real feature, per Gavin: "we need to make it
+    // that he still know if im talking to him so i don thav eto say
+    // jarvis evrytime if th econversation is continueing." When true
+    // (default), JARVIS opens a real follow-up listening window right
+    // after finishing a normal reply - real speech in that window
+    // continues the conversation without needing the wake word again;
+    // silence times out (the same NO_SPEECH_TIMEOUT_MS bailout already
+    // built for a false wake-word trigger) back to normal wake-word-
+    // gated idle listening. See voice-interface.ts's
+    // startFollowUpListening(). Real, disclosed off-switch in case this
+    // ever causes more false "was that meant for me" mix-ups than it
+    // saves "Jarvis"es.
+    followUpListening: boolean;
   };
 
   // Background operation
@@ -304,6 +317,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     interruptionThreshold: 0.7,
     responseStreaming: true,
     directedAtJarvisCheck: true,
+    followUpListening: true,
   },
   backgroundOperation: {
     enabled: true,
