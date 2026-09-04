@@ -65,30 +65,62 @@ export class IntelligentModelRouter implements IModelRouter {
     const models = new Map<string, LLMConfig>();
     const omnirouteModel = process.env.OMNIROUTE_MODEL || "auto";
 
+    // [UPDATE 2026-09-03] All five tiers' maxTokens cut down hard, per
+    // Gavin's direct "anything to make it faster" - this is the real
+    // root cause behind a confirmed-live 151-second reply (see the
+    // master doc's 09-02/09-03 entry): jarvis-personality.ts's prompt
+    // already says "prefer one or two sentences," but that's only a
+    // request the model can (and did) ignore - the actual hard ceiling
+    // was 2000-4000 tokens (roughly 1500-3000 words), plenty of room for
+    // a full essay that Chatterbox then has to synthesize start to
+    // finish before JARVIS can say a single word of it. This IS the
+    // only real place that ceiling is enforced - selectModel()'s output
+    // feeds directly into conversation-intelligence.ts's callModel(),
+    // which is JARVIS's own spoken/printed conversational reply
+    // generation exclusively (confirmed: IntelligentModelRouter has no
+    // other real caller in this codebase - Phase 0's Coder/Debugger
+    // agents go through a separate BaseAgent/provider path with their
+    // own config, untouched by this change).
+    //
+    // Real, disclosed tradeoff, not hidden: maxTokens is a hard output
+    // cutoff on a plain completion call, not "thinking budget" - a
+    // genuinely complex answer that needs more than the new ceiling
+    // could get truncated mid-sentence rather than trimmed politely.
+    // Mitigated, not eliminated, by jarvis-personality.ts's strengthened
+    // instruction (see that file) to give the short answer and OFFER to
+    // go deeper rather than trying to fit everything into one reply -
+    // paired with 2026-09-03's follow-up-conversation feature, asking
+    // "want more detail?" costs nothing extra (no need to say "Jarvis"
+    // again). Not independently re-verified live yet against a real
+    // hard math question - needs Gavin's next test.
+
     // Fast - quick response for simple tasks
     models.set("fast-reasoning", {
       provider: "omniroute",
       model: omnirouteModel,
       temperature: 0.3,
-      maxTokens: 500,
+      maxTokens: 150,
       stream: true,
     });
 
-    // Main - balanced performance
+    // Main - balanced performance (the common conversational case)
     models.set("main-reasoning", {
       provider: "omniroute",
       model: omnirouteModel,
       temperature: 0.7,
-      maxTokens: 2000,
+      maxTokens: 300,
       stream: true,
     });
 
-    // Deep reasoning - complex analysis
+    // Deep reasoning - complex analysis. Still meaningfully larger than
+    // the other tiers (a real multi-step explanation needs more room
+    // than a quick fact), but 500, not 4000 - the actual outlier this
+    // fix targets.
     models.set("deep-reasoning", {
       provider: "omniroute",
       model: omnirouteModel,
       temperature: 0.5,
-      maxTokens: 4000,
+      maxTokens: 500,
       stream: true,
     });
 
@@ -97,7 +129,7 @@ export class IntelligentModelRouter implements IModelRouter {
       provider: "omniroute",
       model: omnirouteModel,
       temperature: 0.0,
-      maxTokens: 1000,
+      maxTokens: 300,
       stream: false,
     });
 
@@ -106,7 +138,7 @@ export class IntelligentModelRouter implements IModelRouter {
       provider: "omniroute",
       model: omnirouteModel,
       temperature: 1.0,
-      maxTokens: 2000,
+      maxTokens: 400,
       stream: true,
     });
 
