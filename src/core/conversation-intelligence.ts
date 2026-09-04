@@ -15,6 +15,9 @@
  */
 
 import type { ConversationEngine, ConversationContext, ReasoningPath } from "../phase2/conversation-engine.ts";
+import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
+import type { ModelProvider } from "../models/types";
+import { findCachedAnswer, recordCacheableEpisode } from "./episode-cache";
 
 export interface ConversationMemory {
   // Long-term episodic memory
@@ -85,15 +88,21 @@ export class ConversationalIntelligence {
   private memory: ConversationMemory;
   private currentStream?: StreamingResponse;
   private modelRouter: ModelRouter;
+  private modelProvider: ModelProvider;
   private interruptionBuffer: InterruptionContext[] = [];
 
   // Proactive monitoring
   private proactiveMonitors: Map<string, () => Promise<string | null>> = new Map();
   private lastProactiveCheck: Date = new Date();
 
-  constructor(engine: ConversationEngine, router: ModelRouter) {
+  constructor(engine: ConversationEngine, router: ModelRouter, modelProvider?: ModelProvider) {
     this.conversationEngine = engine;
     this.modelRouter = router;
+    // Only used for the episode cache's "is this genuinely the same
+    // question, and is the old answer still true" verification check —
+    // the actual reply generation below (streamFromModel/streamFromBuffer)
+    // is still a placeholder, not a real model call.
+    this.modelProvider = modelProvider || new GatewayModelProvider(createDefaultGateway());
     this.memory = this.initializeMemory();
 
     console.log("\n🧠 Conversational Intelligence initialized");
@@ -143,7 +152,7 @@ export class ConversationalIntelligence {
 
     // Phase 4: Check if we can use cached response
     if (this.modelRouter.shouldUseCache(context)) {
-      const cached = this.checkMemoryCache(utterance);
+      const cached = await this.checkMemoryCache(utterance);
       if (cached) {
         return this.createStreamFromText(cached, "memory");
       }
@@ -252,21 +261,18 @@ export class ConversationalIntelligence {
   }
 
   /**
-   * Check if response exists in episodic memory
+   * Check for a persistent, verified cached answer to this utterance.
+   *
+   * Delegates to the shared episode cache (core/episode-cache.ts) instead
+   * of scanning the in-process `this.memory.episodes` array: that array is
+   * wiped every restart and its old matching (first-10-characters prefix
+   * overlap) was crude enough to conflate unrelated questions that happen
+   * to start the same way. The persistent cache instead requires real
+   * token-similarity plus an LLM-verified "still true" check, and survives
+   * restarts.
    */
-  private checkMemoryCache(utterance: string): string | null {
-    const lowerUtterance = utterance.toLowerCase();
-
-    // Look for similar episodes
-    for (const episode of this.memory.episodes) {
-      const summary = episode.summary.toLowerCase();
-      if (summary.includes(lowerUtterance.substring(0, 10))) {
-        // Simple similarity check
-        return `Based on what happened before: ${episode.summary}`;
-      }
-    }
-
-    return null;
+  private async checkMemoryCache(utterance: string): Promise<string | null> {
+    return findCachedAnswer(utterance, this.modelProvider);
   }
 
   /**
@@ -582,6 +588,12 @@ export class ConversationalIntelligence {
       ["responded"],
       0.6
     );
+
+    // Persist the full question/answer pair for future cache lookups —
+    // recordEpisode above only keeps a truncated summary in the in-process
+    // array, which was never enough to actually answer a repeat question
+    // from. No-ops for action requests / time-dependent questions.
+    void recordCacheableEpisode(userUtterance, response);
   }
 
   /**

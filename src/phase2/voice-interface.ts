@@ -12,6 +12,7 @@ import { SpeechSynthesizer, SynthesisResult } from "./speech-synthesizer";
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
+import { findCachedAnswer, recordCacheableEpisode } from "../core/episode-cache";
 
 const JARVIS_SYSTEM_PROMPT =
   "You are JARVIS, a helpful voice assistant. Keep replies short and " +
@@ -277,6 +278,16 @@ export class VoiceInterface {
 
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);
 
+    // Persistent episode cache: skips the full reply-generation call below
+    // entirely on a verified hit. Gated on question stability (never for
+    // action requests or anything time/context-dependent) and confirmed by
+    // a small LLM check before being served — see core/episode-cache.ts.
+    const cached = await findCachedAnswer(userInput, this.modelProvider);
+    if (cached) {
+      console.log(`🗄️  JARVIS (cached): "${cached}"`);
+      return cached;
+    }
+
     const recentHistory = this.context.messageHistory.slice(-6, -1); // exclude the just-pushed user turn
     const messages = [
       ...recentHistory.map((turn) => ({
@@ -293,6 +304,10 @@ export class VoiceInterface {
         maxTokens: 200,
       });
       response = result.content.trim();
+      // Fire-and-forget: recordCacheableEpisode no-ops for action requests
+      // and time/context-dependent questions, and never throws (memory
+      // failures shouldn't block or slow down the response).
+      void recordCacheableEpisode(userInput, response);
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       console.error("❌ JARVIS response generation failed:", err);
