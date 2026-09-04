@@ -50,8 +50,7 @@ function measureResource<T>(fn: () => Promise<T>): Promise<{ result: T; cpuMs: n
   });
 }
 
-async function runCurrentJarvis(prompt: string): Promise<LatencyRunResult> {
-  const voice = new VoiceInterface(DEFAULT_VOICE_CONFIG, new GatewayModelProvider(createDefaultGateway()));
+async function runCurrentJarvis(prompt: string, voice: VoiceInterface): Promise<LatencyRunResult> {
   try {
     const { result, cpuMs, rssDeltaBytes } = await measureResource(() => voice.respondToText(prompt));
     // respondToText's own trace (Stage.FIRST_AUDIO etc.) is the most recent
@@ -149,9 +148,31 @@ export async function runComparison(
 ): Promise<{ results: LatencyRunResult[]; summary: ComparisonSummary[] }> {
   const results: LatencyRunResult[] = [];
 
+  // [FIXED 2026-09-04] Real bug, found live: this used to construct a
+  // brand-new VoiceInterface (and therefore a brand-new, cold Chatterbox
+  // daemon - a fresh Python process with PyTorch/CUDA to import and a
+  // model to load) for EVERY single current-jarvis run. A real, isolated
+  // test proved the actual cost: 37.8s wall time on a cold daemon vs.
+  // 1.8-2.1s on the same warm one for the next two calls, with model time
+  // itself identical (~2s) in both cases - the entire gap was one-time
+  // process/import/load overhead, not synthesis actually being slow. A
+  // real `bun run dev listen` session pays this exact cost ONCE, at
+  // startup, via VoiceInterface.start()'s own fire-and-forget warm-up -
+  // this harness was instead re-paying it on every repeated run, making
+  // "current JARVIS" look 15-20x slower than real usage ever experiences.
+  // Fixed the same way: one VoiceInterface (one daemon) for the whole
+  // comparison, explicitly warmed up before any timed run starts.
+  const voice = new VoiceInterface(DEFAULT_VOICE_CONFIG, new GatewayModelProvider(createDefaultGateway()));
+  console.log("🔥 Warming up current-JARVIS's TTS daemon before timed runs (matches real listen-session startup)...");
+  try {
+    await voice.respondToText("Warm-up.");
+  } catch (error) {
+    console.log(`   ⚠️  Warm-up call failed (non-fatal, timed runs will just eat the cold-start cost instead): ${error instanceof Error ? error.message : error}`);
+  }
+
   for (const prompt of prompts) {
     for (let i = 0; i < runsPerPath; i++) {
-      results.push(await runCurrentJarvis(prompt));
+      results.push(await runCurrentJarvis(prompt, voice));
       results.push(await runGeminiLive(prompt));
     }
   }
