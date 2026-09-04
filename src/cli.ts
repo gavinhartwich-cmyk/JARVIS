@@ -12,6 +12,7 @@ import { authorizationEngine } from "./core/authorization";
 import { ScreenControl } from "./phase3/screen-control";
 import { JARVISDeveloper } from "./phase1/developer";
 import { VoiceInterface } from "./phase2/voice-interface";
+import { DEFAULT_VOICE_CONFIG } from "./phase2/voice-config";
 import { writeFileSync } from "node:fs";
 
 /**
@@ -271,7 +272,16 @@ async function main() {
         console.log("🎙️  VOICE REPLY (real LLM + real Piper TTS — no mic/wake-word: text in, audio out)");
         console.log("=".repeat(70));
 
-        const voice = new VoiceInterface();
+        // Wires the DEEP path (architecture update sections 1/9) to the
+        // real multi-agent pipeline already initialized above — a request
+        // the intent router classifies as needing thorough, multi-step
+        // reasoning now actually reaches Researcher/Reasoner/Critic/
+        // FactChecker/Synthesizer, instead of every voice-reply call being
+        // a single direct model call regardless of complexity.
+        const voice = new VoiceInterface(DEFAULT_VOICE_CONFIG, modelProvider, async (utterance) => {
+          const result = await orchestrator.orchestrate(utterance);
+          return result.finalResult;
+        });
         const { response, audio } = await voice.respondToText(text);
         console.log(`\n🤖 JARVIS: "${response}"`);
 

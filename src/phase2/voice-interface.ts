@@ -14,10 +14,34 @@ import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gatewa
 import type { ModelProvider } from "../models/types";
 import { findCachedAnswer, recordCacheableEpisode } from "../core/episode-cache";
 import { telemetry, Stage } from "../core/telemetry";
+import { classifyIntent, type KnownAction } from "../core/intent-router";
+import { ScreenControl } from "../phase3/screen-control";
+import { identityEngine } from "../core/identity";
 
 const JARVIS_SYSTEM_PROMPT =
   "You are JARVIS, a helpful voice assistant. Keep replies short and " +
   "conversational (1-3 sentences) since they will be spoken aloud, not read.";
+
+// REASONING path (architecture update section 1/2): same single model call
+// as FAST, but asked to actually weigh the question instead of giving a
+// quick take. Not yet backed by any retrieval/tool augmentation — see
+// core/intent-router.ts's header comment for why that's still a TODO.
+const REASONING_SYSTEM_PROMPT =
+  "You are JARVIS, a helpful voice assistant. This question asks for a real " +
+  "comparison or judgment call, not just a fact — weigh the actual trade-offs " +
+  "before answering. Keep the spoken reply concise (3-5 sentences), but do not " +
+  "skip the reasoning to get there.";
+
+/**
+ * A handler for the DEEP path (architecture update section 1/9): the
+ * existing multi-agent pipeline. Deliberately a plain callback rather than
+ * VoiceInterface importing Orchestrator directly — this keeps the voice
+ * layer usable (and testable) without pulling in the whole agent/DB/tool
+ * stack, and keeps "which intelligence backs DEEP" a caller-supplied detail
+ * rather than a hardcoded dependency, in the spirit of provider-independence
+ * (section 6).
+ */
+export type DeepHandler = (utterance: string) => Promise<string>;
 
 export interface VoiceInteractionContext {
   conversationId: string;
@@ -49,6 +73,8 @@ export class VoiceInterface {
   private speechRecognizer?: SpeechRecognizer;
   private speechSynthesizer?: SpeechSynthesizer;
   private modelProvider: ModelProvider;
+  private screenControl: ScreenControl;
+  private deepHandler?: DeepHandler;
 
   private context: VoiceInteractionContext;
   private isRunning: boolean = false;
@@ -56,11 +82,17 @@ export class VoiceInterface {
   // Event listeners
   private listeners: Map<string, Function[]> = new Map();
 
-  constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG, modelProvider?: ModelProvider) {
+  constructor(
+    config: VoiceConfig = DEFAULT_VOICE_CONFIG,
+    modelProvider?: ModelProvider,
+    deepHandler?: DeepHandler
+  ) {
     this.config = config;
     // Same Gemini -> Ollama -> OpenRouter gateway Phase 1 uses, so a voice
     // reply degrades to the local model instead of dying on a 429 too.
     this.modelProvider = modelProvider || new GatewayModelProvider(createDefaultGateway());
+    this.screenControl = new ScreenControl();
+    this.deepHandler = deepHandler;
     this.context = {
       conversationId: `conversation-${Date.now()}`,
       messageHistory: [],
@@ -262,9 +294,18 @@ export class VoiceInterface {
 
     let audio: SynthesisResult | undefined;
     if (this.speechSynthesizer) {
-      audio = await this.speechSynthesizer.synthesize(response);
-      telemetry.mark(traceId, Stage.FIRST_AUDIO);
-      this.emit("audio-ready", audio);
+      try {
+        audio = await this.speechSynthesizer.synthesize(response);
+        telemetry.mark(traceId, Stage.FIRST_AUDIO);
+        this.emit("audio-ready", audio);
+      } catch (error) {
+        // A missing/broken TTS binary shouldn't take down a turn that
+        // otherwise succeeded — degrade to a text-only reply instead,
+        // same as the `voice-reply` CLI already does for "TTS disabled".
+        const err = error instanceof Error ? error.message : String(error);
+        console.error("❌ Text-to-speech synthesis failed, returning text-only reply:", err);
+        telemetry.mark(traceId, Stage.FIRST_AUDIO, "tts_failed");
+      }
     }
 
     telemetry.finish(traceId);
@@ -287,6 +328,39 @@ export class VoiceInterface {
 
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);
 
+    // Intent/Complexity Router (architecture update sections 1, 2, 9):
+    // decide which of FAST/TOOL/REASONING/DEEP this turn needs *before*
+    // spending a model call — routing itself is pattern-based, not an LLM
+    // call, so using it never costs more than skipping it would have saved.
+    const route = classifyIntent(userInput);
+    if (traceId) telemetry.mark(traceId, Stage.INTENT_ROUTING, route.path);
+    console.log(`   Route: ${route.path} (${route.reason})`);
+
+    if (route.path === "tool" && route.action) {
+      // Section 8: a known action goes straight to its deterministic
+      // executor — no LLM call to "translate" it first.
+      return this.executeKnownAction(route.action, traceId);
+    }
+
+    if (route.path === "deep") {
+      if (this.deepHandler) {
+        try {
+          const result = await this.deepHandler(userInput);
+          if (traceId) telemetry.mark(traceId, Stage.AGENT_EXECUTION, "deep");
+          console.log(`🤖 JARVIS (deep): "${result}"`);
+          return result;
+        } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          console.error("❌ Deep pipeline failed, falling back to a direct reply:", err);
+          if (traceId) telemetry.mark(traceId, Stage.AGENT_EXECUTION, "deep_failed_fallback");
+          // Fall through to the direct single-call path below rather than
+          // leaving the user with nothing.
+        }
+      } else {
+        console.log("   (no deep handler configured — answering directly instead)");
+      }
+    }
+
     // Persistent episode cache: skips the full reply-generation call below
     // entirely on a verified hit. Gated on question stability (never for
     // action requests or anything time/context-dependent) and confirmed by
@@ -307,12 +381,13 @@ export class VoiceInterface {
       { role: "user" as const, content: userInput },
     ];
 
+    const isReasoning = route.path === "reasoning";
     let response: string;
     try {
       if (traceId) telemetry.mark(traceId, Stage.PROVIDER_CONNECTION, this.modelProvider.name);
       const result = await this.modelProvider.complete(messages, {
-        systemPrompt: JARVIS_SYSTEM_PROMPT,
-        maxTokens: 200,
+        systemPrompt: isReasoning ? REASONING_SYSTEM_PROMPT : JARVIS_SYSTEM_PROMPT,
+        maxTokens: isReasoning ? 400 : 200,
       });
       // "first_token" is a bit of a misnomer here — modelProvider.complete()
       // is not streaming, so this mark actually lands at full completion.
@@ -335,6 +410,38 @@ export class VoiceInterface {
 
     console.log(`🤖 JARVIS: "${response}"`);
     return response;
+  }
+
+  /**
+   * TOOL path executor (architecture update section 8): runs a known
+   * action deterministically through ScreenControl — no model call at all,
+   * matching or failing exactly as the underlying automation does. Only
+   * open/close are wired to a real executor today; extending this to more
+   * verbs belongs with building each one's executor (capability registry,
+   * architecture doc step 8), not with guessing here that one exists.
+   */
+  private async executeKnownAction(action: KnownAction, traceId?: string): Promise<string> {
+    let result: { success: boolean; error?: string };
+    try {
+      const identity = await identityEngine.resolveFromDeviceSession();
+      result =
+        action.name === "open_app"
+          ? await this.screenControl.openApp(action.target, identity)
+          : await this.screenControl.closeApp(action.target, identity);
+    } catch (error) {
+      // Covers both a failed automation call and a failed identity
+      // resolution (e.g. no database configured) — either way this must
+      // degrade to a spoken error, not crash the whole turn.
+      result = { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (traceId) telemetry.mark(traceId, Stage.TOOL_EXECUTION, action.name);
+
+    if (result.success) {
+      const verb = action.name === "open_app" ? "Opening" : "Closing";
+      return `${verb} ${action.target}.`;
+    }
+    console.error(`❌ ${action.name} "${action.target}" failed:`, result.error);
+    return `I couldn't ${action.name === "open_app" ? "open" : "close"} ${action.target}: ${result.error ?? "unknown error"}.`;
   }
 
   /**

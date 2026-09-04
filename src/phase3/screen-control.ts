@@ -400,6 +400,18 @@ export class ScreenControl {
   }
 
   /**
+   * Close application. Counterpart to openApp() — added for the intent
+   * router's TOOL path (core/intent-router.ts), which needs a single-call
+   * deterministic executor for "close <app>" the same way openApp() already
+   * gives it one for "open <app>".
+   */
+  async closeApp(appName: string, identity: IdentityResult): Promise<ControlResult> {
+    const seq = this.buildSequence(`Close ${appName}`);
+    this.close(seq, appName);
+    return this.executeSequence(seq, identity);
+  }
+
+  /**
    * Find and click (search for target, then click)
    */
   async findAndClick(description: string, targetName: string, identity: IdentityResult): Promise<ControlResult> {
