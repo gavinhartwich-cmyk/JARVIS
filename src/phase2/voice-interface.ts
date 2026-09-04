@@ -17,6 +17,7 @@ import { playWavBuffer, PlaybackInterruptedError } from "./audio-player";
 import type { Orchestrator } from "../core/orchestrator";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 import { normalizeNumbersForSpeech, splitIntoSentences } from "./text-normalizer";
+import { spotifyWarmUp, spotifyShutdown } from "../core/spotify";
 
 // Real end-of-turn detection (2026-08-30): nothing previously ever called
 // speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
@@ -466,6 +467,17 @@ export class VoiceInterface {
     this.speechRecognizer?.warmUp?.().catch((err) => {
       console.log(`   ⚠️  STT warm-up failed (non-fatal, will retry lazily on first real use): ${err instanceof Error ? err.message : err}`);
     });
+    // [ADDED 2026-09-03] Same real fix/reasoning, for Spotify: the daemon's
+    // own one-time process-start + first-auth-call cost (measured live at
+    // ~900ms-1s combined) is now paid here instead of silently during
+    // Gavin's first real "play X" request - see core/spotify.ts's
+    // SpotifyController.warmUp(). A no-op wait if Spotify credentials
+    // aren't set up yet - the daemon fails fast and this just logs it,
+    // same as the other two warm-ups; the real error still surfaces
+    // normally on the first actual Spotify request.
+    spotifyWarmUp().catch((err) => {
+      console.log(`   ⚠️  Spotify warm-up failed (non-fatal, will retry lazily on first real use): ${err instanceof Error ? err.message : err}`);
+    });
 
     if (this.wakeWordDetector) {
       console.log(`\n🎤 Waiting for wake word: "${this.config.wakeWord.keyword}"`);
@@ -513,6 +525,13 @@ export class VoiceInterface {
       // own lifetime.
       this.speechRecognizer.shutdown();
     }
+
+    // Same real-process-teardown reasoning as the wake-word detector,
+    // Chatterbox, and Whisper above (added 2026-09-03) - the Spotify
+    // daemon is a persistent process too and needs the same explicit
+    // cleanup at full session end, or it would leak past this
+    // VoiceInterface's own lifetime.
+    spotifyShutdown();
   }
 
   /**
