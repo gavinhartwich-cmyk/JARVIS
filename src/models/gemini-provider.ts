@@ -8,13 +8,34 @@ import { ModelProvider, ModelMessage, ModelRequestOptions, ModelResponse, ModelS
  * Free tier: aistudio.google.com/apikey. No SDK dependency — a raw fetch
  * call, to avoid adding a package.
  *
- * NOTE: written and typechecked without a live API key to test against
- * (none available in this sandbox). The request/response shape matches
- * Google's documented Generative Language API, but treat the first real
- * call as the actual verification — if the model name in GEMINI_MODEL is
- * stale by the time you run this, Google's error message will say so
- * directly (400, model not found).
+ * [UPDATE 2026-09-04] First real live call against an actual GEMINI_API_KEY
+ * (added this session) found the disclosed staleness risk below had
+ * already happened: both `gemini-2.0-flash` and this file's own former
+ * default, `gemini-2.5-flash`, now 404 with "This model ... is no longer
+ * available[/to new users]. Please update your code to use
+ * models/gemini-3.6-flash" — confirmed directly against
+ * generativelanguage.googleapis.com, not guessed. Default bumped to
+ * `gemini-3.6-flash`, verified live to return a real completion.
+ *
+ * NOTE: the request/response shape matches Google's documented Generative
+ * Language API; if `GEMINI_MODEL`/this default is stale again by the time
+ * you run this, Google's error message will say so directly (404, model
+ * not found) the same way it did here — that's still the real signal to
+ * watch for, not a one-time fix.
  */
+
+// [ADDED 2026-09-04] Real floor, found by live-testing against the actual
+// API, not guessed: even with thinkingConfig.thinkingLevel set to "low"
+// (see complete()'s own comment), gemini-3.6-flash's thinking overhead ate
+// enough of a 200-token budget - JARVIS's real FAST-tier default, per
+// model-router.ts - to truncate `content` into garbage ("Here is the")
+// rather than the real answer. 250 was observed to just barely work; 300
+// gives real margin against the run-to-run variance thinking token counts
+// showed live (character reasoning isn't deterministic in length). Only
+// raises the request actually sent to Gemini - a caller that asked for
+// less still gets whatever Gemini returns, this just stops silently
+// starving it below where this model can produce real output at all.
+const GEMINI_MIN_OUTPUT_TOKENS = 300;
 
 export class GeminiProvider implements ModelProvider {
   name = "gemini";
@@ -23,7 +44,7 @@ export class GeminiProvider implements ModelProvider {
 
   constructor(apiKey?: string, model?: string) {
     this.apiKey = apiKey || process.env.GEMINI_API_KEY || "";
-    this.model = model || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    this.model = model || process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
     if (!this.apiKey) {
       console.warn(
@@ -58,7 +79,15 @@ export class GeminiProvider implements ModelProvider {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: "ping" }] }],
-          generationConfig: { maxOutputTokens: 5 },
+          // [ADDED 2026-09-04] gemini-3.6-flash is a "thinking" model by
+          // default — its internal reasoning tokens count against
+          // maxOutputTokens, so this tiny 5-token check would otherwise
+          // burn its whole budget on invisible thinking before ever
+          // reaching a real output token. Doesn't change the result here
+          // (response.ok is all this checks), just avoids paying for
+          // thinking on every health-check ping. See complete()'s own
+          // comment for the real, live-found bug this same setting fixes.
+          generationConfig: { maxOutputTokens: 5, thinkingConfig: { thinkingLevel: "low" } },
         }),
         signal: AbortSignal.timeout(5_000),
       });
@@ -107,7 +136,7 @@ export class GeminiProvider implements ModelProvider {
       contents,
       generationConfig: {
         temperature: options?.temperature ?? 0.7,
-        maxOutputTokens: options?.maxTokens ?? 2000,
+        maxOutputTokens: Math.max(options?.maxTokens ?? 2000, GEMINI_MIN_OUTPUT_TOKENS),
         responseMimeType: "application/json",
         responseSchema: {
           type: "OBJECT",
@@ -117,6 +146,22 @@ export class GeminiProvider implements ModelProvider {
           },
           required: ["content", "confidence"],
         },
+        // [ADDED 2026-09-04] Real, live-found bug: gemini-3.6-flash (this
+        // file's new default after the old one 404'd — see the header
+        // comment) is a "thinking" model whose internal reasoning tokens
+        // count against maxOutputTokens. Confirmed directly against the
+        // real API: a 200-token budget (JARVIS's actual FAST-tier
+        // default, per model-router.ts) came back with `content` set to
+        // literal garbage ("Here is the JSON requested:") because
+        // thinking alone ate nearly the whole budget before any real
+        // output token was emitted; a 20-token budget failed outright
+        // (finishReason MAX_TOKENS, zero output). `thinkingBudget: 0`
+        // is rejected by this model as an invalid argument (thinking
+        // can't be fully disabled here) - `thinkingLevel: "low"`
+        // is the real, live-verified fix: same 200-token budget now
+        // returns the actual correct answer instead of silently
+        // fabricating one.
+        thinkingConfig: { thinkingLevel: "low" },
       },
       systemInstruction: { parts: [{ text: structuredSystemText }] },
     };
@@ -212,7 +257,10 @@ export class GeminiProvider implements ModelProvider {
       contents,
       generationConfig: {
         temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 2000,
+        maxOutputTokens: Math.max(options.maxTokens ?? 2000, GEMINI_MIN_OUTPUT_TOKENS),
+        // See complete()'s own comment - same live-found thinking-token
+        // bug, same fix.
+        thinkingConfig: { thinkingLevel: "low" },
       },
       ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
     };
