@@ -6,7 +6,6 @@ import type {
   ModelStreamChunk,
 } from "./types";
 import { GeminiProvider } from "./gemini-provider";
-import { OllamaProvider } from "./ollama-provider";
 import { OpenRouterProvider } from "./openrouter-provider";
 import { OmniRouteProvider } from "./omniroute-provider";
 
@@ -20,7 +19,7 @@ export type ModelTier = "fast" | "general" | "deep" | "coding";
  * deterministic/creative — see model-router.ts), and OmniRoute's own
  * `model: "auto"` does capability-aware model selection across its 300+
  * upstreams by default. A per-provider `tier` → specific-model mapping
- * here would only matter for the fallback rungs (Ollama/Gemini/OpenRouter,
+ * here would only matter for the fallback rungs (Gemini/OpenRouter,
  * each fixed to one configured model), and guessing at that mapping
  * without a way to test it against a live provider isn't worth the risk —
  * left as a documented extension point, not built speculatively.
@@ -213,11 +212,24 @@ export class GatewayModelProvider implements ModelProvider {
  *    itself aggregates 300+ providers (90+ free) with its own auto-fallback,
  *    so a single upstream running dry no longer surfaces as a JARVIS-level
  *    failure at all; OmniRoute routes around it before we ever see an error.
- * 2. Ollama — local, no API key, no quota, works even if OmniRoute's local
- *    process isn't running. The zero-cost floor that never runs out.
- * 3. Gemini (if GEMINI_API_KEY is set) — legacy direct provider, kept as an
+ * 2. Gemini (if GEMINI_API_KEY is set) — legacy direct provider, kept as an
  *    extra rung since it costs nothing to leave registered.
- * 4. OpenRouter (if OPENROUTER_API_KEY is set) — same reasoning as Gemini.
+ * 3. OpenRouter (if OPENROUTER_API_KEY is set) — same reasoning as Gemini.
+ *
+ * [REMOVED 2026-09-04] Ollama used to sit here as the local, zero-cost
+ * floor — real, but on Gavin's actual hardware (a single 4GB-VRAM GTX
+ * 1650 Super) it wasn't a free safety net, it was a second real GPU
+ * consumer fighting Chatterbox TTS for the same tiny VRAM budget. Found
+ * live, not theorized: a real `compare-latency` run left a `qwen2.5-
+ * coder:1.5b` model resident in VRAM from an earlier call, and the next
+ * Chatterbox synthesis in the same run slowed to roughly 1/10th its
+ * normal speed as a direct result. Per Gavin: "i dont have the gpu for
+ * it and it[']s just an incase so no point." Text-completion Ollama is
+ * gone from this gateway; `phase3/ollama-vision-provider.ts` (moondream,
+ * a different model, JARVIS's only real vision capability, not a
+ * fallback) is untouched — that one is load-bearing, this one wasn't.
+ * `models/ollama-provider.ts` itself is left in place, unregistered, in
+ * case a future machine with real headroom wants it back.
  *
  * Registration order is gateway preference order when the caller doesn't
  * request a specific provider via `request.provider`.
@@ -227,7 +239,6 @@ export function createDefaultGateway(): LLMGateway {
   if (process.env.OMNIROUTE_API_KEY) {
     gateway.register(new OmniRouteProvider());
   }
-  gateway.register(new OllamaProvider());
   if (process.env.GEMINI_API_KEY) {
     gateway.register(new GeminiProvider());
   }
