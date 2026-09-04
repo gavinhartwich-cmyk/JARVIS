@@ -64,12 +64,19 @@ export class GeminiLiveSession {
 
   constructor(config: GeminiLiveSessionConfig = {}) {
     this.apiKey = config.apiKey || process.env.GEMINI_API_KEY || "";
-    // gemini-2.0-flash-live-001 is a known-stable Live API model id as of
-    // this writing; the search that verified the WebSocket message shapes
-    // (2026-09-04) surfaced a newer "gemini-3.1-flash-live-preview" example
-    // too — GEMINI_LIVE_MODEL lets it be swapped without a code change once
-    // whichever's actually available to this project's key is confirmed.
-    this.model = config.model || process.env.GEMINI_LIVE_MODEL || "models/gemini-2.0-flash-live-001";
+    // [FIXED 2026-09-04] The first real connection this project ever made
+    // to this endpoint (using a real GEMINI_API_KEY, added this session)
+    // found "models/gemini-2.0-flash-live-001" (this file's former
+    // default, transcribed from documentation but never live-tested)
+    // rejected outright: "is not found for API version v1beta, or is not
+    // supported for bidiGenerateContent." Tried three real candidates
+    // directly against the live endpoint; "models/gemini-3.1-flash-live-
+    // preview" is the one confirmed to actually connect, complete setup,
+    // and stream real audio back for a real text turn.
+    // GEMINI_LIVE_MODEL still lets it be swapped without a code change if
+    // it drifts again — same convention as gemini-provider.ts's
+    // GEMINI_MODEL.
+    this.model = config.model || process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview";
     this.systemInstruction = config.systemInstruction;
     this.sessionHandle = config.resumeHandle;
   }
@@ -113,7 +120,11 @@ export class GeminiLiveSession {
         this.send({
           setup: {
             model: this.model,
-            responseModalities: ["AUDIO"],
+            // [FIXED 2026-09-04] Was a top-level `responseModalities` -
+            // see BidiGenerateContentSetup's own comment for the real
+            // rejection this produced. AUDIO is the modality live-verified
+            // to work with this model.
+            generationConfig: { responseModalities: ["AUDIO"] },
             systemInstruction: this.systemInstruction
               ? { parts: [{ text: this.systemInstruction }] }
               : undefined,
@@ -149,6 +160,19 @@ export class GeminiLiveSession {
 
       ws.addEventListener("close", (event: CloseEvent) => {
         this.emit("close", { code: event.code, reason: event.reason });
+        // [FIXED 2026-09-04] Real bug found live: a server-rejected setup
+        // (bad model name, bad field - exactly what happened testing this
+        // against the real endpoint today) closes the socket with a
+        // reason string, but a WebSocket close is NOT a "error" event -
+        // only "ready" (via setupComplete) or "error" ever settled this
+        // promise before, so a rejected setup left connect() hanging
+        // forever instead of failing fast with the real reason. This is
+        // exactly the "CLI process hangs with no output" symptom found
+        // running `bun run dev live-prototype` before today's model fix.
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Gemini Live connection closed before setup completed: ${event.code} ${event.reason}`));
+        }
       });
     });
   }

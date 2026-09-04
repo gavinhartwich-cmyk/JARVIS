@@ -38,10 +38,27 @@ export interface SessionResumptionConfig {
   handle?: string;
 }
 
-/** Must be the first message sent, before anything else. Wait for setupComplete before sending more. */
+/**
+ * Must be the first message sent, before anything else. Wait for
+ * setupComplete before sending more.
+ *
+ * [FIXED 2026-09-04] Real bug found on the first live connection this
+ * project ever made to this endpoint: `responseModalities` at the top
+ * level of `setup` (as originally written here, transcribed from
+ * documentation) is rejected outright - "Invalid JSON payload received.
+ * Unknown name 'responseModalities' at 'setup': Cannot find field."
+ * Confirmed directly against the real WebSocket endpoint that it belongs
+ * nested under `generationConfig` instead, same shape as the regular
+ * generateContent API's generationConfig.
+ */
 export interface BidiGenerateContentSetup {
-  model: string; // e.g. "models/gemini-2.0-flash-live-001" — full "models/..." resource name, not a bare id
-  responseModalities?: Array<"AUDIO" | "TEXT">;
+  model: string; // e.g. "models/gemini-3.1-flash-live-preview" — full "models/..." resource name, not a bare id
+  generationConfig?: {
+    // Live-verified: this model rejects "TEXT" as a requested modality
+    // ("The requested combination of response modalities (TEXT) is not
+    // supported") - AUDIO is the one confirmed to actually work.
+    responseModalities?: Array<"AUDIO" | "TEXT">;
+  };
   systemInstruction?: { parts: Array<{ text: string }> };
   tools?: Array<{ functionDeclarations: FunctionDeclaration[] }>;
   sessionResumption?: SessionResumptionConfig;
