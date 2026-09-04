@@ -310,7 +310,7 @@ export class VoiceInterface {
     // per Gavin: "we also need an animation for when JARVIS is doing the
     // task that's asked of him."
     if (this.orchestrator) {
-      this.orchestrator.onActionStart = () => this.emit("acting");
+      this.orchestrator.onActionStart = (description) => this.emit("acting", description);
       this.orchestrator.onActionEnd = () => this.emit("acting-done");
     }
 

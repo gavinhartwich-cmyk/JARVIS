@@ -65,7 +65,15 @@ export class Orchestrator {
   // latency. Orchestrator has no idea a HUD exists (correctly - it stays
   // a plain library class), so it just calls these optional callbacks if
   // a caller (voice-interface.ts) sets them. No-ops by default.
-  onActionStart?: () => void;
+  // [UPDATE 2026-09-03] onActionStart now optionally carries a real,
+  // specific description of what's actually happening ("Opening
+  // Notepad", "Searching the web for weather", "Reading your screen") -
+  // per Gavin: "the text at the top isnt actaully what hes doing its
+  // just for show, make it accurate." Every real call site below passes
+  // its own real description (the same one ActionOutcome/visionContext
+  // ends up using), not a generic placeholder - see hud-server.ts's
+  // setState() for where this ends up.
+  onActionStart?: (description?: string) => void;
   onActionEnd?: () => void;
 
   // Conversational intelligence integration
@@ -569,7 +577,7 @@ export class Orchestrator {
     let actionOutcome: ActionOutcome | undefined;
     if (appControlIntent) {
       console.log(`\n🎯 App-control intent detected: ${appControlIntent.action} "${appControlIntent.appName}"`);
-      this.onActionStart?.();
+      this.onActionStart?.(`${appControlIntent.action === "open" ? "Opening" : "Closing"} ${appControlIntent.appName}`);
       try {
         actionOutcome = await this.executeAppControlIntent(appControlIntent);
       } finally {
@@ -577,7 +585,7 @@ export class Orchestrator {
       }
     } else if (clickIntent) {
       console.log(`\n🖱️  Click intent detected: "${clickIntent.elementName}"`);
-      this.onActionStart?.();
+      this.onActionStart?.(`Clicking "${clickIntent.elementName}"`);
       try {
         actionOutcome = await this.executeClickIntent(clickIntent.elementName);
       } finally {
@@ -585,7 +593,9 @@ export class Orchestrator {
       }
     } else if (spotifyIntent) {
       console.log(`\n🎵 Spotify intent detected: ${spotifyIntent.action}${spotifyIntent.query ? ` "${spotifyIntent.query}"` : ""}`);
-      this.onActionStart?.();
+      this.onActionStart?.(
+        spotifyIntent.action === "play" ? `Playing "${spotifyIntent.query}" on Spotify` : `Spotify: ${spotifyIntent.action}`
+      );
       try {
         actionOutcome = await this.executeSpotifyIntent(spotifyIntent);
       } finally {
@@ -593,7 +603,7 @@ export class Orchestrator {
       }
     } else if (fileIntent) {
       console.log(`\n📁 File intent detected: ${fileIntent.operation} "${fileIntent.path}"`);
-      this.onActionStart?.();
+      this.onActionStart?.(`${fileIntent.operation === "list" ? "Checking" : fileIntent.operation === "read" ? "Reading" : fileIntent.operation === "write" ? "Writing to" : "Moving"} ${fileIntent.path}`);
       try {
         actionOutcome = await this.executeFileIntent(fileIntent);
       } finally {
@@ -610,7 +620,7 @@ export class Orchestrator {
     if (!actionOutcome) {
       if (fastVideoIntent) {
         console.log(`\n🎬 Video intent detected: "${fastVideoIntent.path}" — "${fastVideoIntent.question}"`);
-        this.onActionStart?.();
+        this.onActionStart?.(`Watching ${fastVideoIntent.path}`);
         try {
           visionContext = await this.executeVideoIntent(fastVideoIntent.path, fastVideoIntent.question);
         } finally {
@@ -618,7 +628,7 @@ export class Orchestrator {
         }
       } else if (fastCameraQuestion) {
         console.log(`\n📷 Camera intent detected: "${fastCameraQuestion}"`);
-        this.onActionStart?.();
+        this.onActionStart?.("Looking through the camera");
         try {
           visionContext = await this.executeCameraVisionIntent(fastCameraQuestion);
         } finally {
@@ -626,7 +636,7 @@ export class Orchestrator {
         }
       } else if (screenVisionQuestion) {
         console.log(`\n👁️  Screen-vision intent detected: "${screenVisionQuestion}"`);
-        this.onActionStart?.();
+        this.onActionStart?.("Reading your screen");
         try {
           visionContext = await this.executeScreenVisionIntent(screenVisionQuestion);
         } finally {
@@ -634,7 +644,7 @@ export class Orchestrator {
         }
       } else if (searchQuery) {
         console.log(`\n🔎 Web-search intent detected: "${searchQuery}"`);
-        this.onActionStart?.();
+        this.onActionStart?.(`Searching the web for "${searchQuery}"`);
         try {
           searchContext = await this.executeSearchIntent(searchQuery);
         } finally {

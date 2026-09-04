@@ -107,14 +107,22 @@
   #readout {
     position: absolute;
     top: -6px;
-    left: 0;
-    right: 0;
+    left: 10%;
+    right: 10%;
     text-align: center;
     color: #4a92ab;
     font-family: "Consolas", "Courier New", monospace;
     font-size: 9px;
-    letter-spacing: 2px;
+    letter-spacing: 1px;
     opacity: 0.65;
+    /* [ADDED 2026-09-03] Real activity text ("Searching the web for...")
+       can be far longer than the old fixed short words this element was
+       originally sized for - keep it to one line with an ellipsis rather
+       than risk wrapping into (and visually breaking) the rings above it,
+       since there's no way to verify the real rendered layout from here. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* Waveform bars under the center text - only meaningful during
@@ -387,30 +395,29 @@
     satellitesGroup.appendChild(dot);
   }
 
-  // Small rotating set of readout words per state - same honest caveat
-  // as the waveform bars: not driven by real telemetry (no per-subsystem
-  // health signal exists in this codebase yet), purely an ambient detail
-  // so the HUD doesn't look frozen when nothing else is changing.
-  const READOUTS = {
-    idle: ["SYS NOMINAL", "STANDBY", "AWAITING INPUT"],
-    listening: ["AUDIO IN", "CAPTURING", "SIGNAL OK"],
-    thinking: ["PROCESSING", "ANALYZING", "ROUTING QUERY"],
-    acting: ["EXECUTING", "TASK ACTIVE", "IN PROGRESS"],
-    speaking: ["RESPONDING", "AUDIO OUT", "SYNTHESIZING"],
+  // [UPDATE 2026-09-03] Real readout text, replacing the old rotating
+  // fake-variety words - per Gavin: "the text at the top isnt actaully
+  // what hes doing its just for show, make it accurate." hud-server.ts's
+  // /state now carries a real `activity` string when there's something
+  // specific to report (see orchestrator.ts's onActionStart -
+  // "Opening Notepad", "Searching the web for...", etc.) - shown
+  // directly, no cycling, since it's real and doesn't need padding out
+  // with fake variety. When there's nothing specific (a plain
+  // conversational reply, or idle), a single honest static label per
+  // state is shown instead - still real (accurately describes what's
+  // actually happening in general terms), just not as specific as a
+  // real activity description.
+  const FALLBACK_LABELS = {
+    idle: "Standing by",
+    listening: "Listening",
+    thinking: "Thinking",
+    acting: "Working",
+    speaking: "Responding",
   };
-  let readoutTimer = null;
-  function cycleReadout(state) {
-    clearInterval(readoutTimer);
-    const words = READOUTS[state] || READOUTS.idle;
-    let i = 0;
-    const el = document.getElementById("readout");
-    el.textContent = words[0];
-    readoutTimer = setInterval(() => {
-      i = (i + 1) % words.length;
-      el.textContent = words[i];
-    }, 2600);
+  function setReadout(state, activity) {
+    document.getElementById("readout").textContent = activity || FALLBACK_LABELS[state] || FALLBACK_LABELS.idle;
   }
-  cycleReadout("idle");
+  setReadout("idle", null);
 
   // Polls the tiny local state server (see hud-server.ts) every 200ms and
   // swaps the body class - simple, real, and robust to the HUD window
@@ -418,16 +425,18 @@
   // (defaults to "idle" on a fetch failure rather than getting stuck on
   // whatever class happened to be set last).
   let lastState = "idle";
+  let lastActivity = null;
   async function poll() {
     try {
       const res = await fetch("/state", { cache: "no-store" });
       const data = await res.json();
-      if (data.state && data.state !== lastState) {
+      if (data.state && (data.state !== lastState || data.activity !== lastActivity)) {
         const fallback = document.body.classList.contains("browser-fallback");
         document.body.className = data.state + (fallback ? " browser-fallback" : "");
         document.getElementById("stateLabel").textContent = data.state;
-        cycleReadout(data.state);
+        setReadout(data.state, data.activity);
         lastState = data.state;
+        lastActivity = data.activity;
       }
     } catch {
       // Server not up yet / briefly restarting - keep the last known

@@ -478,7 +478,11 @@ async function main() {
       // events. Falls back to "thinking" when the action finishes since
       // the final spoken reply (audio-ready -> "speaking") hasn't
       // synthesized yet at that point.
-      voice.on("acting", () => hud.setState("acting"));
+      // [UPDATE 2026-09-03] Real activity text now flows through - per
+      // Gavin: "the text at the top isnt actaully what hes doing its just
+      // for show, make it accurate." See orchestrator.ts's onActionStart
+      // for where this real description actually comes from.
+      voice.on("acting", (description?: string) => hud.setState("acting", description ?? null));
       voice.on("acting-done", () => hud.setState("thinking"));
       voice.on("audio-ready", () => hud.setState("speaking"));
       voice.on("interaction-complete", () => hud.setState("idle"));

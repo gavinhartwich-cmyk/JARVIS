@@ -26,14 +26,25 @@ export type HudState = "idle" | "listening" | "thinking" | "acting" | "speaking"
 export class HudServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private state: HudState = "idle";
+  // [ADDED 2026-09-03] Real activity text, per Gavin: "the text at the
+  // top isnt actaully what hes doing its just for show, make it
+  // accurate." hud.html's own cycling readout words (SYS NOMINAL,
+  // PROCESSING, etc.) were honestly disclosed as ambient decoration, not
+  // real telemetry - this is the real telemetry that decoration was
+  // standing in for. null when there's nothing specific to report (a
+  // plain conversational reply has no distinct "action" beyond thinking)
+  // - hud.html falls back to its own honest generic per-state label in
+  // that case, not a fabricated specific one.
+  private activity: string | null = null;
   private htmlPath: string;
 
   constructor(htmlPath: string = join(process.cwd(), "public", "hud.html")) {
     this.htmlPath = htmlPath;
   }
 
-  setState(state: HudState): void {
+  setState(state: HudState, activity: string | null = null): void {
     this.state = state;
+    this.activity = activity;
   }
 
   start(port: number): void {
@@ -49,7 +60,7 @@ export class HudServer {
       fetch: (req) => {
         const url = new URL(req.url);
         if (url.pathname === "/state") {
-          return new Response(JSON.stringify({ state: this.state }), {
+          return new Response(JSON.stringify({ state: this.state, activity: this.activity }), {
             headers: { "Content-Type": "application/json" },
           });
         }
