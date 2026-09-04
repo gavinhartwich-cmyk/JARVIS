@@ -12,6 +12,8 @@
         ResizeMode="NoResize"
         WindowStartupLocation="Manual"
         ShowActivated="False"
+        Opacity="0"
+        IsHitTestVisible="False"
         KeyDown="Window_KeyDown">
     <Grid Background="Transparent">
         <!-- No Background attribute here - Microsoft.Web.WebView2.Wpf's

@@ -29,24 +29,28 @@ namespace JarvisHud
             }
 
             var window = new MainWindow(url);
-            // [2026-09-02] Real behavior change, not a leftover: Show()
-            // is still required here (not skippable) - it's what causes
-            // WPF to create the real window handle and fire Loaded, which
-            // is where MainWindow initializes WebView2 and starts its own
-            // polling timers (see MainWindow.xaml.cs's pop-up-on-activity
-            // comment). The immediate Hide() right after means the window
-            // itself never renders on screen at startup - MainWindow's own
-            // StateTimer_Tick is what reveals it again the moment
-            // hud-server.ts's real /state first leaves "idle". Both calls
-            // are synchronous WPF window-visibility operations processed
-            // before the dispatcher yields to a real paint, so this is not
-            // expected to produce a visible startup flash - not confirmed
-            // live from this sandbox (no real display session here), same
-            // disclosed-but-unverified category as this file's screen-
-            // awareness repositioning work before its own live
-            // confirmation.
+            // [UPDATE 2026-09-02] Real regression found live: Gavin's own
+            // direct report ("i can tell you right now it the hud didnt
+            // open") contradicted this file's own log lines, which
+            // faithfully recorded every Show()/Hide() call as if it
+            // worked - a real, meaningful gap between "the C# code called
+            // the method" and "WPF actually painted a visible window."
+            // The Show()-then-immediately-Hide() sequence this replaces
+            // was exactly the kind of pattern flagged as unverified when
+            // it was written (no real display session to confirm it
+            // against) - a WPF window that's Hidden before it was ever
+            // truly painted once can be a real, known source of later
+            // Show() calls silently failing to render, especially
+            // combined with AllowsTransparency+WebView2. Real, more
+            // robust fix instead: this window stays genuinely
+            // Visible/painting from the moment Show() is called here -
+            // MainWindow starts at Opacity 0 (see its own XAML/field
+            // default), so it's still invisible, but there's no
+            // Hide()-then-Show() cycle for WPF to potentially mishandle;
+            // MainWindow.xaml.cs's pop-up-on-activity now toggles Opacity
+            // (0/1) instead, a simpler, better-supported WPF operation on
+            // an already-live window.
             window.Show();
-            window.Hide();
         }
     }
 }

@@ -166,15 +166,33 @@ namespace JarvisHud
                 _lastNonIdleUtc = DateTime.UtcNow;
                 if (!_visible)
                 {
-                    Console.WriteLine("[hud-visibility] showing");
-                    Show();
+                    // [UPDATE 2026-09-02] Real regression found live -
+                    // Gavin directly: "i can tell you right now it the
+                    // hud didnt open" - contradicting this exact log line,
+                    // which had faithfully recorded every Show() call as
+                    // if it worked. Show()/Hide() toggling is replaced
+                    // with Opacity/IsHitTestVisible on a window that's
+                    // been genuinely Visible and painting since App.xaml.cs
+                    // first called Show() once at startup - see that
+                    // file's own comment for the real reasoning (a
+                    // Hide()-before-ever-truly-painted window is a real,
+                    // known source of a later Show() silently failing to
+                    // render). Real IsVisible/ActualWidth logged right
+                    // after, independent of what this code merely
+                    // *believes* happened, specifically so the next real
+                    // log can prove whether this actually worked instead
+                    // of just recording an unverified belief again.
+                    Opacity = 1.0;
+                    IsHitTestVisible = true;
                     _visible = true;
+                    Console.WriteLine($"[hud-visibility] showing (real IsVisible={IsVisible}, ActualWidth={ActualWidth}, Opacity={Opacity})");
                 }
             }
             else if (_visible && (DateTime.UtcNow - _lastNonIdleUtc) >= HideDelay)
             {
                 Console.WriteLine("[hud-visibility] hiding (idle)");
-                Hide();
+                Opacity = 0.0;
+                IsHitTestVisible = false;
                 _visible = false;
             }
         }
