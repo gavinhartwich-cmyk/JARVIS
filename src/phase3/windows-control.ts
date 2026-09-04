@@ -258,7 +258,58 @@ Add-Type -AssemblyName System.Windows.Forms
     return modifiers + mainKeySyntax;
   }
 
-  async openApplication(name: string): Promise<void> {
+  // [ADDED 2026-09-03] Real gap closed - per Gavin: "he needs to
+  // understnad when soemting requires opening chrome then seartching,"
+  // after asking to "open youtube" and getting a failure. YouTube isn't
+  // a native Windows app - Get-StartApps genuinely has nothing to find,
+  // and the old code's only fallback (plain Start-Process "<name>") just
+  // fails outright for a website name. A curated real list of well-known
+  // WEBSITES (not a "guess <name>.com" heuristic - too unreliable for
+  // things like "notepad" or "calculator," which are never websites) -
+  // matched BEFORE the Get-StartApps lookup, since none of these
+  // realistically collide with an installed native app on a normal
+  // Windows machine. Deliberately excludes Spotify - opening the
+  // Spotify *app* should stay app-control's job; playing music is
+  // core/spotify.ts's real, separate intent.
+  private static readonly KNOWN_WEBSITES: Record<string, string> = {
+    youtube: "https://www.youtube.com",
+    gmail: "https://mail.google.com",
+    google: "https://www.google.com",
+    netflix: "https://www.netflix.com",
+    reddit: "https://www.reddit.com",
+    amazon: "https://www.amazon.com",
+    "twitter": "https://www.x.com",
+    x: "https://www.x.com",
+    facebook: "https://www.facebook.com",
+    instagram: "https://www.instagram.com",
+    linkedin: "https://www.linkedin.com",
+    outlook: "https://outlook.com",
+    twitch: "https://www.twitch.tv",
+    wikipedia: "https://www.wikipedia.org",
+    maps: "https://maps.google.com",
+    "google maps": "https://maps.google.com",
+  };
+
+  /**
+   * [UPDATE 2026-09-03] Now returns a real, honest description of WHAT
+   * actually happened, not just void - per Gavin's own real ask, this
+   * feeds back into the conversational reply so JARVIS can honestly say
+   * "I wasn't sure exactly what that was, so I searched for it" instead
+   * of implying it opened the specific named thing when it actually
+   * fell back to a search.
+   */
+  async openApplication(name: string): Promise<string> {
+    const knownUrl = WindowsController.KNOWN_WEBSITES[name.trim().toLowerCase()];
+    if (knownUrl) {
+      console.log(`   → "${name}" is a real website, not a native app - opening it in the default browser: ${knownUrl}`);
+      // Windows resolves a URL-shaped Start-Process target to the real
+      // default browser automatically - no need to name a specific
+      // browser executable (Chrome/Edge/whatever Gavin actually has set
+      // as default), same real mechanism as double-clicking a link.
+      await runPowerShell(`Start-Process "${psEscape(knownUrl)}"`);
+      return `Opened ${name} in your browser (${knownUrl})`;
+    }
+
     // BUG FIX (2026-08-31, confirmed live): plain `Start-Process "<name>"`
     // only works when <name> is directly on PATH (system tools like
     // notepad.exe, calc.exe) or an exact file/executable path - it fails
@@ -305,15 +356,39 @@ Add-Type -AssemblyName System.Windows.Forms
     // producing a real literal `\` in the emitted PowerShell) is what
     // survives into the actual script now.
     const escapedName = psEscape(name);
-    await runPowerShell(`
+    // [UPDATE 2026-09-03] Real, more general fallback added - per Gavin,
+    // beyond the curated KNOWN_WEBSITES check above: "he needs to
+    // understnad when soemting requires opening chrome then seartching."
+    // If Get-StartApps finds no real installed app AND the bare
+    // Start-Process attempt ALSO genuinely fails (not a real executable
+    // name either - the common case for a website/service name not on
+    // the curated list), fall back to a real Google search for the name
+    // in the default browser instead of just failing outright. This is
+    // deliberately the LAST resort, after both real, more precise
+    // options (an actual installed app, or a specifically-known website)
+    // have already failed - a graceful "I don't know exactly what this
+    // is, but here's a real search for it" rather than a bare error.
+    const { stdout } = await runPowerShell(`
 $name = "${escapedName}"
 $app = Get-StartApps | Where-Object { $_.Name -like "*$name*" } | Select-Object -First 1
 if ($app) {
+  Write-Output "REAL_APP:$($app.Name)"
   Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\\$($app.AppID)"
 } else {
-  Start-Process "$name"
+  try {
+    Start-Process "$name" -ErrorAction Stop
+    Write-Output "REAL_APP:$name"
+  } catch {
+    Write-Output "FALLBACK_SEARCH"
+    Start-Process "https://www.google.com/search?q=$([uri]::EscapeDataString($name))"
+  }
 }
 `);
+    if (stdout.includes("FALLBACK_SEARCH")) {
+      return `Couldn't find a real app or website called "${name}" - searched for it on Google instead`;
+    }
+    const realAppMatch = stdout.match(/REAL_APP:(.+)/);
+    return `Opened ${realAppMatch ? realAppMatch[1].trim() : name}`;
   }
 
   async closeApplication(name: string): Promise<void> {

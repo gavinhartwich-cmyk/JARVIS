@@ -280,11 +280,18 @@ export class ScreenControl {
     try {
       console.log(`\n🎬 Executing ${sequence.actions.length} actions...`);
 
+      // [ADDED 2026-09-03] Real per-action details (currently only
+      // "open" produces one - see executeAction()'s own comment),
+      // collected so the final output can honestly reflect what actually
+      // happened instead of a generic "N actions completed" that can't
+      // tell Gavin apart a real app opening from a fallback search.
+      const details: string[] = [];
       for (let i = 0; i < sequence.actions.length; i++) {
         const action = sequence.actions[i];
         console.log(`   [${i + 1}/${sequence.actions.length}] ${action.action}`);
 
-        await this.executeAction(action);
+        const detail = await this.executeAction(action);
+        if (detail) details.push(detail);
         actionsTaken++;
       }
 
@@ -295,7 +302,7 @@ export class ScreenControl {
         sequenceId: sequence.id,
         actionsTaken,
         executionTimeMs,
-        output: `Successfully completed ${actionsTaken} actions in ${executionTimeMs}ms`,
+        output: details.length > 0 ? details.join("; ") : `Successfully completed ${actionsTaken} actions in ${executionTimeMs}ms`,
       };
 
       console.log(`\n✅ Sequence completed successfully`);
@@ -330,8 +337,15 @@ export class ScreenControl {
    * Executes one action for real via windowsController. See that file's
    * header comment — written and typechecked here, never run here, needs
    * verification on the actual PC.
+   *
+   * [UPDATE 2026-09-03] Now returns an optional real detail string - per
+   * Gavin's real ask about "open youtube" needing to fall back to a
+   * browser search honestly, the "open" case's real outcome
+   * (opened a real app / a known website / fell back to search) needs to
+   * reach the final conversational reply, not just be logged to console
+   * and discarded.
    */
-  private async executeAction(action: ControlAction): Promise<void> {
+  private async executeAction(action: ControlAction): Promise<string | undefined> {
     switch (action.action) {
       case "click":
         if (action.parameters?.x !== undefined) {
@@ -380,7 +394,9 @@ export class ScreenControl {
       case "open":
         if (action.target) {
           console.log(`      → Opening: ${action.target}`);
-          await windowsController.openApplication(action.target);
+          const detail = await windowsController.openApplication(action.target);
+          console.log(`      → ${detail}`);
+          return detail;
         }
         break;
 
