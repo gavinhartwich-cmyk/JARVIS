@@ -13,6 +13,7 @@ import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
 import { findCachedAnswer, recordCacheableEpisode } from "../core/episode-cache";
+import { telemetry, Stage } from "../core/telemetry";
 
 const JARVIS_SYSTEM_PROMPT =
   "You are JARVIS, a helpful voice assistant. Keep replies short and " +
@@ -239,13 +240,19 @@ export class VoiceInterface {
    * mic to drive the wake-word/STT half of the pipeline).
    */
   async respondToText(userText: string): Promise<{ response: string; audio?: SynthesisResult }> {
+    // Architecture update section 7: measure every stage of the live reply
+    // path (not just total time), so a slow turn shows *where* the time
+    // went instead of just that it happened.
+    const traceId = telemetry.start("voice.respondToText");
+    telemetry.mark(traceId, Stage.INPUT_RECEIVED);
+
     this.context.messageHistory.push({
       role: "user",
       content: userText,
       timestamp: new Date(),
     });
 
-    const response = await this.generateResponse(userText);
+    const response = await this.generateResponse(userText, traceId);
 
     this.context.messageHistory.push({
       role: "assistant",
@@ -256,9 +263,11 @@ export class VoiceInterface {
     let audio: SynthesisResult | undefined;
     if (this.speechSynthesizer) {
       audio = await this.speechSynthesizer.synthesize(response);
+      telemetry.mark(traceId, Stage.FIRST_AUDIO);
       this.emit("audio-ready", audio);
     }
 
+    telemetry.finish(traceId);
     return { response, audio };
   }
 
@@ -273,7 +282,7 @@ export class VoiceInterface {
    * single model call with just the recent conversation history as
    * context, which is the right shape for "answer what was just said."
    */
-  private async generateResponse(userInput: string): Promise<string> {
+  private async generateResponse(userInput: string, traceId?: string): Promise<string> {
     this.emit("jarvis-responding", { input: userInput });
 
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);
@@ -285,6 +294,7 @@ export class VoiceInterface {
     const cached = await findCachedAnswer(userInput, this.modelProvider);
     if (cached) {
       console.log(`🗄️  JARVIS (cached): "${cached}"`);
+      if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "cache_hit");
       return cached;
     }
 
@@ -299,10 +309,17 @@ export class VoiceInterface {
 
     let response: string;
     try {
+      if (traceId) telemetry.mark(traceId, Stage.PROVIDER_CONNECTION, this.modelProvider.name);
       const result = await this.modelProvider.complete(messages, {
         systemPrompt: JARVIS_SYSTEM_PROMPT,
         maxTokens: 200,
       });
+      // "first_token" is a bit of a misnomer here — modelProvider.complete()
+      // is not streaming, so this mark actually lands at full completion.
+      // That gap (no true time-to-first-token on the fast path yet) is
+      // itself one of the findings this instrumentation exists to surface;
+      // see ARCHITECTURE-UPDATE-ADAPTIVE-PROCESSING.md section 4.
+      if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "non-streaming");
       response = result.content.trim();
       // Fire-and-forget: recordCacheableEpisode no-ops for action requests
       // and time/context-dependent questions, and never throws (memory
@@ -313,6 +330,7 @@ export class VoiceInterface {
       console.error("❌ JARVIS response generation failed:", err);
       this.emit("error", { message: err });
       response = "Sorry, I couldn't reach any model provider to answer that.";
+      if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "error");
     }
 
     console.log(`🤖 JARVIS: "${response}"`);

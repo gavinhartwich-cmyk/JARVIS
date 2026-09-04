@@ -11,6 +11,7 @@ import { ConversationEngine } from "../phase2/conversation-engine";
 import { ConversationalIntelligence } from "./conversation-intelligence";
 import { IntelligentModelRouter } from "./model-router";
 import { identityEngine, type IdentityResult } from "./identity";
+import { telemetry, Stage } from "./telemetry";
 
 /**
  * Orchestrator with Conversational Intelligence
@@ -115,6 +116,12 @@ export class Orchestrator {
     const taskId = uuid();
     const db = getDatabase();
 
+    // This is the DEEP path (architecture update section 1/9) — the full
+    // multi-agent pipeline. Traced end-to-end, per-agent and per-tool-call,
+    // so its cost is visible next to the fast path's, not assumed.
+    const traceId = telemetry.start("orchestrator.orchestrate");
+    telemetry.mark(traceId, Stage.INPUT_RECEIVED);
+
     // Step 1: Create task record
     console.log(`\n📋 Task ${taskId}: ${userTask}`);
 
@@ -139,6 +146,7 @@ export class Orchestrator {
       // Step 2: Decompose task
       console.log(`\n🔍 Decomposing task...`);
       const decomposition = await this.decomposeTask(userTask, taskId);
+      telemetry.mark(traceId, "decomposition");
 
       await db
         .update(tasks)
@@ -168,7 +176,10 @@ export class Orchestrator {
           previousResults: agentOutputs,
         };
 
+        const agentStartedAt = new Date();
         const output = await agent.execute(agentInput);
+        const agentCompletedAt = new Date();
+        telemetry.mark(traceId, Stage.AGENT_EXECUTION, agentName);
         agentOutputs[agentName] = output;
 
         // NEW: Execute any tool calls the agent requested
@@ -181,7 +192,8 @@ export class Orchestrator {
             console.log(`     → ${toolCall.toolName}`);
             const result = await toolManager.executeTool(toolCall, taskId, identity);
             toolResults[toolCall.toolName] = result;
-            
+            telemetry.mark(traceId, Stage.TOOL_EXECUTION, toolCall.toolName);
+
             if (result.success) {
               console.log(`       ✓ Success (${result.executionTime}ms)`);
             } else {
@@ -194,7 +206,11 @@ export class Orchestrator {
           context.toolResults = { ...toolResultsMap, ...toolResults };
         }
 
-        // Store in database
+        // Store in database. startedAt/durationMs were previously always
+        // left unset despite the columns existing (schema.ts) — real bug
+        // found while wiring up this trace: nothing populated them, so
+        // per-agent latency was invisible in the DB even though the table
+        // was designed for it. Now they reflect the actual measured span.
         await db.insert(agentRuns).values({
           taskId,
           agentName,
@@ -207,7 +223,9 @@ export class Orchestrator {
           confidence: String(output.confidence),
           verificationStatus: "unverified",
           tokensUsed: output.tokensUsed,
-          completedAt: new Date(),
+          startedAt: agentStartedAt,
+          durationMs: agentCompletedAt.getTime() - agentStartedAt.getTime(),
+          completedAt: agentCompletedAt,
         });
 
         // Update context for next agent
@@ -223,6 +241,7 @@ export class Orchestrator {
         userTask,
         taskId
       );
+      telemetry.mark(traceId, "synthesis");
 
       // Step 5: Store results and memory
       await db
@@ -274,6 +293,9 @@ export class Orchestrator {
       });
 
       throw error;
+    } finally {
+      telemetry.mark(traceId, Stage.TOTAL_COMPLETION);
+      telemetry.finish(traceId);
     }
   }
 
