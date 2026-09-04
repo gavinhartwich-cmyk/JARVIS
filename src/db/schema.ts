@@ -1,4 +1,4 @@
-import { pgTable, text, uuid, timestamp, jsonb, integer, varchar, pgEnum, numeric, index } from "drizzle-orm/pg-core";
+import { pgTable, text, uuid, timestamp, jsonb, integer, varchar, pgEnum, numeric, index, boolean } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 // Enums
@@ -183,6 +183,37 @@ export const authorizationDecisions = pgTable("authorization_decisions", {
   decisionIdx: index("authorization_decisions_decision_idx").on(table.decision),
   createdIdx: index("authorization_decisions_created_idx").on(table.createdAt),
 }));
+
+// Action Journal (architecture update sections 10-11) — every executable
+// action, whether run through ToolManager or a direct executor like
+// ScreenControl, is recorded here as the foundation for action history and
+// undo. Not every action is reversible (reversible=false, inverseAction
+// null is the normal case for read-only or genuinely one-way actions) —
+// "where possible" per the directive, not "always."
+export const executionSystemEnum = pgEnum("execution_system", ["tool_manager", "screen_control"]);
+
+export const actionJournal = pgTable("action_journal", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  taskId: uuid("task_id"), // not a hard FK — actions can happen outside a formal task (e.g. a direct voice command)
+  system: executionSystemEnum("system").notNull(), // which executor ran this, so undo knows how to re-run its inverse
+  tool: varchar("tool", { length: 255 }).notNull(), // tool/action name, e.g. "write_file", "open_app"
+  parameters: jsonb("parameters").notNull(),
+  success: boolean("success").notNull(),
+  result: jsonb("result"),
+  riskTier: varchar("risk_tier", { length: 50 }).notNull(), // low/normal/admin, mirrors core/authorization.ts's RiskTier
+  reversible: boolean("reversible").notNull().default(false),
+  inverseAction: jsonb("inverse_action"), // {tool, parameters} to reverse this action, or null
+  undoneAt: timestamp("undone_at"), // set once this action has actually been undone
+  undoOfActionId: uuid("undo_of_action_id"), // set on the journal row for an undo itself, pointing at what it reversed
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  createdIdx: index("action_journal_created_idx").on(table.createdAt),
+  taskIdx: index("action_journal_task_idx").on(table.taskId),
+  undoneIdx: index("action_journal_undone_idx").on(table.undoneAt),
+}));
+
+export type ActionJournalEntry = typeof actionJournal.$inferSelect;
+export type NewActionJournalEntry = typeof actionJournal.$inferInsert;
 
 export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;

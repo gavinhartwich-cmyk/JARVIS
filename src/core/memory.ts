@@ -2,7 +2,7 @@ import { getDatabase } from "../db/client";
 import { memories } from "../db/schema";
 import { v4 as uuid } from "uuid";
 import type { NewMemory } from "../db/schema";
-import { eq, like, or, desc } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, like, or } from "drizzle-orm";
 
 export interface MemoryInput {
   type: "fact" | "episode" | "semantic" | "preference" | "project" | "goal" | "relationship" | "event";
@@ -12,6 +12,7 @@ export interface MemoryInput {
   source?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  expiresAt?: Date;
 }
 
 export async function storeMemory(memory: MemoryInput) {
@@ -26,6 +27,7 @@ export async function storeMemory(memory: MemoryInput) {
       source: memory.source,
       tags: memory.tags,
       metadata: memory.metadata,
+      expiresAt: memory.expiresAt,
       createdAt: new Date(),
       lastAccessedAt: new Date(),
     });
@@ -125,6 +127,41 @@ export async function searchMemoriesByUtterance(utterance: string, limit: number
       .limit(limit);
   } catch (error) {
     console.error("Failed to search memories by utterance:", error);
+    return [];
+  }
+}
+
+/**
+ * List non-expired memories of a given type that carry a specific tag,
+ * newest first. Type + expiry filtering happens in SQL; tag containment is
+ * checked in JS afterward rather than with a Postgres array-containment
+ * operator, to keep this query simple and avoid another moving part.
+ *
+ * Used by the episode cache (src/core/episode-cache.ts) to pull its
+ * candidate pool of previously-answered, cacheable questions.
+ */
+export async function listMemoriesByTag(
+  type: MemoryInput["type"],
+  tag: string,
+  limit: number = 200
+) {
+  try {
+    const db = getDatabase();
+    const now = new Date();
+    const rows = await db
+      .select()
+      .from(memories)
+      .where(
+        and(
+          eq(memories.type, type),
+          or(isNull(memories.expiresAt), gt(memories.expiresAt, now))
+        )
+      )
+      .orderBy(desc(memories.createdAt))
+      .limit(limit);
+    return rows.filter((row) => row.tags?.includes(tag));
+  } catch (error) {
+    console.error("Failed to list memories by tag:", error);
     return [];
   }
 }

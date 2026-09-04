@@ -29,6 +29,9 @@ import { runProactiveScheduler } from "./core/proactive-scheduler";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runLiveHarness } from "./prototypes/gemini-live/cli-harness";
+import { runComparison } from "./prototypes/gemini-live/compare-latency";
+import { undoLastActions } from "./core/action-journal";
 
 /**
  * JARVIS CLI - Entry point for the system
@@ -390,7 +393,11 @@ async function main() {
         // app-control execution, same pipeline `bun run dev conversation`
         // uses) instead of leaving VoiceInterface's app-control-less
         // fallback path as the only option - see voice-interface.ts's
-        // generateResponse() for the full story.
+        // generateResponse() for the full story. This also wires the DEEP
+        // path (architecture update sections 1/9): processConversation()
+        // routes a genuinely multi-step/thorough request to the real
+        // multi-agent pipeline (Researcher/Reasoner/Critic/FactChecker/
+        // Synthesizer) itself, so voice-reply gets that for free too.
         const voice = new VoiceInterface(DEFAULT_VOICE_CONFIG, modelProvider, orchestrator);
         const { response, audio } = await voice.respondToText(text);
         console.log(`\n🤖 JARVIS: "${response}"`);
@@ -885,6 +892,54 @@ async function main() {
         }
       }
       console.log("\n" + "=".repeat(70));
+    } else if (command === "live-prototype") {
+      const resumeIdx = args.indexOf("--resume");
+      const resumeHandle = resumeIdx !== -1 ? args[resumeIdx + 1] : undefined;
+      const text = args.slice(1, resumeIdx !== -1 ? resumeIdx : undefined).join(" ");
+
+      console.log("\n" + "=".repeat(70));
+      console.log("🛰️  GEMINI LIVE PROTOTYPE (architecture update step 4 — isolated, unverified)");
+      console.log("=".repeat(70));
+
+      if (!text) {
+        console.log('\nUsage: bun run dev live-prototype "<text>" [--resume <handle>]');
+        console.log("Requires GEMINI_API_KEY. No mic yet — text-in, per src/prototypes/gemini-live/cli-harness.ts.");
+      } else {
+        try {
+          await runLiveHarness(text, resumeHandle);
+        } catch (error) {
+          console.error("\n❌ Live prototype failed:", error instanceof Error ? error.message : error);
+          console.error("   Expected without a real GEMINI_API_KEY and a live network path to Google's API.");
+        }
+      }
+      console.log("=".repeat(70));
+    } else if (command === "compare-latency") {
+      // Architecture update step 5. Needs a real GEMINI_API_KEY and at
+      // least one of Ollama/Gemini/OmniRoute reachable to produce anything
+      // but "unreachable" for both paths — see compare-latency.ts's header.
+      const prompts = args.length > 1 ? [args.slice(1).join(" ")] : [
+        "What's the capital of France?",
+        "How many ounces are in a pound?",
+        "Say hello.",
+      ];
+      await runComparison(prompts, 3);
+    } else if (command === "undo") {
+      // Architecture update sections 10-11 (Action Journal + Undo).
+      const count = args[1] ? parseInt(args[1], 10) : 1;
+      console.log("\n" + "=".repeat(70));
+      console.log(`↩️  UNDO — reversing the last ${count} reversible action(s)`);
+      console.log("=".repeat(70));
+
+      const identity = await identityEngine.resolveFromDeviceSession();
+      const results = await undoLastActions(count, identity);
+
+      if (results.length === 0) {
+        console.log("\nNothing to undo — no recent reversible actions found.");
+      }
+      for (const r of results) {
+        console.log(r.success ? `\n✅ Undid "${r.tool}" (action ${r.actionId})` : `\n❌ Failed to undo "${r.tool}": ${r.error}`);
+      }
+      console.log("=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -905,6 +960,9 @@ async function main() {
       console.log("  bun run dev camera-test [device-name] - Real on-demand webcam capture + vision (Phase 3)");
       console.log("  bun run dev spotify-auth  - One-time real Spotify OAuth consent (opens a browser)");
       console.log('  bun run dev spotify-test "<song/artist>" - Real Spotify playback test (Phase 5)');
+      console.log('  bun run dev live-prototype "<text>" [--resume <handle>] - Gemini Live prototype (step 4, unverified, needs GEMINI_API_KEY)');
+      console.log('  bun run dev compare-latency ["<text>"] - Current JARVIS vs Gemini Live latency comparison (step 5)');
+      console.log("  bun run dev undo [count]  - Undo the last [count] (default 1) reversible actions (step 7)");
     }
   } finally {
     await closeDatabase();

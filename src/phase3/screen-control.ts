@@ -486,7 +486,10 @@ export class ScreenControl {
    * `Orchestrator.parseAppControlIntent`) have the same one-call shape as
    * opening one — same authorization gate, same real
    * `windowsController.closeApplication()` underneath (best-effort
-   * `Stop-Process` by name; a no-match is not an error).
+   * `Stop-Process` by name; a no-match is not an error). Also the
+   * single-call deterministic executor the intent router's TOOL path
+   * (core/intent-router.ts) uses for "close <app>", the same way it uses
+   * openApp() for "open <app>".
    */
   async closeApp(appName: string, identity: IdentityResult): Promise<ControlResult> {
     const seq = this.buildSequence(`Close ${appName}`);

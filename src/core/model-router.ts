@@ -223,24 +223,21 @@ export class IntelligentModelRouter implements IModelRouter {
   }
 
   /**
-   * Determine if we should use cached response
+   * Determine if a cache lookup is worth attempting at all.
+   *
+   * This used to gate on how fast the user had been talking (average
+   * turn duration < 2s = "quick mode") — a proxy with nothing to do with
+   * whether the specific question actually recurred, so a slow, thoughtful
+   * repeat of an earlier question would never get looked up. The real
+   * decision now lives in core/episode-cache.ts: is this utterance the
+   * kind of thing that's safe to cache (not an action, not time/context
+   * dependent), does a similar past question exist, and is that old
+   * answer still verified true. That runs on every turn after the first;
+   * this just skips the very first turn, where no prior answer could
+   * possibly exist yet.
    */
   shouldUseCache(context: ConversationContext): boolean {
-    // Use cache if:
-    // 1. Same question was asked in last 10 turns
-    // 2. User is in "quick mode" (rapid back-and-forth)
-    // 3. Network latency is high
-
-    if (context.turnCount === 0) {
-      return false; // First turn
-    }
-
-    // If user asks very frequently (more than 1 per 2 seconds), use cache
-    const turnDuration = context.sessionStartTime.getTime() > 0
-      ? (new Date().getTime() - context.sessionStartTime.getTime()) / context.turnCount
-      : 1000;
-
-    return turnDuration < 2000; // Less than 2 seconds per turn
+    return context.turnCount > 0;
   }
 
   /**

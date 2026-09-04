@@ -18,6 +18,7 @@ import type { ConversationEngine, ConversationContext, ReasoningPath } from "../
 import type { ModelProvider } from "../models/types";
 import { JARVIS_PERSONALITY_PROMPT } from "./jarvis-personality";
 import { searchMemoriesByUtterance } from "./memory";
+import { findCachedAnswer, recordCacheableEpisode } from "./episode-cache";
 
 export interface ConversationMemory {
   // Long-term episodic memory
@@ -189,9 +190,13 @@ export class ConversationalIntelligence {
     // real screen was just looked at, or a real web search was just run —
     // a stale cached line has no idea Spotify just opened (or failed to),
     // what's actually on screen right now, or what a fresh search turned
-    // up, and would contradict what actually happened.
+    // up, and would contradict what actually happened. On top of that
+    // per-turn guard, the persistent episode cache (core/episode-cache.ts)
+    // has its own content-based gate (never caches action requests or
+    // time/context-dependent questions) plus an LLM "is this still valid"
+    // check before ever serving a hit.
     if (!actionOutcome && !visionContext && !searchContext && this.modelRouter.shouldUseCache(context)) {
-      const cached = this.checkMemoryCache(utterance);
+      const cached = await this.checkMemoryCache(utterance);
       if (cached) {
         return this.createStreamFromText(cached, "memory");
       }
@@ -412,21 +417,18 @@ export class ConversationalIntelligence {
   }
 
   /**
-   * Check if response exists in episodic memory
+   * Check for a persistent, verified cached answer to this utterance.
+   *
+   * Delegates to the shared episode cache (core/episode-cache.ts) instead
+   * of scanning the in-process `this.memory.episodes` array: that array is
+   * wiped every restart and its old matching (first-10-characters prefix
+   * overlap) was crude enough to conflate unrelated questions that happen
+   * to start the same way. The persistent cache instead requires real
+   * token-similarity plus an LLM-verified "still true" check, and survives
+   * restarts.
    */
-  private checkMemoryCache(utterance: string): string | null {
-    const lowerUtterance = utterance.toLowerCase();
-
-    // Look for similar episodes
-    for (const episode of this.memory.episodes) {
-      const summary = episode.summary.toLowerCase();
-      if (summary.includes(lowerUtterance.substring(0, 10))) {
-        // Simple similarity check
-        return `Based on what happened before: ${episode.summary}`;
-      }
-    }
-
-    return null;
+  private async checkMemoryCache(utterance: string): Promise<string | null> {
+    return findCachedAnswer(utterance, this.modelProvider);
   }
 
   /**
@@ -834,6 +836,12 @@ export class ConversationalIntelligence {
       ["responded"],
       0.6
     );
+
+    // Persist the full question/answer pair for future cache lookups —
+    // recordEpisode above only keeps a truncated summary in the in-process
+    // array, which was never enough to actually answer a repeat question
+    // from. No-ops for action requests / time-dependent questions.
+    void recordCacheableEpisode(userUtterance, response);
   }
 
   /**

@@ -18,6 +18,11 @@ import type { Orchestrator } from "../core/orchestrator";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 import { normalizeNumbersForSpeech, splitIntoSentences } from "./text-normalizer";
 import { spotifyWarmUp, spotifyShutdown } from "../core/spotify";
+import { findCachedAnswer, recordCacheableEpisode } from "../core/episode-cache";
+import { telemetry, Stage } from "../core/telemetry";
+import { classifyIntent, type KnownAction } from "../core/intent-router";
+import { identityEngine } from "../core/identity";
+import { capabilityRegistry } from "../core/capability-registry";
 
 // Real end-of-turn detection (2026-08-30): nothing previously ever called
 // speechRecognizer.stopStreaming() except VoiceInterface.stop() shutting
@@ -161,6 +166,16 @@ function computeWavPeakAmplitude(wav: Buffer): number {
 // much as the primary Orchestrator path that conversation-intelligence.ts
 // handles.
 const JARVIS_SYSTEM_PROMPT = JARVIS_PERSONALITY_PROMPT;
+
+// REASONING path (architecture update section 1/2): same single model call
+// as FAST, but asked to actually weigh the question instead of giving a
+// quick take. Not yet backed by any retrieval/tool augmentation — see
+// core/intent-router.ts's header comment for why that's still a TODO.
+const REASONING_SYSTEM_PROMPT =
+  "You are JARVIS, a helpful voice assistant. This question asks for a real " +
+  "comparison or judgment call, not just a fact — weigh the actual trade-offs " +
+  "before answering. Keep the spoken reply concise (3-5 sentences), but do not " +
+  "skip the reasoning to get there.";
 
 export interface VoiceInteractionContext {
   conversationId: string;
@@ -349,7 +364,11 @@ export class VoiceInterface {
   // its own gateway) that a caller may already have done once and wants
   // reused, not duplicated per VoiceInterface instance - see cli.ts's
   // `listen`/`voice-reply` commands, which now pass their own already-
-  // constructed Orchestrator in.
+  // constructed Orchestrator in. Also what the Intent/Complexity Router's
+  // DEEP path (architecture update sections 1, 2, 9) reaches through —
+  // see orchestrator.ts's processConversation(), not a separate handler
+  // passed in here — so this one instance covers both real actions and
+  // deep multi-agent reasoning.
   private orchestrator?: Orchestrator;
 
   constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG, modelProvider?: ModelProvider, orchestrator?: Orchestrator) {
@@ -1292,16 +1311,19 @@ export class VoiceInterface {
    * (handleUserSpeech) can use the SAME real response-generation/history
    * bookkeeping while diverging on what happens to the audio
    * (speakPipelined() below, not a single whole-reply synthesize() call)
-   * - see speakPipelined()'s own comment for why.
+   * - see speakPipelined()'s own comment for why. `traceId` is optional
+   * and just threaded through to generateResponse() for architecture
+   * update section 7's per-stage timing - a caller with no trace of its
+   * own (there isn't one yet for the mic pipeline) simply gets none.
    */
-  private async generateAndRecordResponse(userText: string): Promise<string> {
+  private async generateAndRecordResponse(userText: string, traceId?: string): Promise<string> {
     this.context.messageHistory.push({
       role: "user",
       content: userText,
       timestamp: new Date(),
     });
 
-    const response = await this.generateResponse(userText);
+    const response = await this.generateResponse(userText, traceId);
 
     this.context.messageHistory.push({
       role: "assistant",
@@ -1323,23 +1345,40 @@ export class VoiceInterface {
    * sentence-by-sentence instead.
    */
   async respondToText(userText: string): Promise<{ response: string; audio?: SynthesisResult }> {
-    const response = await this.generateAndRecordResponse(userText);
+    // Architecture update section 7: measure every stage of the live reply
+    // path (not just total time), so a slow turn shows *where* the time
+    // went instead of just that it happened.
+    const traceId = telemetry.start("voice.respondToText");
+    telemetry.mark(traceId, Stage.INPUT_RECEIVED);
+
+    const response = await this.generateAndRecordResponse(userText, traceId);
 
     let audio: SynthesisResult | undefined;
     if (this.speechSynthesizer) {
-      // [ADDED 2026-09-03] Real bug found live: Chatterbox mispronounced
-      // a real, correct answer ("78,720") as garbled nonsense - Gavin
-      // heard it as "78 7twane." Comma-formatted/large numbers are a
-      // real, known TTS weakness generally, not something JARVIS's own
-      // code was introducing - see text-normalizer.ts's own header
-      // comment. Only the audio gets the spelled-out version
-      // ("seventy-eight thousand, seven hundred twenty") - `response`
-      // itself stays as real, normal text for message history/logging/
-      // anything else that reads it as text, not speech.
-      audio = await this.speechSynthesizer.synthesize(normalizeNumbersForSpeech(response));
-      this.emit("audio-ready", audio);
+      try {
+        // [ADDED 2026-09-03] Real bug found live: Chatterbox mispronounced
+        // a real, correct answer ("78,720") as garbled nonsense - Gavin
+        // heard it as "78 7twane." Comma-formatted/large numbers are a
+        // real, known TTS weakness generally, not something JARVIS's own
+        // code was introducing - see text-normalizer.ts's own header
+        // comment. Only the audio gets the spelled-out version
+        // ("seventy-eight thousand, seven hundred twenty") - `response`
+        // itself stays as real, normal text for message history/logging/
+        // anything else that reads it as text, not speech.
+        audio = await this.speechSynthesizer.synthesize(normalizeNumbersForSpeech(response));
+        telemetry.mark(traceId, Stage.FIRST_AUDIO);
+        this.emit("audio-ready", audio);
+      } catch (error) {
+        // A missing/broken TTS binary shouldn't take down a turn that
+        // otherwise succeeded — degrade to a text-only reply instead,
+        // same as the `voice-reply` CLI already does for "TTS disabled".
+        const err = error instanceof Error ? error.message : String(error);
+        console.error("❌ Text-to-speech synthesis failed, returning text-only reply:", err);
+        telemetry.mark(traceId, Stage.FIRST_AUDIO, "tts_failed");
+      }
     }
 
+    telemetry.finish(traceId);
     return { response, audio };
   }
 
@@ -1450,7 +1489,7 @@ export class VoiceInterface {
    * single model call with just the recent conversation history as
    * context, which is the right shape for "answer what was just said."
    */
-  private async generateResponse(userInput: string): Promise<string> {
+  private async generateResponse(userInput: string, traceId?: string): Promise<string> {
     this.emit("jarvis-responding", { input: userInput });
 
     console.log(`\n🤖 JARVIS processing: "${userInput}"`);
@@ -1476,15 +1515,27 @@ export class VoiceInterface {
     // `context.messageHistory` - fine for app-control + reply generation
     // (which is what orchestrator.processConversation() is for), but
     // means the two histories aren't merged into one transcript yet.
+    //
+    // [ADDED 2026-09-04] processConversation() itself is where the new
+    // Intent/Complexity Router's DEEP path (architecture update sections
+    // 1, 2, 9 — routing a genuinely multi-step/thorough request to the
+    // real 5-agent orchestrate() pipeline) is wired in, alongside the
+    // existing app-control/vision/search detection — see orchestrator.ts.
+    // Kept there rather than duplicated here so there's exactly one real
+    // dispatcher for "what does this utterance need," not two competing
+    // ones.
     if (this.orchestrator) {
       try {
+        if (traceId) telemetry.mark(traceId, Stage.AGENT_EXECUTION, "orchestrator.processConversation");
         const result = await this.orchestrator.processConversation(userInput);
+        if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "orchestrator");
         console.log(`🤖 JARVIS: "${result.response}"`);
         return result.response;
       } catch (error) {
         const err = error instanceof Error ? error.message : String(error);
         console.error("❌ JARVIS response generation failed:", err);
         this.emit("error", { message: err });
+        if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "error");
         return "I'm afraid none of my model providers are reachable at the moment, sir.";
       }
     }
@@ -1492,7 +1543,33 @@ export class VoiceInterface {
     // Fallback when no Orchestrator was provided (e.g. a caller that only
     // wants a lightweight text-in/audio-out reply with no app-control,
     // or a test using a fake ModelProvider) - the original direct,
-    // single-model-call path. No app-control detection here.
+    // single-model-call path. Real Intent/Complexity Router (architecture
+    // update sections 1, 2, 9) + persistent episode cache give this
+    // fallback real app-control detection and caching it never had before
+    // — the DEEP path has nothing to route to without a real Orchestrator,
+    // so it's answered directly like FAST, same as an unconfigured deep
+    // handler would.
+    const route = classifyIntent(userInput);
+    if (traceId) telemetry.mark(traceId, Stage.INTENT_ROUTING, route.path);
+    console.log(`   Route: ${route.path} (${route.reason})`);
+
+    if (route.path === "tool" && route.action) {
+      // Section 8: a known action goes straight to its deterministic
+      // executor — no LLM call to "translate" it first.
+      return this.executeKnownAction(route.action, traceId);
+    }
+
+    // Persistent episode cache: skips the full reply-generation call below
+    // entirely on a verified hit. Gated on question stability (never for
+    // action requests or anything time/context-dependent) and confirmed by
+    // a small LLM check before being served — see core/episode-cache.ts.
+    const cached = await findCachedAnswer(userInput, this.modelProvider);
+    if (cached) {
+      console.log(`🗄️  JARVIS (cached): "${cached}"`);
+      if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "cache_hit");
+      return cached;
+    }
+
     const recentHistory = this.context.messageHistory.slice(-6, -1); // exclude the just-pushed user turn
     const messages = [
       ...recentHistory.map((turn) => ({
@@ -1502,22 +1579,65 @@ export class VoiceInterface {
       { role: "user" as const, content: userInput },
     ];
 
+    const isReasoning = route.path === "reasoning";
     let response: string;
     try {
+      if (traceId) telemetry.mark(traceId, Stage.PROVIDER_CONNECTION, this.modelProvider.name);
       const result = await this.modelProvider.complete(messages, {
-        systemPrompt: JARVIS_SYSTEM_PROMPT,
-        maxTokens: 200,
+        systemPrompt: isReasoning ? REASONING_SYSTEM_PROMPT : JARVIS_SYSTEM_PROMPT,
+        maxTokens: isReasoning ? 400 : 200,
       });
+      // "first_token" is a bit of a misnomer here — modelProvider.complete()
+      // is not streaming, so this mark actually lands at full completion.
+      // That gap (no true time-to-first-token on the fast path yet) is
+      // itself one of the findings this instrumentation exists to surface;
+      // see ARCHITECTURE-UPDATE-ADAPTIVE-PROCESSING.md section 4.
+      if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "non-streaming");
       response = result.content.trim();
+      // Fire-and-forget: recordCacheableEpisode no-ops for action requests
+      // and time/context-dependent questions, and never throws (memory
+      // failures shouldn't block or slow down the response).
+      void recordCacheableEpisode(userInput, response);
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       console.error("❌ JARVIS response generation failed:", err);
       this.emit("error", { message: err });
       response = "I'm afraid none of my model providers are reachable at the moment, sir.";
+      if (traceId) telemetry.mark(traceId, Stage.FIRST_TOKEN, "error");
     }
 
     console.log(`🤖 JARVIS: "${response}"`);
     return response;
+  }
+
+  /**
+   * TOOL path executor (architecture update section 8): runs a known
+   * action deterministically through the capability registry
+   * (core/capability-registry.ts) — no model call at all, matching or
+   * failing exactly as the underlying executor does. VoiceInterface no
+   * longer needs to know ScreenControl exists, or that action-journal
+   * recording happens — that's the point of section 14's registry: adding
+   * a new capability shouldn't mean editing this branch.
+   */
+  private async executeKnownAction(action: KnownAction, traceId?: string): Promise<string> {
+    let result: { success: boolean; error?: string };
+    try {
+      const identity = await identityEngine.resolveFromDeviceSession();
+      result = await capabilityRegistry.execute(action.name, { target: action.target }, identity);
+    } catch (error) {
+      // Covers both a failed automation call and a failed identity
+      // resolution (e.g. no database configured) — either way this must
+      // degrade to a spoken error, not crash the whole turn.
+      result = { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (traceId) telemetry.mark(traceId, Stage.TOOL_EXECUTION, action.name);
+
+    if (result.success) {
+      const verb = action.name === "open_app" ? "Opening" : "Closing";
+      return `${verb} ${action.target}.`;
+    }
+    console.error(`❌ ${action.name} "${action.target}" failed:`, result.error);
+    return `I couldn't ${action.name === "open_app" ? "open" : "close"} ${action.target}: ${result.error ?? "unknown error"}.`;
   }
 
   /**

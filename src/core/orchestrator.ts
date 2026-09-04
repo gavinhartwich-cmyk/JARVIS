@@ -24,6 +24,8 @@ import { listDirectory, readTextFile, writeTextFile, moveFile } from "./file-man
 import { spotifyPlay, spotifyPause, spotifyResume, spotifyNext, spotifyPrevious, spotifyStatus } from "./spotify";
 import { existsSync } from "node:fs";
 import type { ModelProvider } from "../models/types";
+import { telemetry, Stage } from "./telemetry";
+import { classifyIntent } from "./intent-router";
 
 /**
  * Orchestrator with Conversational Intelligence
@@ -264,6 +266,12 @@ export class Orchestrator {
     const taskId = uuid();
     const db = getDatabase();
 
+    // This is the DEEP path (architecture update section 1/9) — the full
+    // multi-agent pipeline. Traced end-to-end, per-agent and per-tool-call,
+    // so its cost is visible next to the fast path's, not assumed.
+    const traceId = telemetry.start("orchestrator.orchestrate");
+    telemetry.mark(traceId, Stage.INPUT_RECEIVED);
+
     // Step 1: Create task record
     console.log(`\n📋 Task ${taskId}: ${userTask}`);
 
@@ -288,6 +296,7 @@ export class Orchestrator {
       // Step 2: Decompose task
       console.log(`\n🔍 Decomposing task...`);
       const decomposition = await this.decomposeTask(userTask, taskId);
+      telemetry.mark(traceId, "decomposition");
 
       await db
         .update(tasks)
@@ -317,7 +326,10 @@ export class Orchestrator {
           previousResults: agentOutputs,
         };
 
+        const agentStartedAt = new Date();
         const output = await agent.execute(agentInput);
+        const agentCompletedAt = new Date();
+        telemetry.mark(traceId, Stage.AGENT_EXECUTION, agentName);
         agentOutputs[agentName] = output;
 
         // NEW: Execute any tool calls the agent requested
@@ -330,7 +342,8 @@ export class Orchestrator {
             console.log(`     → ${toolCall.toolName}`);
             const result = await toolManager.executeTool(toolCall, taskId, identity);
             toolResults[toolCall.toolName] = result;
-            
+            telemetry.mark(traceId, Stage.TOOL_EXECUTION, toolCall.toolName);
+
             if (result.success) {
               console.log(`       ✓ Success (${result.executionTime}ms)`);
             } else {
@@ -343,7 +356,11 @@ export class Orchestrator {
           context.toolResults = { ...toolResultsMap, ...toolResults };
         }
 
-        // Store in database
+        // Store in database. startedAt/durationMs were previously always
+        // left unset despite the columns existing (schema.ts) — real bug
+        // found while wiring up this trace: nothing populated them, so
+        // per-agent latency was invisible in the DB even though the table
+        // was designed for it. Now they reflect the actual measured span.
         await db.insert(agentRuns).values({
           taskId,
           agentName,
@@ -356,7 +373,9 @@ export class Orchestrator {
           confidence: String(output.confidence),
           verificationStatus: "unverified",
           tokensUsed: output.tokensUsed,
-          completedAt: new Date(),
+          startedAt: agentStartedAt,
+          durationMs: agentCompletedAt.getTime() - agentStartedAt.getTime(),
+          completedAt: agentCompletedAt,
         });
 
         // Update context for next agent
@@ -372,6 +391,7 @@ export class Orchestrator {
         userTask,
         taskId
       );
+      telemetry.mark(traceId, "synthesis");
 
       // Step 5: Store results and memory
       await db
@@ -439,6 +459,9 @@ export class Orchestrator {
       });
 
       throw error;
+    } finally {
+      telemetry.mark(traceId, Stage.TOTAL_COMPLETION);
+      telemetry.finish(traceId);
     }
   }
 
@@ -590,6 +613,40 @@ export class Orchestrator {
     // classifiers, same real prompts, same real priority order for
     // picking a winner if more than one somehow matches, just no longer
     // serialized for no reason.
+    // [ADDED 2026-09-04] Adaptive Processing Step 2/9's DEEP path (see
+    // core/intent-router.ts's classifyIntent()): a genuinely multi-step or
+    // thorough-analysis request ("research X," "write a report on Y,"
+    // "do A and then B") is handed to the existing 5-agent orchestrate()
+    // pipeline (Researcher/Reasoner/Critic/FactChecker/Synthesizer)
+    // instead of the single conversational reply everything below this
+    // check produces — this method never had anywhere to send that kind
+    // of request before. Routing itself is pattern-based (classifyIntent
+    // makes no LLM call), so a FAST/TOOL/REASONING utterance pays nothing
+    // extra to be checked. A failed deep run falls through to the normal
+    // conversational path below rather than leaving the user with nothing.
+    const routeGuess = classifyIntent(userUtterance);
+    if (routeGuess.path === "deep") {
+      console.log(`\n🧭 Deep-reasoning intent detected (${routeGuess.reason}) — routing to the multi-agent pipeline`);
+      this.onActionStart?.("Working through a multi-step request");
+      try {
+        const deepResult = await this.orchestrate(userUtterance);
+        this.conversationalIntelligence.completeTurn(userUtterance, deepResult.finalResult);
+        return {
+          response: deepResult.finalResult,
+          taskId: deepResult.taskId,
+          context: this.conversationEngine.getConversationContext(),
+        };
+      } catch (error) {
+        console.error(
+          "❌ Deep pipeline failed, falling back to a direct conversational reply:",
+          error instanceof Error ? error.message : error
+        );
+        // Fall through to the normal path below.
+      } finally {
+        this.onActionEnd?.();
+      }
+    }
+
     const fastAppControlIntent = this.parseAppControlIntent(userUtterance);
     const fastClickIntent = fastAppControlIntent ? null : this.parseClickIntent(userUtterance);
     const fastSpotifyIntent =
