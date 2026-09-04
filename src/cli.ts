@@ -13,6 +13,7 @@ import { ScreenControl } from "./phase3/screen-control";
 import { JARVISDeveloper } from "./phase1/developer";
 import { VoiceInterface } from "./phase2/voice-interface";
 import { DEFAULT_VOICE_CONFIG } from "./phase2/voice-config";
+import { runLiveHarness } from "./prototypes/gemini-live/cli-harness";
 import { writeFileSync } from "node:fs";
 
 /**
@@ -294,6 +295,27 @@ async function main() {
         }
         console.log("=".repeat(70));
       }
+    } else if (command === "live-prototype") {
+      const resumeIdx = args.indexOf("--resume");
+      const resumeHandle = resumeIdx !== -1 ? args[resumeIdx + 1] : undefined;
+      const text = args.slice(1, resumeIdx !== -1 ? resumeIdx : undefined).join(" ");
+
+      console.log("\n" + "=".repeat(70));
+      console.log("🛰️  GEMINI LIVE PROTOTYPE (architecture update step 4 — isolated, unverified)");
+      console.log("=".repeat(70));
+
+      if (!text) {
+        console.log('\nUsage: bun run dev live-prototype "<text>" [--resume <handle>]');
+        console.log("Requires GEMINI_API_KEY. No mic yet — text-in, per src/prototypes/gemini-live/cli-harness.ts.");
+      } else {
+        try {
+          await runLiveHarness(text, resumeHandle);
+        } catch (error) {
+          console.error("\n❌ Live prototype failed:", error instanceof Error ? error.message : error);
+          console.error("   Expected without a real GEMINI_API_KEY and a live network path to Google's API.");
+        }
+      }
+      console.log("=".repeat(70));
     } else {
       console.log("\n❌ Unknown command: " + command);
       console.log("\nAvailable commands:");
@@ -307,6 +329,7 @@ async function main() {
       console.log("  bun run dev whoami --pin PIN - Same, plus test Level 3 PIN verification");
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
       console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
+      console.log('  bun run dev live-prototype "<text>" [--resume <handle>] - Gemini Live prototype (step 4, unverified, needs GEMINI_API_KEY)');
     }
   } finally {
     await closeDatabase();
