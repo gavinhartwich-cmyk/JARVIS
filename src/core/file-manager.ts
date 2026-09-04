@@ -28,10 +28,19 @@
  *
  * Authorization: gated through the same real `authorizationEngine` every
  * other real action in this codebase uses (see orchestrator.ts's
- * `executeFileIntent()`), at "normal" risk tier - the same tier
+ * `executeFileIntent()`, which calls `authorizeConversationalAction()`
+ * before running anything below), at "normal" risk tier - the same tier
  * computer-control/click-by-name already use, not a stricter "admin" tier
  * this project hasn't built a live PIN-verification flow for reaching
  * from a conversational turn.
+ *
+ * [CORRECTED 2026-09-04] This comment previously claimed that gate
+ * already existed - it didn't. A full master-doc alignment audit found
+ * `executeFileIntent()` ran every operation below with zero authorization
+ * check at all, contradicting this very comment. Fixed for real in
+ * orchestrator.ts (`authorizeConversationalAction()`/
+ * `auditActionOutcome()`), not just reworded here - see that file's own
+ * comment on both.
  */
 
 import { readdirSync, readFileSync, writeFileSync, statSync, existsSync, mkdirSync, renameSync } from "node:fs";

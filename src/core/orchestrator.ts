@@ -11,6 +11,7 @@ import { ConversationEngine } from "../phase2/conversation-engine";
 import { ConversationalIntelligence, type ActionOutcome } from "./conversation-intelligence";
 import { IntelligentModelRouter } from "./model-router";
 import { identityEngine, type IdentityResult } from "./identity";
+import { authorizationEngine } from "./authorization";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import { ScreenControl } from "../phase3/screen-control";
 import { ScreenCapture } from "../phase3/screen-capture";
@@ -149,6 +150,59 @@ export class Orchestrator {
       this.cachedIdentity = await identityEngine.resolveFromDeviceSession();
     }
     return this.cachedIdentity;
+  }
+
+  /**
+   * [ADDED 2026-09-04] Real fix for a real, found gap (full master-doc
+   * alignment audit): executeSpotifyIntent() and executeFileIntent() ran
+   * real actions (playing music, reading/writing files) with ZERO
+   * authorization check - unlike executeAppControlIntent()/
+   * executeClickIntent(), which already go through ScreenControl's own
+   * authorizationEngine.authorize() call. `core/file-manager.ts`'s own
+   * header comment even falsely claimed this file's intent was "gated
+   * through the same real authorizationEngine... see orchestrator.ts's
+   * executeFileIntent()" - it wasn't, until now. Single shared gate so
+   * every conversational action intent goes through the same real check,
+   * at the same "normal" risk tier ScreenControl already uses (Level 2/
+   * "gavin" via device session - the same standard every other real
+   * action in this codebase holds itself to, not a stricter "admin" tier
+   * this project hasn't built a live PIN-verification flow for reaching
+   * from a conversational turn). Returns a real, honest ActionOutcome
+   * describing the actual denial/verification-needed reason when not
+   * authorized - never silently proceeds and never silently fails either.
+   */
+  private async authorizeConversationalAction(
+    action: string,
+    description: string
+  ): Promise<{ identity: IdentityResult; denied: ActionOutcome | null }> {
+    const identity = await this.getIdentity();
+    const auth = await authorizationEngine.authorize(identity, action, "normal");
+    if (!auth.allowed) {
+      console.log(`\n🔒 Authorization ${auth.decision} for "${action}": ${auth.reason}`);
+      return { identity, denied: { description, success: false, detail: auth.reason } };
+    }
+    return { identity, denied: null };
+  }
+
+  /**
+   * [ADDED 2026-09-04] Real fix for the other half of the same gap: even
+   * where authorization already ran (computer-control/click, via
+   * ScreenControl.executeSequence() - see its own comment), only the
+   * authorize/deny DECISION was ever audit-logged, never the actual
+   * real-world outcome ("played Whisper My Name: succeeded", "read
+   * notes.txt: file not found"). Invariant #12 ("every action is
+   * auditable - know what JARVIS did, why, and when") didn't hold for a
+   * Spotify/file action's actual result until now.
+   */
+  private async auditActionOutcome(action: string, outcome: ActionOutcome): Promise<void> {
+    await logAuditEvent({
+      actor: "orchestrator",
+      action,
+      resource: "conversational_action",
+      input: { description: outcome.description },
+      result: { success: outcome.success, detail: outcome.detail },
+      statusCode: outcome.success ? 200 : 500,
+    });
   }
 
   constructor() {
@@ -696,11 +750,117 @@ export class Orchestrator {
     // Record in memory
     this.conversationalIntelligence.completeTurn(userUtterance, response);
 
+    // [ADDED 2026-09-04] Real persistent memory - full master-doc
+    // alignment audit found this was the single biggest gap: storeMemory()
+    // (core/memory.ts, Part 4.3's "Four-Level Memory") was real and
+    // working, but only ever called from the separate Phase 1 coding-task
+    // pipeline - never from this actual live conversational path. Every
+    // JARVIS restart meant zero real memory of anything actually said to
+    // him, contradicting invariant #5 ("memory != conversation history -
+    // extract signal, not store noise") and the project's own "persistent
+    // ... memory" identity. Two real, distinct signal sources, both
+    // fire-and-forget (never awaited before returning the reply - a
+    // memory-store hiccup or the classifier call below must never delay
+    // or break the real spoken response):
+    //   1. A real action outcome IS signal by definition (a completed or
+    //      failed real-world action, not idle chat) - store it as an
+    //      episodic memory, the same real shape the task pipeline already
+    //      uses ("Task: X, Result: Y").
+    //   2. Plain conversation may still reveal a lasting fact/preference/
+    //      plan worth remembering ("I've been really into jazz lately",
+    //      "my dentist appointment is Thursday") - classifyMemorableFact()
+    //      is a real, conservative LLM classifier (biased toward false on
+    //      ambiguity, same posture as this file's other classifiers) that
+    //      decides whether THIS exchange contains one.
+    if (actionOutcome) {
+      storeMemory({
+        type: "episode",
+        content: `User said: "${userUtterance}"\nAction: ${actionOutcome.description}\nResult: ${actionOutcome.success ? actionOutcome.detail : `Failed - ${actionOutcome.detail}`}`,
+        importance: actionOutcome.success ? 5 : 4,
+        confidence: "0.9",
+        source: "conversation",
+        tags: ["action"],
+      }).catch(() => {});
+    }
+    this.classifyMemorableFact(userUtterance, response).catch(() => {});
+
     return {
       response,
       taskId,
       context: conversationContext,
     };
+  }
+
+  /**
+   * [ADDED 2026-09-04] Real, conservative LLM classifier deciding whether
+   * a plain conversational exchange reveals a lasting fact/preference/
+   * plan about Gavin worth persisting - same fail-closed posture as this
+   * file's other classifiers (default to false on ambiguity; a missed
+   * memory costs nothing, a junk one pollutes real retrieval later).
+   * Deliberately NOT awaited by its caller - runs after the real reply is
+   * already on its way, so a slow/failed classifier call never adds
+   * latency to what Gavin actually hears.
+   */
+  private async classifyMemorableFact(utterance: string, response: string): Promise<void> {
+    const classifierPrompt =
+      "You are a memory-extraction classifier for JARVIS, a desktop voice assistant with persistent " +
+      "memory across sessions. Given one real exchange (what the user said, and JARVIS's reply), decide " +
+      "whether it reveals a LASTING fact, preference, plan, goal, or relationship detail about the user " +
+      "worth remembering for future conversations - not idle chat, not a one-off request already handled, " +
+      "not something only meaningful in this exact moment. Respond with ONLY a single raw JSON object, no " +
+      "other text, no markdown code fences, matching exactly this shape:\n" +
+      '{"memorable": boolean, "type": "fact" | "preference" | "project" | "goal" | "relationship" | "event" | null, ' +
+      '"content": string | null}\n\n' +
+      "Rules:\n" +
+      "- Default to false on ambiguity - only mark memorable for something genuinely worth recalling weeks " +
+      "later, not every sentence with any personal detail in it.\n" +
+      "- content should be a short, self-contained third-person sentence about the user (e.g. \"Gavin's " +
+      "favorite band is X\") that would still make sense read alone, out of context, months from now.\n" +
+      "- If nothing lasting was revealed, memorable is false and type/content are null.\n\n" +
+      "Examples:\n" +
+      "User: \"I've been really into jazz lately\" / JARVIS: \"Noted, sir.\" -> " +
+      '{"memorable": true, "type": "preference", "content": "Gavin has recently been really into jazz."}\n' +
+      "User: \"open Spotify\" / JARVIS: \"Right away, sir.\" -> " +
+      '{"memorable": false, "type": null, "content": null}\n' +
+      "User: \"my dentist appointment got moved to Thursday at 2\" / JARVIS: \"I'll keep that in mind, sir.\" -> " +
+      '{"memorable": true, "type": "event", "content": "Gavin\'s dentist appointment is Thursday at 2."}\n' +
+      "User: \"what's the capital of France\" / JARVIS: \"Paris, sir.\" -> " +
+      '{"memorable": false, "type": null, "content": null}';
+
+    try {
+      const classifyResponse = await this.modelProvider.complete(
+        [
+          { role: "system", content: classifierPrompt },
+          { role: "user", content: `User: "${utterance}"\nJARVIS: "${response}"` },
+        ],
+        { temperature: 0, maxTokens: 150, responseFormat: { type: "json_object" } }
+      );
+
+      const jsonText = this.extractJsonObject(classifyResponse.content);
+      if (!jsonText) return;
+
+      const parsed = JSON.parse(jsonText) as {
+        memorable?: boolean;
+        type?: "fact" | "preference" | "project" | "goal" | "relationship" | "event" | null;
+        content?: string | null;
+      };
+      if (parsed.memorable === true && parsed.type && parsed.content) {
+        await storeMemory({
+          type: parsed.type,
+          content: parsed.content,
+          importance: 6,
+          confidence: "0.7",
+          source: "conversation",
+          tags: ["conversation"],
+        });
+        console.log(`   🧠 Remembered: ${parsed.content}`);
+      }
+    } catch (error) {
+      console.error(
+        "⚠ Memorable-fact classification failed (non-fatal, nothing stored):",
+        error instanceof Error ? error.message : error
+      );
+    }
   }
 
   /**
@@ -1095,6 +1255,23 @@ export class Orchestrator {
       intent.action === "play"
         ? `Play "${intent.query}" on Spotify`
         : `Spotify: ${intent.action}`;
+    // [ADDED 2026-09-04] Real authorization gate - see
+    // authorizeConversationalAction()'s own comment for the gap this
+    // closes (this path previously ran with zero authorization check at
+    // all, unlike app-control/click).
+    const { denied } = await this.authorizeConversationalAction("spotify_control", description);
+    if (denied) return denied;
+    const outcome = await this.runSpotifyAction(intent, description);
+    // [ADDED 2026-09-04] Real outcome-level audit log - see
+    // auditActionOutcome()'s own comment.
+    await this.auditActionOutcome("spotify_control", outcome);
+    return outcome;
+  }
+
+  private async runSpotifyAction(
+    intent: { action: "play" | "pause" | "resume" | "next" | "previous" | "status"; query?: string },
+    description: string
+  ): Promise<ActionOutcome> {
     try {
       let result: { success: boolean; error?: string; playing?: string; isPlaying?: boolean; track?: string; artists?: string[]; detail?: string };
       switch (intent.action) {
@@ -1651,6 +1828,30 @@ export class Orchestrator {
           : intent.operation === "write"
             ? `Write to "${intent.path}"`
             : `Move "${intent.path}" to "${intent.destinationPath}"`;
+    // [ADDED 2026-09-04] Real authorization gate - see
+    // authorizeConversationalAction()'s own comment for the gap this
+    // closes. file-manager.ts's own header comment claimed this was
+    // already gated "through the same real authorizationEngine... see
+    // orchestrator.ts's executeFileIntent()" - that was false until now.
+    const { denied } = await this.authorizeConversationalAction("file_operation", description);
+    if (denied) return denied;
+    const outcome = await this.runFileAction(intent, description);
+    // [ADDED 2026-09-04] Real outcome-level audit log - see
+    // auditActionOutcome()'s own comment.
+    await this.auditActionOutcome("file_operation", outcome);
+    return outcome;
+  }
+
+  private async runFileAction(
+    intent: {
+      operation: "list" | "read" | "write" | "move";
+      path: string;
+      destinationPath?: string;
+      content?: string;
+      append?: boolean;
+    },
+    description: string
+  ): Promise<ActionOutcome> {
     try {
       switch (intent.operation) {
         case "list": {

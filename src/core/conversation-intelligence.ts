@@ -17,6 +17,7 @@
 import type { ConversationEngine, ConversationContext, ReasoningPath } from "../phase2/conversation-engine.ts";
 import type { ModelProvider } from "../models/types";
 import { JARVIS_PERSONALITY_PROMPT } from "./jarvis-personality";
+import { searchMemoriesByUtterance } from "./memory";
 
 export interface ConversationMemory {
   // Long-term episodic memory
@@ -170,8 +171,18 @@ export class ConversationalIntelligence {
     const context = this.conversationEngine.getConversationContext();
     const model = this.modelRouter.selectModel(intention, reasoningPath, context);
 
+    // [ADDED 2026-09-04] Real fix for a real, found gap (full master-doc
+    // alignment audit): nothing on this live conversational path ever
+    // queried persistent memory before this - only the in-process,
+    // session-scoped `context` above (gone the moment `listen` restarts).
+    // Real, cheap (local Postgres LIKE query, not an LLM call) keyword
+    // lookup against what's actually been stored - see
+    // searchMemoriesByUtterance()'s own comment for the real, disclosed
+    // limitation (keyword match, not semantic search).
+    const relevantMemories = await searchMemoriesByUtterance(utterance, 3);
+
     // Phase 3: Assemble complete prompt with memory
-    const prompt = this.assemblePrompt(utterance, intention, context, actionOutcome, visionContext, searchContext);
+    const prompt = this.assemblePrompt(utterance, intention, context, actionOutcome, visionContext, searchContext, relevantMemories);
 
     // Phase 4: Check if we can use cached response
     // Never serve a cached reply when a real action was just taken, a
@@ -206,7 +217,8 @@ export class ConversationalIntelligence {
     context: ConversationContext,
     actionOutcome?: ActionOutcome,
     visionContext?: string,
-    searchContext?: string
+    searchContext?: string,
+    relevantMemories?: { content: string }[]
   ): string {
     const components: string[] = [];
 
@@ -218,6 +230,19 @@ export class ConversationalIntelligence {
     // consistent regardless of which path generated the reply.
     components.push(JARVIS_PERSONALITY_PROMPT);
     components.push(`You maintain continuous conversation state across interactions.`);
+
+    // [ADDED 2026-09-04] Real persistent memory, wired for the first time
+    // into the live conversational path - see processWithStreaming()'s own
+    // comment on searchMemoriesByUtterance(). Framed as "may or may not be
+    // relevant" rather than asserted fact, since keyword matching can
+    // surface something tangential - the model should use judgment, not
+    // treat every returned row as certainly on-topic right now.
+    if (relevantMemories && relevantMemories.length > 0) {
+      components.push(
+        `\nThings you genuinely remember from past real conversations with Gavin (may or may not be relevant to this exact moment - use judgment, don't force it in):\n` +
+          relevantMemories.map((m) => `- ${m.content}`).join("\n")
+      );
+    }
 
     // Real action outcome, if one was taken before this reply was
     // generated (e.g. "open Spotify" → ScreenControl actually ran it).

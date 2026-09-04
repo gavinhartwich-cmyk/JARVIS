@@ -8,6 +8,7 @@
 import { windowsController } from "./windows-control";
 import { findElement } from "./ui-automation";
 import { authorizationEngine } from "../core/authorization";
+import { logAuditEvent } from "../core/audit";
 import type { IdentityResult } from "../core/identity";
 
 export interface ControlAction {
@@ -260,7 +261,28 @@ export class ScreenControl {
         console.log(`   (No interactive confirmation UI yet — proceeding since authorization already passed.)`);
       }
 
-      return await this.runSequenceActions(sequence);
+      const result = await this.runSequenceActions(sequence);
+      // [ADDED 2026-09-04] Real fix for a real, found gap: this method
+      // already audit-logged the AUTHORIZATION decision above (via
+      // authorizationEngine.authorize()'s own logAuditEvent call), but
+      // never the actual real-world outcome of the sequence itself - so
+      // the audit trail could show "computer_control was allowed" with no
+      // record of what actually happened (which app, succeeded or not,
+      // what error). Invariant #12 ("every action is auditable - know
+      // what JARVIS did, why, and when") didn't hold past the
+      // authorization step. One shared log site here covers every real
+      // caller (openApp/closeApp/findAndClick all funnel through this
+      // same executeSequence()).
+      await logAuditEvent({
+        actor: "orchestrator",
+        action: "computer_control",
+        resource: "control_sequence",
+        resourceId: sequence.id,
+        input: { description: sequence.description },
+        result: { success: result.success, output: result.output, error: result.error, actionsTaken: result.actionsTaken },
+        statusCode: result.success ? 200 : 500,
+      });
+      return result;
     } finally {
       this.isOperating = false;
     }
