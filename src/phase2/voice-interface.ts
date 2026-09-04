@@ -9,7 +9,7 @@
 import { WakeWordDetector, WakeWordEvent } from "./wake-word-detector";
 import { SpeechRecognizer, RecognitionResult } from "./speech-recognizer";
 import type { SynthesisResult, ISpeechSynthesizer } from "./speech-synthesizer";
-import { createSpeechSynthesizer, createPiperSynthesizer } from "./tts-provider";
+import { createSpeechSynthesizer } from "./tts-provider";
 import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { createDefaultGateway, GatewayModelProvider } from "../models/llm-gateway";
 import type { ModelProvider } from "../models/types";
@@ -161,13 +161,22 @@ export class VoiceInterface {
   private wakeWordDetector?: WakeWordDetector;
   private speechRecognizer?: SpeechRecognizer;
   private speechSynthesizer?: ISpeechSynthesizer;
-  // [ADDED 2026-09-02] Always-Piper, dedicated to the filler acknowledgment
-  // below - see createPiperSynthesizer()'s own comment for the real bug
-  // this fixes (the filler was paying Chatterbox's slow first-synthesis
-  // cost, defeating its whole purpose). Never the configured provider,
-  // deliberately - speed matters far more than voice-clone fidelity for
-  // three words of "hang on."
-  private fillerSynthesizer?: ISpeechSynthesizer;
+  // [REMOVED 2026-09-02] Used to be a dedicated always-Piper synthesizer
+  // for the filler acknowledgment, specifically so "one moment" stayed
+  // fast even when the real reply used slow Chatterbox. Real, direct
+  // feedback from Gavin after this caused genuine confusion in live
+  // testing (a Piper-voiced filler being mistaken for "the whole reply
+  // used the wrong voice", when Chatterbox had actually worked correctly
+  // for the real reply moments later): "the piper voice isnt even a
+  // voice and should not be an option." Per his explicit choice ("make
+  // the filler the clone which then means its all the clone and theres
+  // no difference"), the filler now just uses this.speechSynthesizer -
+  // whatever's actually configured (Chatterbox by default) - see
+  // ensureFillerAudio() below. Real, accepted trade-off: the filler is
+  // no longer guaranteed-instant on a cold Chatterbox daemon, but the
+  // TTS warm-up fix (this same session) means that's the rare case now,
+  // not the common one, and Gavin explicitly prioritized voice
+  // consistency over that.
   // Short "thinking" acknowledgment (2026-08-31), per Gavin: "it should
   // be responding while thinking so it seems faster instead of nothing"
   // - a real LLM call plus full TTS synthesis can take several real
@@ -378,9 +387,11 @@ export class VoiceInterface {
       // with automatic Piper fallback) now lives in tts-provider.ts -
       // see createSpeechSynthesizer for the real logic.
       this.speechSynthesizer = createSpeechSynthesizer(this.config);
-      // [ADDED 2026-09-02] Separate, always-fast synthesizer for the
-      // filler acknowledgment only - see fillerSynthesizer's own comment.
-      this.fillerSynthesizer = createPiperSynthesizer(this.config);
+      // [REMOVED 2026-09-02] A separate always-Piper filler synthesizer
+      // used to be constructed here - see speechSynthesizer's own field
+      // comment for why it's gone (Gavin's explicit choice: the filler
+      // now shares this exact same synthesizer, so there's genuinely one
+      // consistent voice, not two).
     }
   }
 
@@ -442,7 +453,6 @@ export class VoiceInterface {
     // persistent synthesis daemon (added 2026-08-31) - a no-op for
     // Piper/Fish Audio, which don't implement shutdown() at all.
     this.speechSynthesizer?.shutdown?.();
-    this.fillerSynthesizer?.shutdown?.();
 
     if (this.speechRecognizer) {
       try {
@@ -656,14 +666,19 @@ export class VoiceInterface {
    * the honest fix for "silence looks like it's broken."
    */
   private async ensureFillerAudio(): Promise<SynthesisResult | null> {
-    if (!this.fillerSynthesizer) return null;
+    if (!this.speechSynthesizer) return null;
     if (this.fillerAudio) return this.fillerAudio;
     try {
-      // [2026-09-02] fillerSynthesizer, not speechSynthesizer - see its
-      // own field comment. Real live measurement of why this matters:
-      // Chatterbox synthesis was taking 18-54s under real GPU load, which
-      // this filler exists specifically to not make Gavin sit through.
-      this.fillerAudio = await this.fillerSynthesizer.synthesize("Mm-hm, one moment.");
+      // [UPDATE 2026-09-02] Now uses speechSynthesizer (the real
+      // configured provider - Chatterbox by default), not a separate
+      // always-Piper instance - see speechSynthesizer's own field
+      // comment for the real reasoning (Gavin's explicit choice after a
+      // Piper-voiced filler caused real live confusion, being mistaken
+      // for the whole reply using the wrong voice). Real, accepted
+      // trade-off: no longer guaranteed near-instant on a cold Chatterbox
+      // daemon, but the TTS warm-up fix (this same session) means that's
+      // now the rare case, not the common one.
+      this.fillerAudio = await this.speechSynthesizer.synthesize("Mm-hm, one moment.");
     } catch (error) {
       console.log(
         `   ⚠️  Filler-audio synthesis failed (non-fatal, continuing without it): ${error instanceof Error ? error.message : error}`
