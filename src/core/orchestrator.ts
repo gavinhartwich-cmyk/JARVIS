@@ -463,10 +463,80 @@ export class Orchestrator {
     //      list — the tradeoff is one extra LLM round-trip on every
     //      utterance the regex doesn't already catch, which is real added
     //      latency; worth confirming feels acceptable once this runs live.
-    let appControlIntent = this.parseAppControlIntent(userUtterance);
-    if (!appControlIntent) {
-      appControlIntent = await this.classifyAppControlIntent(userUtterance);
+    // [2026-09-02] Real, live-found performance bug, fixed here: every
+    // one of the intent tiers below (app-control, click, spotify, file,
+    // video, camera, screen-vision, search) got added across this same
+    // session, each with its own real justification - but they were all
+    // chained SEQUENTIALLY (each `await`ing its own LLM classifier call
+    // only after confirming every earlier one came back empty). For any
+    // utterance that doesn't match a free regex tier - a completely
+    // ordinary question like "what's 320 x 246?" - that meant up to SIX
+    // separate real LLM round trips, one after another, before the real
+    // reply even started generating. Confirmed live from Gavin's own log,
+    // not guessed: a real turn's "response generation" measured 23.2s
+    // total, of which only 5.7s was Chatterbox - the other ~17.5s was
+    // unaccounted for anywhere else, and lines up almost exactly with six
+    // ~2-3s classifier calls run back to back. Gavin: "we still SUPER
+    // slow."
+    //
+    // Real fix: a fast, free, zero-cost regex pass runs FIRST (unchanged
+    // logic, just gathered together) - if anything matches there, the
+    // slow tier is skipped entirely, same as before. Only if NOTHING
+    // matches for free does the slow LLM tier run - and now it fires all
+    // six classifiers CONCURRENTLY via Promise.all() instead of one after
+    // another, since each is independently checking a different intent
+    // and none of them depend on another's result. Wall-clock cost drops
+    // from "sum of six calls" to "the single slowest one" - the same real
+    // classifiers, same real prompts, same real priority order for
+    // picking a winner if more than one somehow matches, just no longer
+    // serialized for no reason.
+    const fastAppControlIntent = this.parseAppControlIntent(userUtterance);
+    const fastClickIntent = fastAppControlIntent ? null : this.parseClickIntent(userUtterance);
+    const fastSpotifyIntent =
+      fastAppControlIntent || fastClickIntent ? null : this.parseSpotifyIntent(userUtterance);
+    // Video/camera never have an LLM classifier tier at all (see each
+    // parse method's own comment - video has nothing real to guess at
+    // without a path; camera is deliberately regex-only given its higher
+    // privacy stakes) - real to check for free here regardless of
+    // whether the slow tier below ends up running.
+    const fastVideoIntent = this.parseVideoIntent(userUtterance);
+    const fastCameraQuestion = fastVideoIntent ? null : this.parseCameraVisionIntent(userUtterance);
+    const fastScreenVisionQuestion =
+      fastVideoIntent || fastCameraQuestion ? null : this.parseScreenVisionIntent(userUtterance);
+    const fastSearchQuery = this.parseSearchIntent(userUtterance);
+
+    let appControlIntent = fastAppControlIntent;
+    let clickIntent = fastClickIntent;
+    let spotifyIntent = fastSpotifyIntent;
+    let fileIntent: Awaited<ReturnType<typeof this.classifyFileIntent>> = null;
+    let screenVisionQuestion = fastScreenVisionQuestion;
+    let searchQuery = fastSearchQuery;
+
+    const anyFastMatch =
+      fastAppControlIntent || fastClickIntent || fastSpotifyIntent || fastVideoIntent || fastCameraQuestion || fastScreenVisionQuestion || fastSearchQuery;
+
+    if (!anyFastMatch) {
+      const [appClassify, clickClassify, spotifyClassify, fileClassify, screenClassify, searchClassify] =
+        await Promise.all([
+          this.classifyAppControlIntent(userUtterance),
+          this.classifyClickIntent(userUtterance),
+          this.classifySpotifyIntent(userUtterance),
+          this.classifyFileIntent(userUtterance),
+          this.classifyScreenVisionIntent(userUtterance),
+          this.classifySearchIntent(userUtterance),
+        ]);
+      // Same real priority order the old sequential chain enforced (each
+      // earlier tier suppressed every later one once matched) - preserved
+      // here as a plain if/else-if now that all six ran concurrently
+      // instead of gating each other's execution.
+      if (appClassify) appControlIntent = appClassify;
+      else if (clickClassify) clickIntent = clickClassify;
+      else if (spotifyClassify) spotifyIntent = spotifyClassify;
+      else if (fileClassify) fileIntent = fileClassify;
+      else if (screenClassify) screenVisionQuestion = screenClassify;
+      else if (searchClassify) searchQuery = searchClassify;
     }
+
     let actionOutcome: ActionOutcome | undefined;
     if (appControlIntent) {
       console.log(`\n🎯 App-control intent detected: ${appControlIntent.action} "${appControlIntent.appName}"`);
@@ -476,21 +546,7 @@ export class Orchestrator {
       } finally {
         this.onActionEnd?.();
       }
-    }
-
-    // Click intent ("click the Save button", "press submit") - checked
-    // right alongside app-control above (same two-tier pattern, same
-    // ActionOutcome slot) since clicking a real UI element is a real
-    // action, not informational the way screen-vision is. Added
-    // 2026-09-02 per Gavin: "screen control is supposed to be able to do
-    // things like click buttons etc just like you can instead of use api
-    // keys thats much clunkier" - see ui-automation.ts for the real
-    // mechanism (Windows UI Automation, not vision-guessing).
-    let clickIntent = appControlIntent ? null : this.parseClickIntent(userUtterance);
-    if (!appControlIntent && !clickIntent) {
-      clickIntent = await this.classifyClickIntent(userUtterance);
-    }
-    if (clickIntent) {
+    } else if (clickIntent) {
       console.log(`\n🖱️  Click intent detected: "${clickIntent.elementName}"`);
       this.onActionStart?.();
       try {
@@ -498,18 +554,7 @@ export class Orchestrator {
       } finally {
         this.onActionEnd?.();
       }
-    }
-
-    // Spotify playback intent ("play some jazz", "skip this song") -
-    // checked next, same ActionOutcome slot. Added 2026-09-02 per Gavin:
-    // "For Spotify use spotipy" - closes the real, previously-disclosed
-    // gap where app-control could open Spotify but never play a specific
-    // song (see core/spotify.ts).
-    let spotifyIntent = appControlIntent || clickIntent ? null : this.parseSpotifyIntent(userUtterance);
-    if (!appControlIntent && !clickIntent && !spotifyIntent) {
-      spotifyIntent = await this.classifySpotifyIntent(userUtterance);
-    }
-    if (spotifyIntent) {
+    } else if (spotifyIntent) {
       console.log(`\n🎵 Spotify intent detected: ${spotifyIntent.action}${spotifyIntent.query ? ` "${spotifyIntent.query}"` : ""}`);
       this.onActionStart?.();
       try {
@@ -517,118 +562,48 @@ export class Orchestrator {
       } finally {
         this.onActionEnd?.();
       }
-    }
-
-    // File-operation intent ("what's in my downloads folder", "read my
-    // notes.txt", "create a file called...") - checked after app-control/
-    // click, same ActionOutcome slot (a real file operation is a real
-    // action). Added 2026-09-02 as part of Phase 5 (Digital Ecosystem) -
-    // see file-manager.ts for the real, deliberately scoped safety
-    // boundary (Desktop/Documents/Downloads/Pictures only, no deletion).
-    // LLM-classifier only, no regex fast tier - see classifyFileIntent()'s
-    // own comment for why.
-    let fileIntent: Awaited<ReturnType<typeof this.classifyFileIntent>> = null;
-    if (!appControlIntent && !clickIntent && !spotifyIntent) {
-      fileIntent = await this.classifyFileIntent(userUtterance);
-      if (fileIntent) {
-        console.log(`\n📁 File intent detected: ${fileIntent.operation} "${fileIntent.path}"`);
-        this.onActionStart?.();
-        try {
-          actionOutcome = await this.executeFileIntent(fileIntent);
-        } finally {
-          this.onActionEnd?.();
-        }
+    } else if (fileIntent) {
+      console.log(`\n📁 File intent detected: ${fileIntent.operation} "${fileIntent.path}"`);
+      this.onActionStart?.();
+      try {
+        actionOutcome = await this.executeFileIntent(fileIntent);
+      } finally {
+        this.onActionEnd?.();
       }
     }
 
-    // Screen-vision intent ("what's on my screen", "what's wrong with this
-    // code") — same two-tier free-regex-then-LLM-classifier pattern as
-    // app-control above, and deliberately skipped if an app-control/click/
-    // file intent already matched (one utterance realistically means one
-    // action, and that action already ran this turn). Added 2026-09-02
-    // per Gavin's own Stage 4 example scenario, which was confirmed NOT to
-    // work before this — see screen-capture.ts's header comment for the
-    // fake-data finding that blocked it.
+    // Vision (video/camera/screen) and search share their own slots
+    // (visionContext/searchContext, not actionOutcome) - only reached
+    // when none of the four action intents above matched, same mutual-
+    // exclusivity as before.
     let visionContext: string | undefined;
-    if (!appControlIntent && !clickIntent && !spotifyIntent && !fileIntent) {
-      // Video intent checked first: a real, resolvable video file path
-      // named in the utterance is a stronger, more specific signal than
-      // generic screen phrasing, and the two are mutually exclusive in
-      // practice (one utterance isn't going to ask about both a video
-      // file and the live screen). Added 2026-09-02 per the video-
-      // understanding Stage 4 gap identified in the twenty-fourth pass's
-      // audit — see video-analyzer.ts for why frame-sampling was the
-      // real, buildable approach (no local $0 model understands video
-      // directly).
-      const videoIntent = this.parseVideoIntent(userUtterance);
-      if (videoIntent) {
-        console.log(`\n🎬 Video intent detected: "${videoIntent.path}" — "${videoIntent.question}"`);
+    let searchContext: string | undefined;
+    if (!actionOutcome) {
+      if (fastVideoIntent) {
+        console.log(`\n🎬 Video intent detected: "${fastVideoIntent.path}" — "${fastVideoIntent.question}"`);
         this.onActionStart?.();
         try {
-          visionContext = await this.executeVideoIntent(videoIntent.path, videoIntent.question);
+          visionContext = await this.executeVideoIntent(fastVideoIntent.path, fastVideoIntent.question);
         } finally {
           this.onActionEnd?.();
         }
-      }
-
-      // Camera intent checked next, before the screen-vision fallback:
-      // added 2026-09-02 per Gavin's explicit go-ahead ("No do camera
-      // vision") after it was previously deliberately deferred over the
-      // real privacy angle of turning on a webcam. Deliberately regex-only
-      // — NO LLM classifier fallback tier, unlike app-control/screen-
-      // vision — since this is a materially more privacy-sensitive real
-      // action (activating the camera pointed at Gavin, not just reading
-      // an already-visible screen) than anything else this funnel guards;
-      // requiring explicit "camera"/"webcam" wording or clearly
-      // self-referential phrasing ("look at me") is a deliberate,
-      // disclosed conservative choice so an LLM's own judgment call can
-      // never be what triggers a real camera capture.
-      if (!visionContext) {
-        const cameraQuestion = this.parseCameraVisionIntent(userUtterance);
-        if (cameraQuestion) {
-          console.log(`\n📷 Camera intent detected: "${cameraQuestion}"`);
-          this.onActionStart?.();
-          try {
-            visionContext = await this.executeCameraVisionIntent(cameraQuestion);
-          } finally {
-            this.onActionEnd?.();
-          }
+      } else if (fastCameraQuestion) {
+        console.log(`\n📷 Camera intent detected: "${fastCameraQuestion}"`);
+        this.onActionStart?.();
+        try {
+          visionContext = await this.executeCameraVisionIntent(fastCameraQuestion);
+        } finally {
+          this.onActionEnd?.();
         }
-      }
-
-      if (!visionContext) {
-        let visionQuestion = this.parseScreenVisionIntent(userUtterance);
-        if (!visionQuestion) {
-          visionQuestion = await this.classifyScreenVisionIntent(userUtterance);
+      } else if (screenVisionQuestion) {
+        console.log(`\n👁️  Screen-vision intent detected: "${screenVisionQuestion}"`);
+        this.onActionStart?.();
+        try {
+          visionContext = await this.executeScreenVisionIntent(screenVisionQuestion);
+        } finally {
+          this.onActionEnd?.();
         }
-        if (visionQuestion) {
-          console.log(`\n👁️  Screen-vision intent detected: "${visionQuestion}"`);
-          this.onActionStart?.();
-          try {
-            visionContext = await this.executeScreenVisionIntent(visionQuestion);
-          } finally {
-            this.onActionEnd?.();
-          }
-        }
-      }
-    }
-
-    // Web-search intent ("search for X", "what's the latest on X", "who
-    // won last night") — checked only once nothing above already needs a
-    // reply (an app-control/click action, or a vision/video/camera
-    // result already answers the turn). Added 2026-09-02 as part of
-    // Phase 5 (Digital Ecosystem): JARVIS previously had zero internet
-    // access at all — any current/real-world question could only be
-    // guessed at or honestly refused. Same two-tier pattern as the rest
-    // of this funnel; see web-search.ts for the real $0 DuckDuckGo-based
-    // mechanism.
-    let searchContext: string | undefined;
-    if (!appControlIntent && !clickIntent && !spotifyIntent && !fileIntent && !visionContext) {
-      let searchQuery = this.parseSearchIntent(userUtterance);
-      if (!searchQuery) {
-        searchQuery = await this.classifySearchIntent(userUtterance);
-      }
-      if (searchQuery) {
+      } else if (searchQuery) {
         console.log(`\n🔎 Web-search intent detected: "${searchQuery}"`);
         this.onActionStart?.();
         try {
