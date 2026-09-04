@@ -472,6 +472,14 @@ async function main() {
       hud.start(0);
       voice.on("listening", () => hud.setState("idle"));
       voice.on("wake-word-detected", () => hud.setState("listening"));
+      // [ADDED 2026-09-03] Real, live-found lag fix - per Gavin: "theres
+      // like a 4 second wait from when im done talking to whens its
+      // thinking." "turn-ending" fires the instant the silence cutoff
+      // triggers (voice-interface.ts's processMicChunk), before Whisper
+      // even starts transcribing - "user-speech-recognized" (below) still
+      // fires too, once transcription actually finishes, but the HUD no
+      // longer has to wait for it to show SOMETHING happened.
+      voice.on("turn-ending", () => hud.setState("thinking"));
       voice.on("user-speech-recognized", () => hud.setState("thinking"));
       // [ADDED 2026-09-01] "acting" - see orchestrator.ts's onActionStart/
       // onActionEnd and voice-interface.ts's "acting"/"acting-done"

@@ -332,6 +332,7 @@ export class VoiceInterface {
     this.listeners.set("listening", []);
     this.listeners.set("wake-word-detected", []);
     this.listeners.set("user-speech-recognized", []);
+    this.listeners.set("turn-ending", []);
     this.listeners.set("jarvis-responding", []);
     this.listeners.set("speech-not-directed", []);
     this.listeners.set("acting", []);
@@ -724,6 +725,21 @@ export class VoiceInterface {
       console.log(
         `   ⏹️  ending turn (${hitSilenceCutoff ? "silence cutoff" : hitNoSpeechTimeout ? "no speech detected after wake word" : "max turn duration reached"})`
       );
+      // [ADDED 2026-09-03] Real, live-found gap - per Gavin: "theres like
+      // a 4 second wait from when im done talking to whens its
+      // thinking." The HUD only flipped to "thinking" on
+      // "user-speech-recognized," which fires AFTER Whisper finishes
+      // transcribing - meaning the real END_OF_TURN_SILENCE_MS (3000ms,
+      // by design, needed to be confident the user actually finished)
+      // PLUS real STT time both elapsed with zero feedback that JARVIS
+      // had even noticed the user stopped talking. This is the earliest
+      // real moment that's true - the silence cutoff (or no-speech/max-
+      // duration timeout) firing - so the HUD can react here instead of
+      // waiting for transcription to also finish. Doesn't touch
+      // END_OF_TURN_SILENCE_MS itself (a real, separate, deliberate
+      // design tradeoff - shortening it risks cutting people off
+      // mid-sentence - not what was asked here).
+      this.emit("turn-ending");
       try {
         await this.speechRecognizer.stopStreaming();
       } catch {
@@ -761,7 +777,19 @@ export class VoiceInterface {
     // real, disclosed limitation (file operations aren't caught here,
     // no free regex tier for those - they get the quick filler anyway).
     const needsAction = this.orchestrator?.guessIfRealActionNeeded(utterance) ?? false;
-    const text = needsAction ? "One moment, I'm on it." : "Mm-hm.";
+    // [UPDATE 2026-09-03] "Mm-hm." replaced - per Gavin's direct live
+    // report, "the mhm is glitching." Measured, not just assumed: a real
+    // synthesize("Mm-hm.") call produced 199760 bytes of audio versus
+    // 80720 bytes for "Right." (a genuinely SHORTER phrase) - about 2.5x
+    // more audio than the text justifies, consistent with the known
+    // autoregressive-TTS failure mode where a very short/unusual input
+    // (an interjection Chatterbox likely saw little of in training,
+    // unlike a normal word) leaves the model without a confident stop
+    // point, producing trailing garbage/repeated audio instead of a
+    // clean short clip. "Right." is already part of JARVIS's own
+    // established vocabulary (see jarvis-personality.ts) and measured
+    // proportionate (910ms model time for 80720 bytes, no anomaly).
+    const text = needsAction ? "One moment, I'm on it." : "Right.";
 
     if (needsAction && this.fillerAudioAction) return this.fillerAudioAction;
     if (!needsAction && this.fillerAudioQuick) return this.fillerAudioQuick;
@@ -942,16 +970,27 @@ export class VoiceInterface {
     }
 
     const respondStart = Date.now();
-    // [UPDATE 2026-09-03] Real speed feature: LLM text generation still
-    // has to finish completely first (no true incremental LLM streaming
-    // reaches this layer yet - see conversation-intelligence.ts's own
-    // streamFromModel() comment), but speaking it no longer waits for
-    // the WHOLE reply to finish synthesizing as one buffer -
-    // speakPipelined() below starts playing sentence 1 as soon as it's
-    // ready and synthesizes the rest while earlier sentences play. Was
-    // respondToText() (still used by respondToText()'s other real
-    // caller, the `voice-reply` CLI command - see that method's own
-    // comment for why it keeps the single-buffer behavior).
+    // [UPDATE 2026-09-03] REVERTED sentence-by-sentence pipelining
+    // (speakPipelined(), added earlier the same day) back to a single
+    // whole-reply synthesize()+play() - per Gavin's direct live report:
+    // "the speaking stringing together has long waits its faster but
+    // harder to keep me engaged when its 20 sec between sentences."
+    // Real root cause, not just a vibe: pipelining only actually hides
+    // latency when synthesizing the NEXT sentence takes LESS time than
+    // PLAYING the current one, so they overlap. On Gavin's real GPU
+    // under real desktop load, Chatterbox synthesis has been measured as
+    // high as 18-54s per call (2026-09-02 entries) - reliably LONGER
+    // than most short sentences take to play back - so instead of one
+    // combined wait, he got several separate multi-second-to-20-second
+    // dead-air gaps strung between sentences, which is worse for
+    // engagement than one wait, even though "time to first word" was
+    // technically faster. The reply-length cap (same day, model-router.ts)
+    // is kept - it's what actually bounds the total wait now. speakPipelined()
+    // itself and splitIntoSentences() are left in place (see their own
+    // comments) rather than deleted outright - a real, disclosed,
+    // reusable idea if synthesis ever gets fast enough on this hardware
+    // (or a faster/smaller model) for the overlap assumption to hold,
+    // just not exercised from here anymore.
     const response = await this.generateAndRecordResponse(result.text);
     console.log(`   ⏱️  Real response generation (LLM + any real action): ${Date.now() - respondStart}ms`);
     // The "thinking" gap itself (the real LLM/app-control call above)
@@ -961,15 +1000,34 @@ export class VoiceInterface {
     // response is discarded here, not as a special case.
     if (this.turnId !== myTurnId) return;
 
-    const speakStart = Date.now();
-    const completed = await this.speakPipelined(response, myTurnId);
-    console.log(`   ⏱️  Pipelined TTS synthesis + playback: ${Date.now() - speakStart}ms`);
-    if (!completed) {
+    let audio: SynthesisResult | undefined;
+    if (this.speechSynthesizer) {
+      const synthStart = Date.now();
+      audio = await this.speechSynthesizer.synthesize(normalizeNumbersForSpeech(response));
+      console.log(`   ⏱️  TTS synthesis: ${Date.now() - synthStart}ms`);
+      this.emit("audio-ready", audio);
+    }
+    if (this.turnId !== myTurnId) return;
+
+    if (audio) {
+      const peakAmplitude = computeWavPeakAmplitude(audio.audio);
+      const peakDesc =
+        peakAmplitude < 0
+          ? "unrecognized WAV format"
+          : peakAmplitude < 0.02
+            ? `${peakAmplitude.toFixed(4)} - SUSPICIOUSLY QUIET, likely a dead/near-silent synthesis, not a playback-routing issue`
+            : peakAmplitude.toFixed(4);
+      console.log(`\n🔊 Response ready: ${audio.duration}ms, peak amplitude: ${peakDesc}`);
+      try {
+        await this.playInterruptible(audio.audio);
+      } catch (err) {
+        console.log(`   ⚠️  Playback failed: ${err instanceof Error ? err.message : err}`);
+      }
       // A barge-in mid-reply already started a whole new turn - don't
       // also run this turn's own completion/resume-listening logic
       // below, which would fight handleWakeWord()'s already-in-progress
       // state for the new turn.
-      return;
+      if (this.turnId !== myTurnId) return;
     }
 
     // Interaction complete
