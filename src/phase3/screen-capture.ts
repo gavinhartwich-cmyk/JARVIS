@@ -106,6 +106,20 @@ export class ScreenCapture {
 
     const tempPath = join(tmpdir(), `jarvis-screencap-${randomUUID()}.png`);
     try {
+      // [UPDATE 2026-09-03] Real, live-found timeout bug: this used
+      // runPowerShell()'s 10s default and was confirmed live to hit it
+      // twice ("❌ Screenshot capture failed: PowerShell killed by signal
+      // SIGTERM (likely timed out after 10000ms)") - not a hang in this
+      // simple bitmap-copy script itself (nothing here should genuinely
+      // take anywhere near 10s), but real CPU contention on Gavin's
+      // machine from everything else JARVIS already has running at the
+      // same time (Chatterbox synthesis, the Whisper/wake-word daemons)
+      // delaying powershell.exe's own real startup + JIT cost past the
+      // default window. Given a screenshot for JARVIS to actually SEE is
+      // the whole point of this call, a real few extra seconds under
+      // load is a better tradeoff than failing outright - bumped to 20s.
+      // If it's ever a genuine hang rather than contention, this just
+      // delays the same honest failure, not a silent one either way.
       await runPowerShell(`
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -117,7 +131,7 @@ $bmp.Save("${psEscape(tempPath)}", [System.Drawing.Imaging.ImageFormat]::Png)
 $g.Dispose()
 $bmp.Dispose()
 Write-Output "$($bounds.Width)x$($bounds.Height)"
-`);
+`, 20_000);
 
       const data = readFileSync(tempPath);
       // Real dimensions from the PNG header itself (IHDR chunk, bytes

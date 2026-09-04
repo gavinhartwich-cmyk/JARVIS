@@ -225,6 +225,21 @@ export class VoiceInterface {
   // interim step toward the master doc's full-duplex goal, not the
   // whole thing.
   private isSpeaking: boolean = false;
+  // [ADDED 2026-09-03] Real feature, per Gavin: "i also want the ability
+  // to aks him soemting mid thinking if i dont want the last response
+  // anymore." Real gap found while building this: barge-in only ever
+  // covered isSpeaking (real audio actually playing) - mic chunks during
+  // the "thinking" gap itself (the LLM/app-control call in
+  // handleUserSpeech(), after the filler finishes and before the real
+  // reply starts playing) went to the ALREADY-STOPPED speech recognizer
+  // and were silently discarded; the wake-word detector was never even
+  // listening during that window, so there was no way to say "Jarvis"
+  // and have it register at all. True the same way isSpeaking is true -
+  // set right before the real generateAndRecordResponse() call starts,
+  // cleared once it resolves (or a barge-in supersedes it) - see
+  // processMicChunk() and handleWakeWord()'s own wasInterruption check,
+  // both now treat isThinking exactly like isSpeaking.
+  private isThinking: boolean = false;
   // Bumped every time a new turn starts (handleWakeWord()) - lets
   // handleUserSpeech() tell whether a barge-in started a NEW turn while
   // it was still mid-flight (playing a filler, waiting on the real
@@ -265,6 +280,19 @@ export class VoiceInterface {
   // generating a spoken reply to what was never real speech in the first
   // place. Reset in handleWakeWord() with the rest of the per-turn state.
   private turnEndedWithNoSpeech: boolean = false;
+  // [ADDED 2026-09-03] Real, live-found fix - see handleUserSpeech()'s
+  // directedAtJarvisCheck gate for the full story: a follow-up utterance
+  // (startFollowUpListening() - no fresh wake word) has no "was the wake
+  // word spurious/ambient" question to answer in the first place, so
+  // running that classifier on it is pure risk with no real benefit -
+  // confirmed live to wrongly reject a genuine command ("Dervis, open
+  // spotify" - STT's own garbling of "Jarvis" apparently read to the
+  // classifier as addressing a different, unrecognized person, not "did
+  // the wake word actually mean this instance of speech"). Defaults
+  // false (a real wake-word-triggered turn, including a mid-reply
+  // interruption via handleWakeWord() - both genuinely warrant the
+  // check), set true only by startFollowUpListening().
+  private isFollowUpTurn: boolean = false;
   // Rolling window of real energy readings taken while idle (see
   // IDLE_NOISE_WINDOW_CHUNKS above) - this is what handleWakeWord() reads
   // from to compute turnSpeechThreshold fresh for each turn, instead of
@@ -501,7 +529,11 @@ export class VoiceInterface {
     // this point is exactly the same "start listening for what the user
     // wants to say" logic a cold wake word already needed, so a
     // barge-in transitions straight into it, no separate code path.
-    const wasInterruption = this.isSpeaking;
+    // [UPDATE 2026-09-03] Now also true during the "thinking" gap
+    // (isThinking) - see that field's own comment for why "Jarvis" said
+    // while JARVIS is generating a reply, not just while it's speaking
+    // one, needs to count as a real interruption too.
+    const wasInterruption = this.isSpeaking || this.isThinking;
 
     // [ADDED 2026-09-02] Real, live-found fix - see
     // config.wakeWord.interruptionConfidenceThreshold's own comment for
@@ -530,7 +562,12 @@ export class VoiceInterface {
     }
 
     if (wasInterruption) {
-      console.log(`\n⏹️  Interrupted mid-speech - stopping and listening now.`);
+      // currentPlaybackAbort is only set during real playback
+      // (playInterruptible) - a real no-op via optional chaining when
+      // this fires mid-"thinking" instead (nothing playing yet to
+      // abort; the stale in-flight response is discarded later via the
+      // turnId check in handleUserSpeech() once it resolves).
+      console.log(`\n⏹️  Interrupted ${this.isSpeaking ? "mid-speech" : "mid-thinking"} - stopping and listening now.`);
       this.currentPlaybackAbort?.abort();
     } else {
       console.log(`\n✨ Wake word detected! Starting conversation...`);
@@ -564,6 +601,17 @@ export class VoiceInterface {
   private async beginActiveTurn(): Promise<void> {
     this.turnId++;
     this.context.isActive = true;
+    // Real default for every caller (a fresh wake word or a mid-reply
+    // interruption, both via handleWakeWord()) - startFollowUpListening()
+    // overrides this to true right after calling beginActiveTurn(), see
+    // isFollowUpTurn's own field comment.
+    this.isFollowUpTurn = false;
+    // Real, fresh reset for every new turn - see isThinking's own field
+    // comment. Guards against a still-resolving-in-the-background stale
+    // turn's own cleanup (handleUserSpeech()) clobbering THIS turn's real
+    // state; this is the one place that gets to say "thinking hasn't
+    // started yet for this turn."
+    this.isThinking = false;
     this.context.lastWakeWordTime = new Date();
     this.turnSilenceMs = 0;
     this.turnHasSpeech = false;
@@ -629,6 +677,7 @@ export class VoiceInterface {
     }
     console.log(`\n💬 Still listening - no "Jarvis" needed if you're continuing the conversation.`);
     await this.beginActiveTurn();
+    this.isFollowUpTurn = true;
     // Real HUD signal: the SAME event cli.ts already maps to
     // hud.setState("listening") - a follow-up window is genuinely the
     // same real state (JARVIS is actively listening for real speech) as
@@ -655,7 +704,13 @@ export class VoiceInterface {
     // scoped to the wake word, not general speech/VAD. A hit here fires
     // the same "wake-word-detected" event a cold wake word does,
     // handled by handleWakeWord()'s own interruption branch.
-    if (this.isSpeaking) {
+    // [UPDATE 2026-09-03] Also routed here during isThinking - see that
+    // field's own comment. Before this, chunks arriving during the real
+    // LLM/app-control call went to the ALREADY-STOPPED speech recognizer
+    // (a silent no-op) and the wake-word detector was never listening at
+    // all in that window - there was no real way to say "Jarvis" and
+    // have it register until JARVIS actually started speaking.
+    if (this.isSpeaking || this.isThinking) {
       if (this.wakeWordDetector) {
         await this.wakeWordDetector.processAudioChunk(chunk);
       }
@@ -862,6 +917,8 @@ export class VoiceInterface {
     // "did a barge-in happen while I was mid-flight?" check below
     // compares against this snapshot.
     const myTurnId = this.turnId;
+    // Same reasoning, for isFollowUpTurn - see its own field comment.
+    const myIsFollowUpTurn = this.isFollowUpTurn;
 
     // Real, live-found fix (2026-09-02) - see NO_SPEECH_TIMEOUT_MS's own
     // comment: the turn ended because NOTHING was ever heard after the
@@ -942,7 +999,26 @@ export class VoiceInterface {
     // so a false wake-word trigger still costs a short filler synthesis,
     // but not a real LLM reply/TTS synthesis or an out-of-place spoken
     // answer to overheard conversation.
-    if (this.config.conversation.directedAtJarvisCheck) {
+    //
+    // [UPDATE 2026-09-03] Skipped entirely for a follow-up turn
+    // (myIsFollowUpTurn) - real, live-found bug: this classifier exists
+    // to second-guess whether the WAKE WORD DETECTION was spurious, but
+    // a follow-up utterance has no wake-word event to second-guess in
+    // the first place (that's the whole point of "no Jarvis needed").
+    // Confirmed live to actively backfire there: "Dervis, open spotify."
+    // (STT's own garbling of "Jarvis, open Spotify" - the "J" came out
+    // as "D") got classified directedAtJarvis: false and silently
+    // dropped, no action taken, no reply given - the filler ("Right.")
+    // was the only thing Gavin ever heard. Per Gavin's own report: "it
+    // go tot thinking then went back to idle and nothing happned othe
+    // rhtnahim saying right." Real, disclosed root cause: with the wake
+    // word itself garbled beyond recognition in the transcript, the
+    // classifier had nothing left identifying "Jarvis" as the addressee
+    // and read it as a command aimed at some other, unrecognized name -
+    // a real, plausible LLM failure mode this prompt's own examples
+    // don't cover. Skipping the check for follow-up turns removes the
+    // failure mode at its root rather than trying to out-prompt it.
+    if (this.config.conversation.directedAtJarvisCheck && !myIsFollowUpTurn) {
       const classifyStart = Date.now();
       const directed = await this.classifyDirectedAtJarvis(result.text);
       console.log(`   ⏱️  Directed-at-JARVIS check: ${Date.now() - classifyStart}ms (result: ${directed})`);
@@ -991,13 +1067,31 @@ export class VoiceInterface {
     // reusable idea if synthesis ever gets fast enough on this hardware
     // (or a faster/smaller model) for the overlap assumption to hold,
     // just not exercised from here anymore.
+    // [ADDED 2026-09-03] Real feature, per Gavin: "i also want the
+    // ability to aks him soemting mid thinking if i dont want the last
+    // response anymore." See isThinking's own field comment for the
+    // real gap this closes - arm the wake-word detector for the
+    // duration of the real LLM/app-control call, same as
+    // playInterruptible() already does for real playback.
+    this.isThinking = true;
+    try {
+      await this.wakeWordDetector?.startListening();
+    } catch (err) {
+      console.log(
+        `   ⚠️  Could not arm barge-in listening while thinking (non-fatal, this turn just won't be interruptible until it starts speaking): ${err instanceof Error ? err.message : err}`
+      );
+    }
     const response = await this.generateAndRecordResponse(result.text);
+    // Only clear isThinking if this is still the current turn - if a
+    // barge-in already superseded it, the NEW turn's own beginActiveTurn()
+    // already reset isThinking for real; blindly clearing it here could
+    // otherwise clobber that newer turn's own real thinking/speaking
+    // state out from under it.
+    if (this.turnId === myTurnId) this.isThinking = false;
     console.log(`   ⏱️  Real response generation (LLM + any real action): ${Date.now() - respondStart}ms`);
-    // The "thinking" gap itself (the real LLM/app-control call above)
-    // isn't currently interruptible - JARVIS isn't speaking during it,
-    // so there's nothing playing to barge in on; a wake word said during
-    // this gap is handled as an ordinary new turn once this one's stale
-    // response is discarded here, not as a special case.
+    // A barge-in during the call above already started a whole new turn
+    // (handleWakeWord() ran, turnId moved on) - this stale response is
+    // simply discarded now, not acted on.
     if (this.turnId !== myTurnId) return;
 
     let audio: SynthesisResult | undefined;
