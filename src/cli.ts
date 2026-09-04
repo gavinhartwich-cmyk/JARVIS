@@ -12,6 +12,7 @@ import { authorizationEngine } from "./core/authorization";
 import { ScreenControl } from "./phase3/screen-control";
 import { JARVISDeveloper } from "./phase1/developer";
 import { VoiceInterface } from "./phase2/voice-interface";
+import { LiveVoiceInterface } from "./phase2/live-voice-interface";
 import { MicCapture } from "./phase2/mic-capture";
 import { DEFAULT_VOICE_CONFIG } from "./phase2/voice-config";
 import { HudServer } from "./phase2/hud-server";
@@ -705,6 +706,62 @@ async function main() {
       // Keep the process alive - everything happens in the mic callback
       // and voice's own event-driven pipeline from here.
       await new Promise(() => {});
+    } else if (command === "listen-live") {
+      // bun run dev listen-live
+      //
+      // Architecture update step 6: the real Gemini Live voice mode, per
+      // Gavin's direct request after seeing `compare-latency`'s real
+      // numbers (Gemini Live ~934ms end to end vs. current JARVIS's
+      // ~3.6s). Same real wake-word/mic infrastructure as `listen` above -
+      // see live-voice-interface.ts's own header comment for exactly what
+      // this trades away (only open_app/close_app as tools so far, no
+      // vision/search/persistent-memory/Spotify - Orchestrator.
+      // processConversation() isn't in this path) for real, measured
+      // speed. Requires a real GEMINI_API_KEY.
+      if (!process.env.GEMINI_API_KEY) {
+        console.log("\n❌ GEMINI_API_KEY is not set - required for Gemini Live. Get one free at https://aistudio.google.com/apikey");
+      } else {
+        console.log("\n" + "=".repeat(70));
+        console.log('🛰️  JARVIS is listening (Gemini Live mode - say "Jarvis" to start a conversation)');
+        console.log("   Press Ctrl+C to stop.");
+        console.log("=".repeat(70));
+
+        const liveVoice = new LiveVoiceInterface(DEFAULT_VOICE_CONFIG);
+        await liveVoice.start();
+
+        const liveMic = new MicCapture({
+          sampleRate: DEFAULT_VOICE_CONFIG.audio.sampleRate,
+          channels: DEFAULT_VOICE_CONFIG.audio.channels,
+          blockMs: 250,
+          deviceName: DEFAULT_VOICE_CONFIG.audio.inputDeviceName,
+          gain: DEFAULT_VOICE_CONFIG.audio.micGain,
+        });
+
+        let liveShuttingDown = false;
+        const liveShutdown = async () => {
+          if (liveShuttingDown) return;
+          liveShuttingDown = true;
+          console.log("\n🛑 Stopping...");
+          liveMic.stop();
+          await liveVoice.stop();
+          process.exit(0);
+        };
+        process.on("SIGINT", liveShutdown);
+
+        liveMic.start(
+          (chunk) => {
+            liveVoice.processMicChunk(chunk).catch((err) => {
+              console.log(`   ⚠️  processMicChunk error: ${err instanceof Error ? err.message : err}`);
+            });
+          },
+          (err) => {
+            console.log(`\n❌ Microphone capture failed: ${err.message}`);
+            liveShutdown();
+          }
+        );
+
+        await new Promise(() => {});
+      }
     } else if (command === "conversation") {
       // bun run dev conversation "<what you'd say to JARVIS>"
       // Exercises Phase 1.5 (Conversational Intelligence) end to end —
@@ -954,6 +1011,7 @@ async function main() {
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
       console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
       console.log('  bun run dev listen - Real always-on voice assistant: say "Jarvis", it listens, thinks, and speaks back (Windows only, needs scripts/setup-voice.ps1 run first)');
+      console.log('  bun run dev listen-live - Same, but backed by Gemini Live (real, ~3.8x faster measured; needs GEMINI_API_KEY, fewer capabilities - open/close app only)');
       console.log('  bun run dev conversation "<text>" - Phase 1.5 conversational intelligence, real LLM + memory/context');
       console.log("  bun run dev vision-test <path>   - Real Ollama vision model on a real image (Phase 3)");
       console.log('  bun run dev video-test <path> ["<question>"] - Real frame-sampled video understanding (Phase 3)');

@@ -81,7 +81,7 @@ export class GeminiLiveSession {
     this.sessionHandle = config.resumeHandle;
   }
 
-  on(event: "ready" | "audio" | "text" | "interrupted" | "session-handle" | "close" | "error", cb: (data: unknown) => void): void {
+  on(event: "ready" | "audio" | "text" | "interrupted" | "turn-complete" | "session-handle" | "close" | "error", cb: (data: unknown) => void): void {
     if (!this.listeners.has(event)) this.listeners.set(event, []);
     this.listeners.get(event)!.push(cb);
   }
@@ -233,6 +233,15 @@ export class GeminiLiveSession {
         } else {
           this.emit("text", part.text);
         }
+      }
+
+      // [ADDED 2026-09-04] Real signal a consumer needs to know when to
+      // actually play back what it's been buffering - audio/text parts
+      // above arrive incrementally across several serverContent messages
+      // per turn, and there was previously no event marking "the model is
+      // done, here's everything it's going to say for this turn."
+      if (content.turnComplete) {
+        this.emit("turn-complete");
       }
     }
 
