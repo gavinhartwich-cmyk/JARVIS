@@ -60,6 +60,23 @@ class FallbackSpeechSynthesizer implements ISpeechSynthesizer {
     this.primary.shutdown?.();
     this.fallback.shutdown?.();
   }
+
+  // [ADDED 2026-09-02] Real bug found and fixed live: this class never
+  // forwarded warmUp() at all - shutdown() (right above) WAS correctly
+  // forwarded when it was added, but warmUp() (added later, same
+  // session) was missed. Since voice-interface.ts calls it as
+  // `this.speechSynthesizer?.warmUp?.()` (optional chaining, by design,
+  // so a synthesizer with no real warm-up cost - Piper/Fish Audio - is a
+  // silent no-op), a MISSING method here looked byte-for-byte identical
+  // to "nothing needs warming up": no error, no log, nothing - the fix
+  // silently never engaged. Confirmed live: Gavin's real Chatterbox
+  // session paid the full ~65-93s cold-start cost mid-reply again, with
+  // zero trace of a warm-up attempt anywhere in the log. Only the
+  // primary needs warming (the fallback, Piper, has no real persistent-
+  // process cold-start cost worth front-loading).
+  async warmUp(): Promise<void> {
+    await this.primary.warmUp?.();
+  }
 }
 
 /**
