@@ -184,10 +184,19 @@ export class VoiceInterface {
   // seconds (measured live: ~2s of synthesis alone, on top of the LLM
   // round trip before it), during which nothing audible happened at all,
   // making a working pipeline feel broken/unresponsive. Synthesized
-  // once, lazily, and cached (see ensureFillerAudio()) - only the first
-  // turn in a session pays the extra synthesis cost, every turn after
-  // plays back almost instantly.
-  private fillerAudio: SynthesisResult | null = null;
+  // once per variant, lazily, and cached (see ensureFillerAudio()) -
+  // only the first turn of each KIND pays the extra synthesis cost,
+  // every turn after plays back almost instantly.
+  //
+  // [UPDATE 2026-09-03] Two real cached variants, not one - per Gavin:
+  // "make it proportional to what it's actually doing." A quick plain
+  // question and a request that's actually about to open an app/search
+  // the web/click something real shouldn't get the same generic filler -
+  // see ensureFillerAudio()'s own comment for how orchestrator.ts's new
+  // guessIfRealActionNeeded() (free, instant, no LLM call) picks between
+  // them before either is played.
+  private fillerAudioQuick: SynthesisResult | null = null;
+  private fillerAudioAction: SynthesisResult | null = null;
   private modelProvider: ModelProvider;
 
   private context: VoiceInteractionContext;
@@ -714,34 +723,56 @@ export class VoiceInterface {
   }
 
   /**
-   * Lazily synthesize (once) and cache a short, fixed "thinking"
-   * acknowledgment - see fillerAudio's own comment above for why this
-   * exists. Deliberately a single fixed generic phrase rather than
-   * routing it through the real LLM (that would just move the same
-   * latency problem one step earlier) or varying it (more natural, but
-   * real added complexity) - a fixed phrase isn't the polish here, it's
-   * the honest fix for "silence looks like it's broken."
+   * Lazily synthesize (once per variant) and cache a short "thinking"
+   * acknowledgment - see fillerAudioQuick/fillerAudioAction's own field
+   * comment for why this exists.
+   *
+   * [UPDATE 2026-09-03] Real, proportional filler - per Gavin: "make it
+   * proportional to what it's actually doing." Picks between two real
+   * fixed phrases based on orchestrator.ts's new guessIfRealActionNeeded()
+   * (free, instant, no LLM call - has to return before this plays, or
+   * it'd reintroduce the exact "dead air before the filler" bug fixed
+   * earlier this session): a plain question gets a quick, minimal
+   * acknowledgment; something that's actually about to open an app,
+   * search the web, click something, or look at the screen/camera gets
+   * a filler that honestly signals more real work is about to happen.
+   * Still a fixed phrase per variant, not routed through the real LLM
+   * (that would just move the same latency problem one step earlier) -
+   * two honest phrases is the real fix here, not infinite variety.
    */
-  private async ensureFillerAudio(): Promise<SynthesisResult | null> {
+  private async ensureFillerAudio(utterance: string): Promise<SynthesisResult | null> {
     if (!this.speechSynthesizer) return null;
-    if (this.fillerAudio) return this.fillerAudio;
+
+    // Real, free (no LLM) guess at whether this looks like it needs a
+    // real action - see guessIfRealActionNeeded()'s own comment for the
+    // real, disclosed limitation (file operations aren't caught here,
+    // no free regex tier for those - they get the quick filler anyway).
+    const needsAction = this.orchestrator?.guessIfRealActionNeeded(utterance) ?? false;
+    const text = needsAction ? "One moment, I'm on it." : "Mm-hm.";
+
+    if (needsAction && this.fillerAudioAction) return this.fillerAudioAction;
+    if (!needsAction && this.fillerAudioQuick) return this.fillerAudioQuick;
+
     try {
-      // [UPDATE 2026-09-02] Now uses speechSynthesizer (the real
-      // configured provider - Chatterbox by default), not a separate
-      // always-Piper instance - see speechSynthesizer's own field
-      // comment for the real reasoning (Gavin's explicit choice after a
-      // Piper-voiced filler caused real live confusion, being mistaken
-      // for the whole reply using the wrong voice). Real, accepted
-      // trade-off: no longer guaranteed near-instant on a cold Chatterbox
-      // daemon, but the TTS warm-up fix (this same session) means that's
-      // now the rare case, not the common one.
-      this.fillerAudio = await this.speechSynthesizer.synthesize("Mm-hm, one moment.");
+      // [UPDATE 2026-09-02] Uses speechSynthesizer (the real configured
+      // provider - Chatterbox by default), not a separate always-Piper
+      // instance - see speechSynthesizer's own field comment for the
+      // real reasoning (Gavin's explicit choice after a Piper-voiced
+      // filler caused real live confusion, being mistaken for the whole
+      // reply using the wrong voice). Real, accepted trade-off: no
+      // longer guaranteed near-instant on a cold Chatterbox daemon, but
+      // the TTS warm-up fix (this same session) means that's now the
+      // rare case, not the common one.
+      const result = await this.speechSynthesizer.synthesize(text);
+      if (needsAction) this.fillerAudioAction = result;
+      else this.fillerAudioQuick = result;
+      return result;
     } catch (error) {
       console.log(
         `   ⚠️  Filler-audio synthesis failed (non-fatal, continuing without it): ${error instanceof Error ? error.message : error}`
       );
+      return null;
     }
-    return this.fillerAudio;
   }
 
   /**
@@ -846,7 +877,7 @@ export class VoiceInterface {
     // which stage, instead of another silent multi-second gap with
     // nothing to go on.
     const fillerStart = Date.now();
-    const filler = await this.ensureFillerAudio();
+    const filler = await this.ensureFillerAudio(result.text);
     if (filler) {
       try {
         await this.playInterruptible(filler.audio);

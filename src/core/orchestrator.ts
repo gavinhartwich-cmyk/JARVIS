@@ -429,6 +429,35 @@ export class Orchestrator {
   }
 
   /**
+   * [ADDED 2026-09-03] Real, free, instant (no LLM call) guess at whether
+   * an utterance will need a real action/lookup beyond a plain
+   * conversational reply - per Gavin: "make it proportional to what it's
+   * actually doing," about the "one moment" filler acknowledgment.
+   * Reuses the exact same free regex tiers processConversation() itself
+   * checks first (same methods, not a duplicated/drifting copy) so this
+   * guess is always consistent with what actually ends up happening -
+   * deliberately only the FREE tier, not the LLM classifiers, since this
+   * has to return before the filler plays and running a real classifier
+   * call here would reintroduce the exact "dead air before the filler"
+   * bug fixed earlier this session. Real, disclosed limitation: file
+   * operations have no free regex tier at all (classify-only - see
+   * classifyFileIntent()'s own comment), so a file request won't be
+   * caught here and gets the "quick" filler even though it may involve
+   * real work - a real, accepted gap, not a false claim.
+   */
+  guessIfRealActionNeeded(utterance: string): boolean {
+    return Boolean(
+      this.parseAppControlIntent(utterance) ||
+        this.parseClickIntent(utterance) ||
+        this.parseSpotifyIntent(utterance) ||
+        this.parseVideoIntent(utterance) ||
+        this.parseCameraVisionIntent(utterance) ||
+        this.parseScreenVisionIntent(utterance) ||
+        this.parseSearchIntent(utterance)
+    );
+  }
+
+  /**
    * Process user input with conversational intelligence
    *
    * Replaces simple task strings with context-aware conversation
