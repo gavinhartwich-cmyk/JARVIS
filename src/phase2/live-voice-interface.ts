@@ -124,7 +124,16 @@ export class LiveVoiceInterface {
     });
   }
 
-  on(event: "listening" | "wake-word-detected" | "acting" | "acting-done" | "audio-ready" | "interaction-complete" | "error", cb: (data?: unknown) => void): void {
+  // [FIXED 2026-09-04] Real gap found live (Gavin: "why isnt the hud
+  // poping up") - this class built the whole voice pipeline but never
+  // emitted "idle" at all, and "listening" was fired from the wrong place
+  // (right after wake-word-detected, meaning "actively capturing speech" -
+  // the opposite of what VoiceInterface's own "listening" event means,
+  // "back to idle wake-word-only mode"). Renamed to match that existing
+  // convention exactly instead of inventing a second, confusing meaning
+  // for the same event name - see cli.ts's launchHud()/listen-live wiring
+  // for how both real pipelines now drive the same HUD states.
+  on(event: "idle" | "wake-word-detected" | "acting" | "acting-done" | "audio-ready" | "interaction-complete" | "error", cb: (data?: unknown) => void): void {
     if (!this.listeners.has(event)) this.listeners.set(event, []);
     this.listeners.get(event)!.push(cb);
   }
@@ -140,6 +149,7 @@ export class LiveVoiceInterface {
     console.log('🛰️  JARVIS is listening (Gemini Live mode) — say "Jarvis" to start a conversation');
     console.log("=".repeat(70));
     await this.wakeWordDetector.startListening();
+    this.emit("idle");
   }
 
   async stop(): Promise<void> {
@@ -175,8 +185,32 @@ export class LiveVoiceInterface {
     if (this.session) return this.session;
 
     const session = new GeminiLiveSession({ systemInstruction: JARVIS_PERSONALITY_PROMPT });
-    session.registerTool(OPEN_APP_DECLARATION, createOpenAppToolHandler());
-    session.registerTool(CLOSE_APP_DECLARATION, createCloseAppToolHandler());
+    // [FIXED 2026-09-04] "acting"/"acting-done" were declared as valid
+    // events on this class's own on() signature but never actually
+    // emitted anywhere - real gap found live (Gavin: "why isnt the hud
+    // poping up" surfaced that this whole HUD-state story was
+    // incomplete). Wrapping the real handlers here (rather than adding a
+    // generic tool-call hook to GeminiLiveSession itself) mirrors exactly
+    // how orchestrator.ts's onActionStart/onActionEnd already drives
+    // VoiceInterface's own "acting" state around a real action.
+    const openAppHandler = createOpenAppToolHandler();
+    session.registerTool(OPEN_APP_DECLARATION, async (args) => {
+      this.emit("acting", `Opening ${typeof args.target === "string" ? args.target : "app"}`);
+      try {
+        return await openAppHandler(args);
+      } finally {
+        this.emit("acting-done");
+      }
+    });
+    const closeAppHandler = createCloseAppToolHandler();
+    session.registerTool(CLOSE_APP_DECLARATION, async (args) => {
+      this.emit("acting", `Closing ${typeof args.target === "string" ? args.target : "app"}`);
+      try {
+        return await closeAppHandler(args);
+      } finally {
+        this.emit("acting-done");
+      }
+    });
 
     session.on("audio", (data) => {
       const { pcm, sampleRateHz } = data as { pcm: Uint8Array; sampleRateHz: number };
@@ -235,7 +269,6 @@ export class LiveVoiceInterface {
     }
 
     this.isSending = true;
-    this.emit("listening");
   }
 
   private async flushTurnAudio(): Promise<void> {
@@ -250,6 +283,7 @@ export class LiveVoiceInterface {
     this.followUpTimer = setTimeout(() => {
       this.isSending = false;
       console.log('   (no follow-up heard - back to waiting for "Jarvis")');
+      this.emit("idle");
     }, FOLLOW_UP_WINDOW_MS);
 
     if (chunks.length === 0) return; // interrupted mid-reply, or a text-only turn

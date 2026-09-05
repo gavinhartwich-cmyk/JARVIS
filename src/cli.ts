@@ -43,6 +43,98 @@ import { undoLastActions } from "./core/action-journal";
  * what's real vs. still scaffolding.
  */
 
+/**
+ * [ADDED 2026-09-04] Extracted out of `listen`'s own inline HUD setup so
+ * `listen-live` (Gemini Live mode) gets the exact same real HUD - native
+ * WPF overlay if built, Edge app-mode window fallback if not - instead of
+ * silently having none at all, which is what Gavin found live: "why isnt
+ * the hud poping up" was a real gap, not a bug, from a first version of
+ * that command that built the voice pipeline but never wired a HUD into
+ * it at all. Only the construction/spawn/cleanup is shared here - each
+ * caller wires its own voice interface's specific events to `hud.setState`
+ * itself, since `listen` (Whisper+LLM+TTS, has a real "thinking" gap
+ * between end-of-speech and a reply) and `listen-live` (Gemini Live,
+ * no separate STT/TTS steps, no equivalent "thinking" gap to show) don't
+ * emit quite the same event vocabulary.
+ */
+async function launchHud(): Promise<{ hud: HudServer; stop: () => Promise<void> }> {
+  const hud = new HudServer();
+  hud.start(0);
+
+  let hudProcessId: number | null = null;
+  let hudNativeProc: ReturnType<typeof Bun.spawn> | null = null;
+  const nativeHudExe = join(import.meta.dir, "..", "native-hud", "bin", "Release", "net8.0-windows", "JarvisHud.exe");
+
+  if (existsSync(nativeHudExe)) {
+    try {
+      hudNativeProc = Bun.spawn([nativeHudExe, hud.url], { stdout: "pipe", stderr: "pipe" });
+      const pipeStream = async (stream: ReadableStream<Uint8Array> | null) => {
+        if (!stream) return;
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIndex: number;
+            while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+              const line = buffer.slice(0, newlineIndex).trim();
+              buffer = buffer.slice(newlineIndex + 1);
+              if (line) console.log(`   [native-hud] ${line}`);
+            }
+          }
+        } catch {
+          // Process exited/pipe closed - nothing left to forward.
+        }
+      };
+      pipeStream(hudNativeProc.stdout as ReadableStream<Uint8Array> | null);
+      pipeStream(hudNativeProc.stderr as ReadableStream<Uint8Array> | null);
+      console.log(`\n🖥️  Native HUD process started (${hud.url}) - hidden until it's actually needed, pops up on its own; closes automatically when this command stops.`);
+    } catch (err) {
+      console.log(`\n⚠️  Could not launch the native HUD (${nativeHudExe}): ${err instanceof Error ? err.message : err}`);
+      hudNativeProc = null;
+    }
+  }
+
+  if (!hudNativeProc) {
+    if (!existsSync(nativeHudExe)) {
+      console.log(`\nℹ️  Native HUD not built yet (run .\\setup-native-hud.ps1) - falling back to the Edge app-mode window.`);
+    }
+    try {
+      const { stdout } = await runPowerShell(
+        `$p = Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420" -PassThru; $p.Id`
+      );
+      const parsedPid = parseInt(stdout.trim(), 10);
+      if (!Number.isNaN(parsedPid)) hudProcessId = parsedPid;
+      console.log(`\n🖥️  HUD window opened (${hud.url}) - closes automatically when this command stops.`);
+    } catch (err) {
+      console.log(`\n⚠️  Could not open the HUD window automatically: ${err instanceof Error ? err.message : err}`);
+      console.log(`   You can open it yourself: ${hud.url}`);
+    }
+  }
+
+  const stop = async () => {
+    hud.stop();
+    if (hudNativeProc) {
+      try {
+        hudNativeProc.kill();
+      } catch {
+        // Best-effort - harmless if it already exited or Gavin closed it by hand.
+      }
+    } else if (hudProcessId !== null) {
+      try {
+        await runPowerShell(`Stop-Process -Id ${hudProcessId} -Force -ErrorAction SilentlyContinue`);
+      } catch {
+        // Best-effort - harmless if the window was already closed by hand.
+      }
+    }
+  };
+
+  return { hud, stop };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "test";
@@ -476,8 +568,7 @@ async function main() {
       // be in use. Opened as a borderless "app mode" Edge window (real
       // Windows Edge is always present; no new dependency) rather than a
       // normal browser tab.
-      const hud = new HudServer();
-      hud.start(0);
+      const { hud, stop: stopHud } = await launchHud();
       voice.on("listening", () => hud.setState("idle"));
       voice.on("wake-word-detected", () => hud.setState("listening"));
       // [ADDED 2026-09-03] Real, live-found lag fix - per Gavin: "theres
@@ -502,106 +593,6 @@ async function main() {
       voice.on("acting-done", () => hud.setState("thinking"));
       voice.on("audio-ready", () => hud.setState("speaking"));
       voice.on("interaction-complete", () => hud.setState("idle"));
-      // [2026-09-02] Native HUD (native-hud/, WPF+WebView2) replaces the
-      // Edge --app-mode window below wherever it's actually been built -
-      // real, borderless, always-on-top, no taskbar/Alt-Tab entry,
-      // transparent background (only the rings are visible, not a
-      // rectangle), same public/hud.html animation unchanged inside it.
-      // Not a hard requirement: setup-native-hud.ps1 has to be run once
-      // (needs the .NET 8 SDK) to produce the exe, so this checks for it
-      // and falls back to the Edge window - unchanged, still real - if
-      // it's missing, exactly like this project's existing TTS-provider
-      // fallback pattern (Chatterbox -> Piper), not a silent downgrade.
-      let hudProcessId: number | null = null;
-      let hudNativeProc: ReturnType<typeof Bun.spawn> | null = null;
-      const nativeHudExe = join(
-        import.meta.dir,
-        "..",
-        "native-hud",
-        "bin",
-        "Release",
-        "net8.0-windows",
-        "JarvisHud.exe"
-      );
-      if (existsSync(nativeHudExe)) {
-        try {
-          // 2026-09-02: stdout/stderr used to be "ignore" - meaning
-          // native-hud/'s new screen-awareness diagnostic logging (see
-          // MainWindow.xaml.cs's "[hud-reposition]" lines, added
-          // specifically because the previous pass couldn't confirm that
-          // feature live) had nowhere to go. Piped and forwarded with a
-          // prefix instead, same pattern as the Chatterbox subprocess's
-          // "[chatterbox]"-prefixed stderr elsewhere in this file, so the
-          // next live 'listen' run can actually see it.
-          hudNativeProc = Bun.spawn([nativeHudExe, hud.url], {
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          const pipeStream = async (stream: ReadableStream<Uint8Array> | null) => {
-            if (!stream) return;
-            const reader = stream.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-                let newlineIndex: number;
-                while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-                  const line = buffer.slice(0, newlineIndex).trim();
-                  buffer = buffer.slice(newlineIndex + 1);
-                  if (line) console.log(`   [native-hud] ${line}`);
-                }
-              }
-            } catch {
-              // Process exited/pipe closed - nothing left to forward.
-            }
-          };
-          pipeStream(hudNativeProc.stdout as ReadableStream<Uint8Array> | null);
-          pipeStream(hudNativeProc.stderr as ReadableStream<Uint8Array> | null);
-          console.log(`\n🖥️  Native HUD process started (${hud.url}) - hidden until it's actually needed (wake word/thinking/acting/speaking), pops up on its own; closes automatically when 'listen' stops.`);
-        } catch (err) {
-          console.log(`\n⚠️  Could not launch the native HUD (${nativeHudExe}): ${err instanceof Error ? err.message : err}`);
-          hudNativeProc = null;
-        }
-      }
-      // 2026-08-31, per Gavin: "the jarvis window doesn't close once
-      // it's stopped so I had like 7 opened" - real problem confirmed
-      // over repeated test runs, not a one-off. Root cause: Start-Process
-      // was fire-and-forget with no way to ever find this specific window
-      // again, so shutdown() below had nothing to close. Fixed by
-      // capturing the launched process's real PID (-PassThru, then read
-      // back $p.Id) and closing exactly that PID on shutdown - NOT a
-      // blanket `taskkill msedge`, which would risk closing Gavin's
-      // regular browsing too (the exact risk this file's own comments
-      // already flagged as the reason nothing auto-closed it before).
-      // Honest caveat: if Edge happens to already be running when this
-      // launches, Chromium's process model can hand the new --app window
-      // off to an existing Edge process tree, in which case this captured
-      // PID may not be the one actually owning the visible window - the
-      // common case (no other Edge instance active) is what this fixes;
-      // watch for whether windows still pile up if Edge is your daily
-      // browser too. Only reached now if the native HUD above isn't
-      // built yet.
-      if (!hudNativeProc) {
-        if (!existsSync(nativeHudExe)) {
-          console.log(`\nℹ️  Native HUD not built yet (run .\\setup-native-hud.ps1) - falling back to the Edge app-mode window.`);
-        }
-        try {
-          const { stdout } = await runPowerShell(
-            `$p = Start-Process msedge -ArgumentList "--app=${hud.url}","--window-size=380,420" -PassThru; $p.Id`
-          );
-          const parsedPid = parseInt(stdout.trim(), 10);
-          if (!Number.isNaN(parsedPid)) {
-            hudProcessId = parsedPid;
-          }
-          console.log(`\n🖥️  HUD window opened (${hud.url}) - closes automatically when 'listen' stops.`);
-        } catch (err) {
-          console.log(`\n⚠️  Could not open the HUD window automatically: ${err instanceof Error ? err.message : err}`);
-          console.log(`   You can open it yourself: ${hud.url}`);
-        }
-      }
 
       // Sourced from the same DEFAULT_VOICE_CONFIG the VoiceInterface above
       // just constructed itself from, not separately hardcoded values -
@@ -627,24 +618,8 @@ async function main() {
         shuttingDown = true;
         console.log("\n🛑 Stopping...");
         mic.stop();
-        hud.stop();
         await voice.stop();
-        if (hudNativeProc) {
-          try {
-            hudNativeProc.kill();
-          } catch {
-            // Best-effort - harmless if it already exited or Gavin closed
-            // it by hand (the native window's own Esc handler).
-          }
-        } else if (hudProcessId !== null) {
-          try {
-            await runPowerShell(`Stop-Process -Id ${hudProcessId} -Force -ErrorAction SilentlyContinue`);
-          } catch {
-            // Best-effort - harmless if the window was already closed by
-            // hand, or if the captured PID wasn't the real window owner
-            // (see the launch comment above for when that can happen).
-          }
-        }
+        await stopHud();
         try {
           if (stopFilePath && existsSync(stopFilePath)) unlinkSync(stopFilePath);
         } catch {
@@ -721,13 +696,25 @@ async function main() {
       if (!process.env.GEMINI_API_KEY) {
         console.log("\n❌ GEMINI_API_KEY is not set - required for Gemini Live. Get one free at https://aistudio.google.com/apikey");
       } else {
-        console.log("\n" + "=".repeat(70));
-        console.log('🛰️  JARVIS is listening (Gemini Live mode - say "Jarvis" to start a conversation)');
-        console.log("   Press Ctrl+C to stop.");
-        console.log("=".repeat(70));
-
         const liveVoice = new LiveVoiceInterface(DEFAULT_VOICE_CONFIG);
         await liveVoice.start();
+        console.log("   Press Ctrl+C to stop.");
+
+        // Same real HUD (native overlay if built, Edge fallback otherwise)
+        // as `listen` above - see launchHud()'s own comment for why this
+        // was missing from this command's first version (Gavin: "why isnt
+        // the hud poping up"). Event vocabulary differs slightly from
+        // VoiceInterface's: no separate STT step means no real "thinking"
+        // signal to show between end-of-speech and a reply, so this
+        // doesn't fabricate one - see live-voice-interface.ts's own "idle"
+        // event comment.
+        const { hud, stop: stopHud } = await launchHud();
+        liveVoice.on("idle", () => hud.setState("idle"));
+        liveVoice.on("wake-word-detected", () => hud.setState("listening"));
+        liveVoice.on("acting", (description) => hud.setState("acting", (description as string) ?? null));
+        liveVoice.on("acting-done", () => hud.setState("thinking"));
+        liveVoice.on("audio-ready", () => hud.setState("speaking"));
+        liveVoice.on("interaction-complete", () => hud.setState("idle"));
 
         const liveMic = new MicCapture({
           sampleRate: DEFAULT_VOICE_CONFIG.audio.sampleRate,
@@ -744,6 +731,7 @@ async function main() {
           console.log("\n🛑 Stopping...");
           liveMic.stop();
           await liveVoice.stop();
+          await stopHud();
           process.exit(0);
         };
         process.on("SIGINT", liveShutdown);
