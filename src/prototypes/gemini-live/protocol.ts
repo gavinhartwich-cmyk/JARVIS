@@ -22,13 +22,37 @@
 // Client → server
 // ---------------------------------------------------------------------------
 
+/**
+ * [EXTENDED 2026-09-04] Real, general recursive schema - per Gavin's
+ * direct ask after the generic capability bridge still wasn't what he
+ * wanted: "i dont want a easier way to add actions i want a simpler way
+ * to make bigger dents in more actions... more actions in one thing."
+ * The flat STRING/NUMBER/BOOLEAN-only version this replaced could only
+ * express one atomic action per tool call - a real multi-step task
+ * (open an app, then type, then press Enter) cost one round trip PER
+ * STEP. Gemini's real function-calling schema already supports ARRAY/
+ * OBJECT (this was never a protocol limit, just an unnecessarily narrow
+ * TS type on top of it) - this is what lets a single capability like
+ * run_actions (capability-registry.ts) take a whole real plan as one
+ * structured parameter instead of one bespoke tool per verb.
+ */
+export interface FunctionParameterSchema {
+  type: "STRING" | "NUMBER" | "BOOLEAN" | "ARRAY" | "OBJECT";
+  description?: string;
+  /** Required when type is "ARRAY" - the schema of each element. */
+  items?: FunctionParameterSchema;
+  /** Required when type is "OBJECT". */
+  properties?: Record<string, FunctionParameterSchema>;
+  required?: string[];
+}
+
 /** A Gemini function declaration — the same shape used by the regular (non-Live) API's function calling. */
 export interface FunctionDeclaration {
   name: string;
   description: string;
   parameters: {
     type: "OBJECT";
-    properties: Record<string, { type: "STRING" | "NUMBER" | "BOOLEAN"; description?: string }>;
+    properties: Record<string, FunctionParameterSchema>;
     required?: string[];
   };
 }

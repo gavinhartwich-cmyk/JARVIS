@@ -41,10 +41,31 @@ describe("capabilityRegistry.list()", () => {
 
   test("tool_manager parameter schemas are narrowed to string/number/boolean for every registered tool", () => {
     for (const capability of capabilityRegistry.list()) {
+      // run_actions is the one deliberate exception - see its own test below.
+      if (capability.name === "run_actions") continue;
       for (const param of Object.values(capability.parameters)) {
         expect(["string", "number", "boolean"]).toContain(param.type);
       }
     }
+  });
+
+  // [ADDED 2026-09-04] Real coverage for the "bigger dents in more
+  // actions" fix (per Gavin: "i dont want a easier way to add actions i
+  // want a simpler way to make bigger dents in more actions... more
+  // actions in one thing") - run_actions is the first capability whose
+  // parameter schema is genuinely recursive (an array of step objects,
+  // not a flat string/number/boolean), which is exactly what
+  // live-voice-interface.ts's toGeminiSchema() has to convert correctly
+  // for voice control of it to work at all.
+  test("run_actions exposes a real array-of-object parameter schema", () => {
+    const byName = Object.fromEntries(capabilityRegistry.list().map((c) => [c.name, c]));
+    const steps = byName.run_actions.parameters.steps;
+    expect(steps.type).toBe("array");
+    expect(steps.required).toBe(true);
+    expect(steps.items?.type).toBe("object");
+    expect(steps.items?.properties?.action.required).toBe(true);
+    expect(steps.items?.properties?.target.required).toBe(false);
+    expect(byName.run_actions.riskTier).toBe("normal");
   });
 });
 
@@ -67,5 +88,11 @@ describe("capabilityRegistry.execute()", () => {
     const result = await capabilityRegistry.execute("open_app", {}, fakeIdentity);
     expect(result.success).toBe(false);
     expect(result.error).toContain("target");
+  });
+
+  test("run_actions without any 'steps' fails cleanly instead of running an empty sequence", async () => {
+    const result = await capabilityRegistry.execute("run_actions", {}, fakeIdentity);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("steps");
   });
 });

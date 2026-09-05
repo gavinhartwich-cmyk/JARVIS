@@ -72,8 +72,8 @@ import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { playWavBuffer, PlaybackInterruptedError } from "./audio-player";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 import { GeminiLiveSession } from "../prototypes/gemini-live/gemini-live-session";
-import type { FunctionDeclaration } from "../prototypes/gemini-live/protocol";
-import { capabilityRegistry } from "../core/capability-registry";
+import type { FunctionDeclaration, FunctionParameterSchema } from "../prototypes/gemini-live/protocol";
+import { capabilityRegistry, type CapabilityParameter } from "../core/capability-registry";
 import { identityEngine } from "../core/identity";
 
 // How long to keep a session's mic stream open after its last reply
@@ -116,6 +116,33 @@ export function pcmToWav(pcm: Buffer, sampleRateHz: number, channels = 1, bitsPe
   header.write("data", 36, "ascii");
   header.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([header, pcm]);
+}
+
+/**
+ * [ADDED 2026-09-04] Recursive schema conversion - part of the real fix
+ * for "i want a simpler way to make bigger dents in more actions." The
+ * flat version this replaced could only map string/number/boolean; a
+ * genuinely general multi-step capability (run_actions,
+ * capability-registry.ts) needs its `steps: array of objects` parameter
+ * to survive the trip into a real Gemini Live tool declaration intact.
+ */
+export function toGeminiSchema(param: CapabilityParameter): FunctionParameterSchema {
+  const schema: FunctionParameterSchema = {
+    type: param.type.toUpperCase() as FunctionParameterSchema["type"],
+    description: param.description,
+  };
+  if (param.type === "array" && param.items) {
+    schema.items = toGeminiSchema(param.items);
+  }
+  if (param.type === "object" && param.properties) {
+    schema.properties = Object.fromEntries(
+      Object.entries(param.properties).map(([key, def]) => [key, toGeminiSchema(def)])
+    );
+    schema.required = Object.entries(param.properties)
+      .filter(([, def]) => def.required)
+      .map(([key]) => key);
+  }
+  return schema;
 }
 
 export class LiveVoiceInterface {
@@ -322,10 +349,7 @@ export class LiveVoiceInterface {
         parameters: {
           type: "OBJECT",
           properties: Object.fromEntries(
-            Object.entries(capability.parameters).map(([key, def]) => [
-              key,
-              { type: def.type.toUpperCase() as "STRING" | "NUMBER" | "BOOLEAN", description: def.description },
-            ])
+            Object.entries(capability.parameters).map(([key, def]) => [key, toGeminiSchema(def)])
           ),
           required: Object.entries(capability.parameters)
             .filter(([, def]) => def.required)

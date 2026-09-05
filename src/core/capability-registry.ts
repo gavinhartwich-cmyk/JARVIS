@@ -36,11 +36,28 @@ import { recordAction, inverseOfScreenControlAction } from "./action-journal";
 import { spotifyPlayWithAutoOpen, spotifyPause, spotifyResume, spotifyNext, spotifyPrevious } from "./spotify";
 import { clickByDescription } from "./vision-click";
 
-/** Simplified parameter shape covering every real capability registered here today - see list()'s own comment for why this stays intentionally narrower than ParameterDefinition's full type union. */
+/**
+ * [EXTENDED 2026-09-04] Real, recursive parameter schema - per Gavin's
+ * direct ask: "i dont want a easier way to add actions i want a simpler
+ * way to make bigger dents in more actions... more actions in one
+ * thing." A flat string/number/boolean-only shape can only describe one
+ * atomic action's arguments - it can't describe "an array of steps,"
+ * which is what a genuinely general multi-step capability (run_actions,
+ * below) needs to accept a whole real plan as one structured parameter
+ * instead of one bespoke tool call per step. `items`/`properties` mirror
+ * protocol.ts's own FunctionParameterSchema (which this gets converted
+ * into by live-voice-interface.ts's registerCapabilitiesAsTools()) -
+ * kept as a separate type rather than importing that one directly so
+ * core/ doesn't depend on prototypes/gemini-live/.
+ */
 export interface CapabilityParameter {
-  type: "string" | "number" | "boolean";
+  type: "string" | "number" | "boolean" | "array" | "object";
   description: string;
   required: boolean;
+  /** Required when type is "array" - the schema of each element. */
+  items?: CapabilityParameter;
+  /** Required when type is "object". */
+  properties?: Record<string, CapabilityParameter>;
 }
 
 export interface CapabilityDescriptor {
@@ -119,6 +136,46 @@ const SCREEN_CONTROL_PRIMITIVES = {
         type: "string" as const,
         description: "A specific visual/positional description of what to click.",
         required: true,
+      },
+    },
+  },
+  // [ADDED 2026-09-04] THE real fix for Gavin's actual ask, which the
+  // earlier generic-bridge pass didn't close: "i dont want a easier way
+  // to add actions i want a simpler way to make bigger dents in more
+  // actions... more actions in one thing." Every capability above does
+  // exactly one atomic thing - a real multi-step task (open an app, wait
+  // for it, type something, press Enter) cost one full voice round trip
+  // PER STEP. This exposes ScreenControl's already-real ControlSequence
+  // system (open/close/click/type/key/scroll/wait, chained - this
+  // predates this session, just never exposed as a single capability) as
+  // ONE tool that takes a whole real plan and runs it as one composed
+  // operation, instead of a new bespoke tool per verb.
+  run_actions: {
+    description:
+      "Run a sequence of computer-control steps in one operation - open/close apps, click (by accessible " +
+      "name or by x/y coordinates), type text, press keys, scroll, or wait between steps. Use this for any " +
+      "multi-step task instead of calling single-step tools repeatedly.",
+    riskTier: "normal" as RiskTier,
+    parameters: {
+      steps: {
+        type: "array" as const,
+        description: "The ordered steps to run.",
+        required: true,
+        items: {
+          type: "object" as const,
+          description: "One step.",
+          required: true,
+          properties: {
+            action: { type: "string" as const, description: "One of: open, close, click, type, key, scroll, wait.", required: true },
+            target: { type: "string" as const, description: "For open/close/click-by-name: the app/window/control name.", required: false },
+            text: { type: "string" as const, description: "For type: the text to type.", required: false },
+            key: { type: "string" as const, description: "For key: the key or key combination to press.", required: false },
+            x: { type: "number" as const, description: "For click by coordinate: the x position.", required: false },
+            y: { type: "number" as const, description: "For click by coordinate: the y position.", required: false },
+            amount: { type: "number" as const, description: "For scroll: positive scrolls down, negative scrolls up.", required: false },
+            durationMs: { type: "number" as const, description: "For wait: how long to wait, in milliseconds.", required: false },
+          },
+        },
       },
     },
   },
@@ -296,6 +353,45 @@ class CapabilityRegistry {
           if (!description) return { success: false, error: "click_by_description called without a 'description' parameter.", executionTime: 0 };
           const visionResult = await clickByDescription(description);
           result = { success: visionResult.success, output: visionResult.label, error: visionResult.error };
+          break;
+        }
+        case "run_actions": {
+          const steps = Array.isArray(parameters.steps) ? (parameters.steps as Record<string, unknown>[]) : [];
+          if (steps.length === 0) return { success: false, error: "run_actions called without any 'steps'.", executionTime: 0 };
+          const seq = this.screenControl.buildSequence(`Run ${steps.length} action(s)`);
+          for (const step of steps) {
+            const action = typeof step.action === "string" ? step.action.toLowerCase() : "";
+            switch (action) {
+              case "open":
+                if (typeof step.target === "string") this.screenControl.open(seq, step.target);
+                break;
+              case "close":
+                if (typeof step.target === "string") this.screenControl.close(seq, step.target);
+                break;
+              case "click":
+                if (typeof step.x === "number") this.screenControl.click(seq, step.x, typeof step.y === "number" ? step.y : 0);
+                else if (typeof step.target === "string") this.screenControl.click(seq, step.target);
+                break;
+              case "type":
+                if (typeof step.text === "string") this.screenControl.type(seq, step.text);
+                break;
+              case "key":
+                if (typeof step.key === "string") this.screenControl.key(seq, step.key);
+                break;
+              case "scroll":
+                if (typeof step.amount === "number") this.screenControl.scroll(seq, step.amount);
+                break;
+              case "wait":
+                this.screenControl.wait(seq, typeof step.durationMs === "number" ? step.durationMs : 1000);
+                break;
+              default:
+                // An unrecognized step is skipped, not fatal to the rest of
+                // the plan - same "a partial real result beats an all-or-
+                // nothing failure" reasoning the rest of this codebase uses.
+                console.log(`   ⚠️  run_actions: skipping unrecognized step action "${step.action}"`);
+            }
+          }
+          result = await this.screenControl.executeSequence(seq, identity);
           break;
         }
       }

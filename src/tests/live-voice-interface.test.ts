@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { pcmToWav, LiveVoiceInterface } from "../phase2/live-voice-interface";
+import { pcmToWav, toGeminiSchema, LiveVoiceInterface } from "../phase2/live-voice-interface";
 import { DEFAULT_VOICE_CONFIG } from "../phase2/voice-config";
+import type { CapabilityParameter } from "../core/capability-registry";
 
 /**
  * No real mic/wake-word daemon/PowerShell playback/live Gemini connection
@@ -34,6 +35,44 @@ describe("pcmToWav", () => {
     const wav = pcmToWav(Buffer.alloc(100), 16000);
     expect(wav.readUInt32LE(28)).toBe(16000 * 1 * 16 / 8); // byteRate
     expect(wav.readUInt16LE(32)).toBe((1 * 16) / 8); // blockAlign
+  });
+});
+
+// [ADDED 2026-09-04] Real coverage for the recursive-schema fix (per
+// Gavin: "i want a simpler way to make bigger dents in more actions...
+// more actions in one thing") - this is what actually turns
+// run_actions's array-of-object CapabilityParameter (capability-
+// registry.ts) into a real Gemini Live tool declaration. A wrong
+// conversion here would silently break voice control of that
+// capability specifically (the flat string/number/boolean cases were
+// already covered indirectly by every other capability working) with
+// no other test catching it.
+describe("toGeminiSchema", () => {
+  test("converts a flat parameter straightforwardly", () => {
+    const param: CapabilityParameter = { type: "string", description: "a name", required: true };
+    expect(toGeminiSchema(param)).toEqual({ type: "STRING", description: "a name" });
+  });
+
+  test("converts a recursive array-of-object parameter (run_actions's real shape)", () => {
+    const param: CapabilityParameter = {
+      type: "array",
+      description: "steps",
+      required: true,
+      items: {
+        type: "object",
+        description: "one step",
+        required: true,
+        properties: {
+          action: { type: "string", description: "the verb", required: true },
+          amount: { type: "number", description: "optional amount", required: false },
+        },
+      },
+    };
+    const schema = toGeminiSchema(param);
+    expect(schema.type).toBe("ARRAY");
+    expect(schema.items?.type).toBe("OBJECT");
+    expect(schema.items?.properties?.action).toEqual({ type: "STRING", description: "the verb" });
+    expect(schema.items?.required).toEqual(["action"]);
   });
 });
 
