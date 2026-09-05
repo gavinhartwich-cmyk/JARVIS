@@ -237,6 +237,61 @@ export async function spotifyPlay(query: string): Promise<SpotifyPlayResult> {
   return controller.play(query);
 }
 
+const SPOTIFY_LAUNCH_RETRY_ATTEMPTS = 6;
+const SPOTIFY_LAUNCH_RETRY_DELAY_MS = 2500;
+
+/**
+ * [ADDED 2026-09-04] Real proactive "no device open -> launch Spotify ->
+ * retry play" behavior, moved here from orchestrator.ts's
+ * runSpotifyAction() (added 2026-09-04, per Gavin: "he needs to know if I
+ * ask him to play a song to open Spotify and then play the song... he
+ * needs to be proactive not reactive") so it's a real, shared function
+ * instead of logic only the non-Live conversational path got.
+ *
+ * Real gap this closes: `live-tools.ts`'s play_music tool (Gemini Live
+ * mode) called bare spotifyPlay() directly and had none of this - found
+ * live when Gavin's first "play X" worked (Spotify was already open from
+ * an earlier test) but the underlying gap was real and undisclosed
+ * software debt, not yet hit.
+ *
+ * Never fabricates success: if Spotify still isn't a usable device after
+ * the real retry budget, the honest error says so - "opened Spotify but
+ * it didn't register in time," not "go open it yourself" and not a
+ * false "done."
+ */
+export async function spotifyPlayWithAutoOpen(
+  query: string,
+  openApp: (target: string) => Promise<{ success: boolean; error?: string }>
+): Promise<SpotifyPlayResult> {
+  let result = await spotifyPlay(query);
+  const isNoDeviceError = (r: SpotifyPlayResult) =>
+    !r.success && Boolean(r.error?.includes("No active or available Spotify device found"));
+
+  if (!isNoDeviceError(result)) return result;
+
+  console.log(`   🎵 No Spotify device available - opening the real Spotify app and retrying...`);
+  const opened = await openApp("Spotify");
+  if (!opened.success) {
+    return {
+      success: false,
+      error: `Tried to open Spotify to play that, but opening it failed: ${opened.error ?? "unknown error"}`,
+    };
+  }
+
+  for (let attempt = 0; attempt < SPOTIFY_LAUNCH_RETRY_ATTEMPTS && isNoDeviceError(result); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, SPOTIFY_LAUNCH_RETRY_DELAY_MS));
+    result = await spotifyPlay(query);
+  }
+
+  if (isNoDeviceError(result)) {
+    return {
+      success: false,
+      error: `Opened Spotify to play that, but it didn't register as a playable device in time - try again in a few seconds.`,
+    };
+  }
+  return result;
+}
+
 export async function spotifyPause(): Promise<{ success: boolean; error?: string }> {
   return controller.pause();
 }

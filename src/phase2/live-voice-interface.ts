@@ -171,18 +171,30 @@ export class LiveVoiceInterface {
   async processMicChunk(chunk: Buffer): Promise<void> {
     if (!this.isRunning) return;
 
+    // [FIXED 2026-09-04] Real bug found live (Gavin: after one real
+    // exchange, "i said jarvis 7 or 8 times and didnt get him back") -
+    // this used to route chunks EITHER to the session OR to the wake-word
+    // detector, never both, so for the entire time a session stayed open
+    // (isSending=true - which, per the real follow-up window, can be many
+    // seconds) the local wake-word model received zero audio at all.
+    // VoiceInterface's own processMicChunk() never does this - it keeps
+    // feeding the wake-word detector in every state (isSpeaking,
+    // isThinking, idle), specifically because a long gap risks the
+    // detector's own rolling buffer/scoring falling out of sync with what
+    // it expects, and because it's the one signal that must always work
+    // regardless of what else is going on. Now always fed, unconditionally
+    // - a real "Jarvis" said mid-session both reaches Gemini as ordinary
+    // speech AND resets the follow-up window locally (handleWakeWord()'s
+    // early-return branches already handle re-firing while isPlaying/
+    // isSending harmlessly), so this is a pure safety net, not a behavior
+    // change to the happy path.
+    await this.wakeWordDetector.processAudioChunk(chunk);
+
     if (this.isSending && this.session) {
       // Actively streaming a real utterance straight to Gemini Live - no
       // local STT, the model hears raw audio directly.
       this.session.sendAudioChunk(chunk);
-      return;
     }
-
-    // Idle, or JARVIS's own reply is playing (half-duplex: still checking
-    // locally for the wake word so saying "Jarvis" again can interrupt
-    // playback, same real limitation as VoiceInterface's own barge-in -
-    // see this file's header comment).
-    await this.wakeWordDetector.processAudioChunk(chunk);
   }
 
   private async ensureSession(): Promise<GeminiLiveSession> {

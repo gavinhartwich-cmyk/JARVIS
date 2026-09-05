@@ -11,7 +11,7 @@
 import type { FunctionDeclaration } from "./protocol";
 import { ScreenControl } from "../../phase3/screen-control";
 import { identityEngine } from "../../core/identity";
-import { spotifyPlay } from "../../core/spotify";
+import { spotifyPlayWithAutoOpen } from "../../core/spotify";
 
 export const OPEN_APP_DECLARATION: FunctionDeclaration = {
   name: "open_app",
@@ -83,10 +83,17 @@ export function createCloseAppToolHandler(screenControl: ScreenControl = new Scr
 // [ADDED 2026-09-04] Real gap found live (Gavin, right after confirming
 // open_app worked: "now it dodnt play anything when i asked though") -
 // this Live mode had open/close-app but nothing for "play <song>" at
-// all. Reuses the exact same real spotifyPlay() (core/spotify.ts) the
-// non-Live conversational path already calls - including its own
-// proactive "Spotify isn't open yet -> open it -> retry play" real
-// behavior, not a second copy of that logic.
+// all.
+//
+// [FIXED 2026-09-04] The first version of this called bare spotifyPlay()
+// directly, which does NOT include the real "Spotify isn't open -> open
+// it -> retry" behavior (that lived only in orchestrator.ts's
+// runSpotifyAction(), wrapped around spotifyPlay() - checked directly).
+// Now calls spotifyPlayWithAutoOpen() instead, the same real shared
+// function orchestrator.ts's own play path was refactored to use, via
+// the same real ScreenControl.openApp() executor open_app above uses -
+// this mode gets real proactive behavior, not a second, poorer copy of
+// the one other callers already had.
 export const PLAY_MUSIC_DECLARATION: FunctionDeclaration = {
   name: "play_music",
   description: "Play a song or artist on Spotify. Opens Spotify automatically if it isn't already running.",
@@ -95,21 +102,25 @@ export const PLAY_MUSIC_DECLARATION: FunctionDeclaration = {
     properties: {
       query: {
         type: "STRING",
-        description: "The song title and/or artist to play, e.g. 'Whisper My Name' or 'Don Toliver'.",
+        description: "The song title and/or artist to play.",
       },
     },
     required: ["query"],
   },
 };
 
-export function createPlayMusicToolHandler() {
+export function createPlayMusicToolHandler(screenControl: ScreenControl = new ScreenControl()) {
   return async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
     const query = typeof args.query === "string" ? args.query : undefined;
     if (!query) {
       return { success: false, error: "play_music called without a 'query' argument." };
     }
     try {
-      const result = await spotifyPlay(query);
+      const result = await spotifyPlayWithAutoOpen(query, async (target) => {
+        const identity = await identityEngine.resolveFromDeviceSession();
+        const openResult = await screenControl.openApp(target, identity);
+        return { success: openResult.success, error: openResult.error };
+      });
       return { success: result.success, playing: result.playing, type: result.type, error: result.error };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
