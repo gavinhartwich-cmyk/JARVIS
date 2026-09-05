@@ -305,6 +305,27 @@ export class LiveVoiceInterface {
     }
 
     this.isSending = true;
+
+    // [FIXED 2026-09-04] THE real bug behind "i said jarvis 7 or 8 times
+    // and didnt get him back" - confirmed directly from Gavin's own log:
+    // wake-word-detector.ts's `triggered` is a ONE-SHOT LATCH, reset only
+    // by startListening() (see its own comment: "only the first one per
+    // listening session actually fires"). VoiceInterface calls
+    // startListening() again at several real points in its own turn flow
+    // to reset it; this class called startListening() exactly once, ever
+    // (in start()), and never again - so after the very first real wake
+    // word, the latch stayed permanently spent for the rest of the
+    // process. Gavin's log proves it: a later score of 0.1240 (well past
+    // the 0.05 threshold) produced zero reaction, with no second
+    // "🎯 Wake word detected" line anywhere after the first. rearm() is
+    // the exact real fix VoiceInterface itself uses for this same latch
+    // (see its own barge-in-confidence-check comment) - resets the latch
+    // without restarting the daemon or anything else. Called
+    // unconditionally here, not gated on confidence: even a spurious
+    // re-trigger from the tail of the same utterance is harmless (just
+    // re-runs this same branch again), whereas the latch staying stuck
+    // is a full, silent, permanent outage.
+    this.wakeWordDetector.rearm();
   }
 
   private async flushTurnAudio(): Promise<void> {

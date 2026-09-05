@@ -10,6 +10,7 @@ import { findElement } from "./ui-automation";
 import { authorizationEngine } from "../core/authorization";
 import { logAuditEvent } from "../core/audit";
 import type { IdentityResult } from "../core/identity";
+import { v4 as uuid } from "uuid";
 
 export interface ControlAction {
   action: "click" | "type" | "scroll" | "key" | "open" | "close" | "focus" | "wait";
@@ -66,7 +67,18 @@ export class ScreenControl {
    */
   buildSequence(description: string): ControlSequence {
     const sequence: ControlSequence = {
-      id: `seq-${Date.now()}`,
+      // [FIXED 2026-09-04] Real bug found live in Gavin's own log: this
+      // was a plain `seq-<timestamp>` string, but audit_events.resource_id
+      // (db/schema.ts) is a real `uuid` column - every single control
+      // sequence's audit log write failed outright ("invalid input syntax
+      // for type uuid: seq-...", Postgres error 22P02), silently, on every
+      // open_app/close_app/click action run through executeSequence()
+      // below. The action itself still succeeded (this was a logging-only
+      // failure, non-fatal to the real task), but real audit coverage
+      // (invariant #12: "every action is auditable") was quietly zero for
+      // this entire code path. Real UUID now, matching every other real
+      // resourceId this codebase already writes (taskId, memory ids).
+      id: uuid(),
       description,
       actions: [],
       expectedOutcome: "",

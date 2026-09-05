@@ -126,8 +126,20 @@ export class ToolManager {
       await logAuditEvent({
         actor: "tool_manager",
         action: "blocked",
-        resource: "tool",
-        resourceId: toolCall.toolName,
+        // [FIXED 2026-09-04] Real bug found live (same class as screen-
+        // control.ts's control-sequence id, found in the same session):
+        // resourceId was toolCall.toolName ("read_file", "open_app", ...)
+        // - a plain tool name, not a UUID - but audit_events.resource_id
+        // (db/schema.ts) is a real `uuid` column. Every single tool
+        // execution's audit write failed outright with a Postgres 22P02
+        // "invalid input syntax for type uuid" error, silently (logAuditEvent
+        // swallows its own errors so the real tool result was never
+        // affected) - real audit coverage for every read_file/write_file/
+        // bash/etc. call was quietly zero. Fixed by folding the tool name
+        // into `resource` itself (there's no real persistent resource row
+        // a stateless tool call corresponds to, so resourceId is correctly
+        // left unset rather than fabricating a meaningless UUID).
+        resource: `tool:${toolCall.toolName}`,
         input: toolCall.parameters,
         statusCode: 403,
         message: authResult.reason,
@@ -163,8 +175,20 @@ export class ToolManager {
       await logAuditEvent({
         actor: "tool_manager",
         action: "executed",
-        resource: "tool",
-        resourceId: toolCall.toolName,
+        // [FIXED 2026-09-04] Real bug found live (same class as screen-
+        // control.ts's control-sequence id, found in the same session):
+        // resourceId was toolCall.toolName ("read_file", "open_app", ...)
+        // - a plain tool name, not a UUID - but audit_events.resource_id
+        // (db/schema.ts) is a real `uuid` column. Every single tool
+        // execution's audit write failed outright with a Postgres 22P02
+        // "invalid input syntax for type uuid" error, silently (logAuditEvent
+        // swallows its own errors so the real tool result was never
+        // affected) - real audit coverage for every read_file/write_file/
+        // bash/etc. call was quietly zero. Fixed by folding the tool name
+        // into `resource` itself (there's no real persistent resource row
+        // a stateless tool call corresponds to, so resourceId is correctly
+        // left unset rather than fabricating a meaningless UUID).
+        resource: `tool:${toolCall.toolName}`,
         input: toolCall.parameters,
         statusCode: result.success ? 200 : 400,
         message: result.error,
