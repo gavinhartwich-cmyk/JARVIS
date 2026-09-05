@@ -72,9 +72,10 @@ async function locate(description: string, screenshotPng: Buffer): Promise<Groun
     "x and y are the CENTER of the element, in a normalized 0-1000 coordinate space where (0,0) is the " +
     "top-left corner of the image and (1000,1000) is the bottom-right corner - NOT raw pixels. " +
     "\"label\" is a short real description of what you're actually clicking (so a human can sanity-check " +
-    "it). Set found to false and omit x/y if you are not genuinely confident you've found the right thing - " +
-    "a false \"found: true\" risks a real, physical misclick, which is worse than honestly saying you " +
-    "couldn't find it.";
+    "it). Keep \"label\" and \"reason\" each under 10 words - be brief so the whole response fits well " +
+    "within the token budget. Set found to false and omit x/y if you are not genuinely confident you've " +
+    "found the right thing - a false \"found: true\" risks a real, physical misclick, which is worse than " +
+    "honestly saying you couldn't find it.";
 
   try {
     const response = await fetch(
@@ -94,7 +95,17 @@ async function locate(description: string, screenshotPng: Buffer): Promise<Groun
           ],
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 300,
+            // [FIXED 2026-09-05] Real bug found live: "Vision-click: request
+            // failed: JSON Parse error: Expected '}'" - a truncated response,
+            // not a malformed one. 300 tokens (this codebase's own established
+            // floor for gemini-3.6-flash, a "thinking" model - see
+            // gemini-provider.ts's GEMINI_MIN_OUTPUT_TOKENS) was tight enough
+            // here that the model's own JSON output itself got cut off
+            // mid-string before the closing brace, on top of whatever
+            // invisible reasoning tokens thinkingLevel "low" still consumes.
+            // Raised well above that floor - this call's real output is a
+            // handful of short fields, not a floor case.
+            maxOutputTokens: 600,
             responseMimeType: "application/json",
             thinkingConfig: { thinkingLevel: "low" },
           },
@@ -118,8 +129,25 @@ async function locate(description: string, screenshotPng: Buffer): Promise<Groun
       return null;
     }
 
-    const parsed = JSON.parse(rawText) as GroundingResponse;
-    return parsed;
+    // [ADDED 2026-09-05] Real bug found live: a bare JSON.parse(rawText)
+    // threw "JSON Parse error: Expected '}'" with no visibility into WHY -
+    // turned out to be maxOutputTokens truncating the response mid-string
+    // (see the real fix on maxOutputTokens above). Raising the budget is
+    // the actual fix, but this stays as a second, honest line of defense:
+    // if a response is ever cut short again (a genuinely huge screen
+    // description, a future model behaving differently), log the real raw
+    // text that failed to parse instead of just the parser's generic
+    // complaint, so a future occurrence is diagnosable from one log line
+    // instead of needing a repro session like this one did.
+    try {
+      return JSON.parse(rawText) as GroundingResponse;
+    } catch (parseError) {
+      console.error(
+        `❌ Vision-click: Gemini's response wasn't valid JSON (${parseError instanceof Error ? parseError.message : parseError}). ` +
+          `Raw response (${rawText.length} chars): ${rawText.slice(0, 500)}${rawText.length > 500 ? "…" : ""}`
+      );
+      return null;
+    }
   } catch (error) {
     console.error("❌ Vision-click: request failed:", error instanceof Error ? error.message : error);
     return null;

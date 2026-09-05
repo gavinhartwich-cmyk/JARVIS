@@ -410,13 +410,30 @@ if ($app) {
    * tab's window, since a browser tab's title genuinely includes the
    * page title ("YouTube - Microsoft Edge") the same way any other
    * window's title would match.
+   *
+   * [FIXED 2026-09-05] Real bug found live: asked to close Spotify right
+   * after playing a track, and it reported "Couldn't find a real open
+   * window matching 'Spotify'" - Spotify never actually minimized (Gavin,
+   * directly: "on the spotify closing it didnt minimize it thats what im
+   * saying"). Root cause: this only matched on MainWindowTitle, but
+   * Spotify's real window title changes to the currently-playing
+   * "Song - Artist" the moment something plays - it does NOT keep saying
+   * "Spotify" the way a freshly-opened, idle window does. Title-only
+   * matching is exactly right for a browser tab (no stable process name
+   * to match on) but wrong for a native app whose title is dynamic -
+   * media players being the obvious case, but also things like editors
+   * that show the open file name. Fixed by ALSO matching on the real
+   * process name (Get-Process's own Name - stable for "Spotify"
+   * regardless of what the window title currently says), tried alongside
+   * the existing title match rather than instead of it, so the browser-
+   * tab case keeps working unchanged.
    */
   async closeApplication(name: string): Promise<string> {
     const escapedName = psEscape(name);
     const { stdout } = await runPowerShell(`
 Add-Type -Namespace JarvisWin32 -Name Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
 $name = "${escapedName}"
-$matches = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$name*" }
+$matches = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ($_.MainWindowTitle -like "*$name*" -or $_.ProcessName -like "*$name*") }
 if ($matches) {
   foreach ($p in $matches) { [JarvisWin32.Native]::ShowWindowAsync($p.MainWindowHandle, 6) | Out-Null }
   Write-Output "MINIMIZED:$($matches.Count):$($matches[0].MainWindowTitle)"
