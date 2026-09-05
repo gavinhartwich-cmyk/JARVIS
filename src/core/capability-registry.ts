@@ -34,6 +34,7 @@ import type { RiskTier } from "./authorization";
 import type { IdentityResult } from "./identity";
 import { recordAction, inverseOfScreenControlAction } from "./action-journal";
 import { spotifyPlayWithAutoOpen, spotifyPause, spotifyResume, spotifyNext, spotifyPrevious } from "./spotify";
+import { clickByDescription } from "./vision-click";
 
 /** Simplified parameter shape covering every real capability registered here today - see list()'s own comment for why this stays intentionally narrower than ParameterDefinition's full type union. */
 export interface CapabilityParameter {
@@ -99,6 +100,27 @@ const SCREEN_CONTROL_PRIMITIVES = {
     description: "Scroll the active window up or down.",
     riskTier: "normal" as RiskTier,
     parameters: { amount: { type: "number" as const, description: "Scroll amount - positive scrolls down, negative scrolls up.", required: true } },
+  },
+  // [ADDED 2026-09-04] Real screen-vision-guided click - per Gavin,
+  // directly, after click_element's real limit came up live: "this is
+  // where screen vision and mouse control come in and where he goes
+  // form assistant to jarvis." See core/vision-click.ts's own header
+  // comment for the real mechanism and the real, disclosed misclick risk
+  // this doesn't eliminate, only reduces versus the local-model attempt
+  // this project already tried and rejected once.
+  click_by_description: {
+    description:
+      "Click something on screen that can only be identified by what it looks like or where it is, " +
+      "not by an exact accessible name - e.g. 'the video with the red thumbnail' or 'the button in the top right'. " +
+      "Prefer click_element instead when the target has an obvious exact name.",
+    riskTier: "normal" as RiskTier,
+    parameters: {
+      description: {
+        type: "string" as const,
+        description: "A specific visual/positional description of what to click.",
+        required: true,
+      },
+    },
   },
 } satisfies Record<string, { description: string; riskTier: RiskTier; parameters: Record<string, CapabilityParameter> }>;
 
@@ -267,6 +289,13 @@ class CapabilityRegistry {
           const seq = this.screenControl.buildSequence(`Scroll ${amount}`);
           this.screenControl.scroll(seq, amount);
           result = await this.screenControl.executeSequence(seq, identity);
+          break;
+        }
+        case "click_by_description": {
+          const description = typeof parameters.description === "string" ? parameters.description : "";
+          if (!description) return { success: false, error: "click_by_description called without a 'description' parameter.", executionTime: 0 };
+          const visionResult = await clickByDescription(description);
+          result = { success: visionResult.success, output: visionResult.label, error: visionResult.error };
           break;
         }
       }
