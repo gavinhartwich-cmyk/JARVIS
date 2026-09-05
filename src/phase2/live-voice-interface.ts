@@ -75,6 +75,15 @@ import {
 // the existing pipeline's own timeouts were.
 const FOLLOW_UP_WINDOW_MS = 10_000;
 
+// How long to wait, after the last real sign of life from a turn (an
+// audio/text chunk, or a tool call finishing), before giving up on
+// "turn-complete" ever arriving and treating the turn as done anyway -
+// see armTurnWatchdog()'s own comment. Comfortably above every real
+// turn-complete latency measured live this session (~4s for a tool-call
+// exchange, under 1s for a plain reply), so this should only ever fire
+// for a genuinely stalled/never-arriving signal, not a normal slow turn.
+const TURN_WATCHDOG_MS = 8_000;
+
 /** Minimal, self-contained 16-bit PCM -> WAV encoder. No cross-file
  * dependency on speech-synthesizer.ts's WAV *reader* - same "each file
  * owns its own small audio helpers" convention audio-player.ts already
@@ -114,6 +123,7 @@ export class LiveVoiceInterface {
   private turnPcmChunks: Buffer[] = [];
   private turnSampleRateHz = 24000;
   private followUpTimer: ReturnType<typeof setTimeout> | null = null;
+  private turnWatchdog: ReturnType<typeof setTimeout> | null = null;
   /** Real session-resumption handle (protocol.ts's SessionResumptionConfig) - captured on every "session-handle" update and used to reconnect into the SAME conversation after an idle close, rather than the next wake word starting a cold, context-less session. */
   private lastSessionHandle: string | undefined;
 
@@ -164,6 +174,7 @@ export class LiveVoiceInterface {
     if (!this.isRunning) return;
     this.isRunning = false;
     if (this.followUpTimer) clearTimeout(this.followUpTimer);
+    this.clearTurnWatchdog();
     this.playbackAbort?.abort();
     await this.wakeWordDetector.stopListening();
     this.wakeWordDetector.shutdown();
@@ -247,6 +258,12 @@ export class LiveVoiceInterface {
         return await openAppHandler(args);
       } finally {
         this.emit("acting-done");
+        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
+        // armTurnWatchdog()'s own comment. A tool-only exchange (no
+        // further spoken confirmation) previously relied entirely on
+        // turn-complete arriving to ever leave "thinking" - this makes
+        // that self-healing instead of hoping the signal shows up.
+        this.armTurnWatchdog();
       }
     });
     const closeAppHandler = createCloseAppToolHandler();
@@ -256,6 +273,12 @@ export class LiveVoiceInterface {
         return await closeAppHandler(args);
       } finally {
         this.emit("acting-done");
+        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
+        // armTurnWatchdog()'s own comment. A tool-only exchange (no
+        // further spoken confirmation) previously relied entirely on
+        // turn-complete arriving to ever leave "thinking" - this makes
+        // that self-healing instead of hoping the signal shows up.
+        this.armTurnWatchdog();
       }
     });
     const playMusicHandler = createPlayMusicToolHandler();
@@ -265,6 +288,12 @@ export class LiveVoiceInterface {
         return await playMusicHandler(args);
       } finally {
         this.emit("acting-done");
+        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
+        // armTurnWatchdog()'s own comment. A tool-only exchange (no
+        // further spoken confirmation) previously relied entirely on
+        // turn-complete arriving to ever leave "thinking" - this makes
+        // that self-healing instead of hoping the signal shows up.
+        this.armTurnWatchdog();
       }
     });
     const pauseMusicHandler = createPauseMusicToolHandler();
@@ -274,6 +303,12 @@ export class LiveVoiceInterface {
         return await pauseMusicHandler();
       } finally {
         this.emit("acting-done");
+        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
+        // armTurnWatchdog()'s own comment. A tool-only exchange (no
+        // further spoken confirmation) previously relied entirely on
+        // turn-complete arriving to ever leave "thinking" - this makes
+        // that self-healing instead of hoping the signal shows up.
+        this.armTurnWatchdog();
       }
     });
     const resumeMusicHandler = createResumeMusicToolHandler();
@@ -283,6 +318,12 @@ export class LiveVoiceInterface {
         return await resumeMusicHandler();
       } finally {
         this.emit("acting-done");
+        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
+        // armTurnWatchdog()'s own comment. A tool-only exchange (no
+        // further spoken confirmation) previously relied entirely on
+        // turn-complete arriving to ever leave "thinking" - this makes
+        // that self-healing instead of hoping the signal shows up.
+        this.armTurnWatchdog();
       }
     });
 
@@ -290,9 +331,11 @@ export class LiveVoiceInterface {
       const { pcm, sampleRateHz } = data as { pcm: Uint8Array; sampleRateHz: number };
       this.turnSampleRateHz = sampleRateHz;
       this.turnPcmChunks.push(Buffer.from(pcm));
+      this.armTurnWatchdog();
     });
     session.on("text", (text) => {
       console.log(`   [gemini-live text] ${text}`);
+      this.armTurnWatchdog();
     });
     session.on("interrupted", () => {
       // The model's own signal that it was cut off mid-reply - discard
@@ -302,6 +345,7 @@ export class LiveVoiceInterface {
       this.turnPcmChunks = [];
     });
     session.on("turn-complete", () => {
+      this.clearTurnWatchdog();
       this.flushTurnAudio().catch((err) =>
         console.error("❌ Gemini Live playback failed:", err instanceof Error ? err.message : err)
       );
@@ -369,7 +413,40 @@ export class LiveVoiceInterface {
     this.wakeWordDetector.rearm();
   }
 
+  /**
+   * [ADDED 2026-09-04] Real self-healing fix for "it still thinks" (Gavin,
+   * after the first stuck-thinking fix didn't fully cover it) - every path
+   * back to a resting HUD state depended entirely on the Live API's own
+   * "turn-complete" signal actually arriving. That's a real external
+   * signal this class doesn't control; if it's ever delayed past what a
+   * real reply should take, or genuinely doesn't fire for some exchange
+   * shape not yet seen, the HUD (and the follow-up-listening window,
+   * which flushTurnAudio() also sets up) both silently never recover.
+   * Armed on every real sign of life (audio chunk, text chunk, a tool
+   * call finishing) and cleared the moment the real "turn-complete" event
+   * does arrive - if it doesn't, after a real timeout this manually calls
+   * flushTurnAudio() itself, treating "gone quiet for N seconds" as
+   * equivalent to a real completion signal rather than waiting forever.
+   */
+  private armTurnWatchdog(): void {
+    if (this.turnWatchdog) clearTimeout(this.turnWatchdog);
+    this.turnWatchdog = setTimeout(() => {
+      console.log(`   ⏱️  No turn-complete from Gemini Live within ${TURN_WATCHDOG_MS}ms of the last activity - treating the turn as done anyway.`);
+      this.flushTurnAudio().catch((err) =>
+        console.error("❌ Gemini Live playback failed:", err instanceof Error ? err.message : err)
+      );
+    }, TURN_WATCHDOG_MS);
+  }
+
+  private clearTurnWatchdog(): void {
+    if (this.turnWatchdog) {
+      clearTimeout(this.turnWatchdog);
+      this.turnWatchdog = null;
+    }
+  }
+
   private async flushTurnAudio(): Promise<void> {
+    this.clearTurnWatchdog();
     const chunks = this.turnPcmChunks;
     this.turnPcmChunks = [];
     // Real follow-up window: keep the mic streaming straight to the
