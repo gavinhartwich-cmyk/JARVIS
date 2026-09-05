@@ -10,15 +10,34 @@
  *
  * This is a genuine alternative voice pipeline, not a replacement for
  * `VoiceInterface`/`bun run dev listen` — that path keeps every real,
- * live-tested capability this project has built (app-control beyond
- * open/close, screen/video/camera vision, web search, Spotify, proactive
- * intelligence, persistent memory) via `Orchestrator.processConversation()`.
- * Gemini Live's own model has none of that unless it's handed in as a
- * tool, and only `open_app`/`close_app`/`play_music` are wired here so far (see
- * `prototypes/gemini-live/live-tools.ts`) — this mode trades capability
- * breadth for real, measured speed. Both are real, both are selectable
- * (`bun run dev listen` vs `bun run dev listen-live`); this doesn't
- * silently become the new default.
+ * live-tested capability this project has built (screen/video/camera
+ * vision, web search, proactive intelligence, persistent memory) via
+ * `Orchestrator.processConversation()`. Gemini Live's own model has none
+ * of that unless it's handed in as a tool.
+ *
+ * [CHANGED 2026-09-04] Per Gavin's direct ask after a session of adding
+ * one bespoke tool per request (open_app, then close_app, then
+ * play_music, then pause_music/resume_music - each its own real, separate
+ * fix): "how can we make him more capable in larger chunks so that im
+ * not asking for each aciton to be coded." Every capability already
+ * registered in `core/capability-registry.ts` (architecture update
+ * section 14 - built specifically so "adding a capability shouldn't mean
+ * editing a branch of code") is now exposed here generically - a new
+ * capability added to that registry becomes available to Gemini Live
+ * automatically, with no new code in this file at all. Deliberately
+ * filtered to `riskTier === "normal"` only: the registry's admin-tier
+ * tools (write_file, delete_file, bash) require real user approval in
+ * every other path that can reach them, and this one has no confirmation
+ * UI to gate them with - they stay unreachable from voice rather than
+ * silently skipping that check.
+ *
+ * Real, disclosed limit this does NOT close: every registered capability
+ * still needs a real accessible name/target to act on (open an app by
+ * name, click a control by its accessible name). "Click the video with
+ * the guy in the red shirt" needs real screen vision to even find a
+ * coordinate to click - a genuinely different, harder capability this
+ * project tried once already (thirty-second pass, moondream) and
+ * rejected as a real misclick risk. Not attempted here.
  *
  * Reuses the exact same proven wake-word/mic infrastructure
  * `VoiceInterface` uses (`WakeWordDetector`, `MicCapture`, `voice-config.ts`)
@@ -53,18 +72,9 @@ import { VoiceConfig, DEFAULT_VOICE_CONFIG } from "./voice-config";
 import { playWavBuffer, PlaybackInterruptedError } from "./audio-player";
 import { JARVIS_PERSONALITY_PROMPT } from "../core/jarvis-personality";
 import { GeminiLiveSession } from "../prototypes/gemini-live/gemini-live-session";
-import {
-  OPEN_APP_DECLARATION,
-  CLOSE_APP_DECLARATION,
-  PLAY_MUSIC_DECLARATION,
-  PAUSE_MUSIC_DECLARATION,
-  RESUME_MUSIC_DECLARATION,
-  createOpenAppToolHandler,
-  createCloseAppToolHandler,
-  createPlayMusicToolHandler,
-  createPauseMusicToolHandler,
-  createResumeMusicToolHandler,
-} from "../prototypes/gemini-live/live-tools";
+import type { FunctionDeclaration } from "../prototypes/gemini-live/protocol";
+import { capabilityRegistry } from "../core/capability-registry";
+import { identityEngine } from "../core/identity";
 
 // How long to keep a session's mic stream open after its last reply
 // before falling back to wake-word-gated idle, so a real follow-up
@@ -236,96 +246,22 @@ export class LiveVoiceInterface {
       // ActionOutcome handling).
       systemInstruction:
         JARVIS_PERSONALITY_PROMPT +
-        "\n\nCRITICAL: You can only actually affect the real world through your registered tools " +
-        "(open_app, close_app, play_music, pause_music, resume_music). If the user asks for something " +
-        "none of these tools can do, say so honestly - never claim you did something, or that something " +
-        "is already in a certain state, unless a real tool call actually confirmed it. A true 'I can't do " +
-        "that yet' is always correct; a fabricated 'done' is never acceptable.",
+        "\n\nCRITICAL: You can only actually affect the real world through your registered tools. If the " +
+        "user asks for something none of your available tools can do, say so honestly - never claim you " +
+        "did something, or that something is already in a certain state, unless a real tool call actually " +
+        "confirmed it. A true 'I can't do that yet' is always correct; a fabricated 'done' is never acceptable.",
       resumeHandle: this.lastSessionHandle,
     });
-    // [FIXED 2026-09-04] "acting"/"acting-done" were declared as valid
-    // events on this class's own on() signature but never actually
-    // emitted anywhere - real gap found live (Gavin: "why isnt the hud
-    // poping up" surfaced that this whole HUD-state story was
-    // incomplete). Wrapping the real handlers here (rather than adding a
-    // generic tool-call hook to GeminiLiveSession itself) mirrors exactly
-    // how orchestrator.ts's onActionStart/onActionEnd already drives
-    // VoiceInterface's own "acting" state around a real action.
-    const openAppHandler = createOpenAppToolHandler();
-    session.registerTool(OPEN_APP_DECLARATION, async (args) => {
-      this.emit("acting", `Opening ${typeof args.target === "string" ? args.target : "app"}`);
-      try {
-        return await openAppHandler(args);
-      } finally {
-        this.emit("acting-done");
-        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
-        // armTurnWatchdog()'s own comment. A tool-only exchange (no
-        // further spoken confirmation) previously relied entirely on
-        // turn-complete arriving to ever leave "thinking" - this makes
-        // that self-healing instead of hoping the signal shows up.
-        this.armTurnWatchdog();
-      }
-    });
-    const closeAppHandler = createCloseAppToolHandler();
-    session.registerTool(CLOSE_APP_DECLARATION, async (args) => {
-      this.emit("acting", `Closing ${typeof args.target === "string" ? args.target : "app"}`);
-      try {
-        return await closeAppHandler(args);
-      } finally {
-        this.emit("acting-done");
-        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
-        // armTurnWatchdog()'s own comment. A tool-only exchange (no
-        // further spoken confirmation) previously relied entirely on
-        // turn-complete arriving to ever leave "thinking" - this makes
-        // that self-healing instead of hoping the signal shows up.
-        this.armTurnWatchdog();
-      }
-    });
-    const playMusicHandler = createPlayMusicToolHandler();
-    session.registerTool(PLAY_MUSIC_DECLARATION, async (args) => {
-      this.emit("acting", `Playing ${typeof args.query === "string" ? args.query : "music"}`);
-      try {
-        return await playMusicHandler(args);
-      } finally {
-        this.emit("acting-done");
-        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
-        // armTurnWatchdog()'s own comment. A tool-only exchange (no
-        // further spoken confirmation) previously relied entirely on
-        // turn-complete arriving to ever leave "thinking" - this makes
-        // that self-healing instead of hoping the signal shows up.
-        this.armTurnWatchdog();
-      }
-    });
-    const pauseMusicHandler = createPauseMusicToolHandler();
-    session.registerTool(PAUSE_MUSIC_DECLARATION, async () => {
-      this.emit("acting", "Pausing music");
-      try {
-        return await pauseMusicHandler();
-      } finally {
-        this.emit("acting-done");
-        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
-        // armTurnWatchdog()'s own comment. A tool-only exchange (no
-        // further spoken confirmation) previously relied entirely on
-        // turn-complete arriving to ever leave "thinking" - this makes
-        // that self-healing instead of hoping the signal shows up.
-        this.armTurnWatchdog();
-      }
-    });
-    const resumeMusicHandler = createResumeMusicToolHandler();
-    session.registerTool(RESUME_MUSIC_DECLARATION, async () => {
-      this.emit("acting", "Resuming music");
-      try {
-        return await resumeMusicHandler();
-      } finally {
-        this.emit("acting-done");
-        // [ADDED 2026-09-04] Real fix for "it still thinks" - see
-        // armTurnWatchdog()'s own comment. A tool-only exchange (no
-        // further spoken confirmation) previously relied entirely on
-        // turn-complete arriving to ever leave "thinking" - this makes
-        // that self-healing instead of hoping the signal shows up.
-        this.armTurnWatchdog();
-      }
-    });
+    // [CHANGED 2026-09-04] Generic capability bridge - see this file's own
+    // header comment for the full "one bespoke tool per request" problem
+    // this replaces. Registers every "normal"-risk capability_registry.ts
+    // knows about (open_app, close_app, click_element, type_text,
+    // press_key, scroll_screen, the spotify actions, read_file/list_files)
+    // as a real Live API tool, built from that registry's own parameter
+    // schema rather than a hand-written FunctionDeclaration per tool.
+    // Admin-tier capabilities (write_file, delete_file, bash) are
+    // deliberately excluded - see the header comment on why.
+    await this.registerCapabilitiesAsTools(session);
 
     session.on("audio", (data) => {
       const { pcm, sampleRateHz } = data as { pcm: Uint8Array; sampleRateHz: number };
@@ -365,6 +301,52 @@ export class LiveVoiceInterface {
     await session.connect();
     this.session = session;
     return session;
+  }
+
+  /**
+   * [ADDED 2026-09-04] The actual generic-capability fix - see this
+   * file's own header comment. Builds a real Gemini Live FunctionDeclaration
+   * straight from each capability_registry.ts entry's own parameter
+   * schema (no hand-written declaration per tool) and wires the SAME
+   * real "acting"/"acting-done"/watchdog HUD hooks every hand-written
+   * tool already used, generically, once, here - instead of that
+   * three-line wrapper being copy-pasted per tool as new ones get added.
+   */
+  private async registerCapabilitiesAsTools(session: GeminiLiveSession): Promise<void> {
+    const identity = await identityEngine.resolveFromDeviceSession();
+    for (const capability of capabilityRegistry.list()) {
+      if (capability.riskTier !== "normal") continue; // admin-tier tools stay unreachable from voice - see header comment
+      const declaration: FunctionDeclaration = {
+        name: capability.name,
+        description: capability.description,
+        parameters: {
+          type: "OBJECT",
+          properties: Object.fromEntries(
+            Object.entries(capability.parameters).map(([key, def]) => [
+              key,
+              { type: def.type.toUpperCase() as "STRING" | "NUMBER" | "BOOLEAN", description: def.description },
+            ])
+          ),
+          required: Object.entries(capability.parameters)
+            .filter(([, def]) => def.required)
+            .map(([key]) => key),
+        },
+      };
+      session.registerTool(declaration, async (args) => {
+        this.emit("acting", capability.name.replace(/_/g, " "));
+        try {
+          const result = await capabilityRegistry.execute(capability.name, args, identity);
+          return { success: result.success, data: result.data, error: result.error };
+        } finally {
+          this.emit("acting-done");
+          // Real fix for "it still thinks" (see armTurnWatchdog()'s own
+          // comment) - a tool-only exchange (no further spoken
+          // confirmation) previously relied entirely on turn-complete
+          // arriving to ever leave "thinking."
+          this.armTurnWatchdog();
+        }
+      });
+    }
   }
 
   private async handleWakeWord(event: WakeWordEvent): Promise<void> {

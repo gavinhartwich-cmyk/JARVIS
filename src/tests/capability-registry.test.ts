@@ -20,6 +20,32 @@ describe("capabilityRegistry.list()", () => {
     expect(byName.read_file.riskTier).toBe("normal");
     expect(byName.write_file.riskTier).toBe("admin"); // WriteFileTool.requiresApproval = true
   });
+
+  // [ADDED 2026-09-04] Real coverage for the generic-capability expansion
+  // (per Gavin: "how can we make him more capable in larger chunks") -
+  // these are what live-voice-interface.ts's registerCapabilitiesAsTools()
+  // now builds real Gemini Live tool declarations from directly, so a
+  // wrong/missing parameter schema here would silently break voice
+  // control for that capability with no other test catching it.
+  test("includes the new screen-control primitives and spotify capabilities with real parameter schemas", () => {
+    const byName = Object.fromEntries(capabilityRegistry.list().map((c) => [c.name, c]));
+    expect(byName.click_element.parameters.target).toEqual({ type: "string", description: expect.any(String), required: true });
+    expect(byName.type_text.parameters.text.required).toBe(true);
+    expect(byName.press_key.parameters.key.required).toBe(true);
+    expect(byName.scroll_screen.parameters.amount.type).toBe("number");
+    expect(byName.play_music.parameters.query.required).toBe(true);
+    expect(Object.keys(byName.pause_music.parameters)).toHaveLength(0);
+    expect(byName.click_element.riskTier).toBe("normal");
+    expect(byName.play_music.riskTier).toBe("normal");
+  });
+
+  test("tool_manager parameter schemas are narrowed to string/number/boolean for every registered tool", () => {
+    for (const capability of capabilityRegistry.list()) {
+      for (const param of Object.values(capability.parameters)) {
+        expect(["string", "number", "boolean"]).toContain(param.type);
+      }
+    }
+  });
 });
 
 describe("capabilityRegistry.has()", () => {
