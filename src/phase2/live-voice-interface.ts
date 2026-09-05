@@ -57,9 +57,13 @@ import {
   OPEN_APP_DECLARATION,
   CLOSE_APP_DECLARATION,
   PLAY_MUSIC_DECLARATION,
+  PAUSE_MUSIC_DECLARATION,
+  RESUME_MUSIC_DECLARATION,
   createOpenAppToolHandler,
   createCloseAppToolHandler,
   createPlayMusicToolHandler,
+  createPauseMusicToolHandler,
+  createResumeMusicToolHandler,
 } from "../prototypes/gemini-live/live-tools";
 
 // How long to keep a session's mic stream open after its last reply
@@ -206,7 +210,26 @@ export class LiveVoiceInterface {
     // closed on idle (see flushTurnAudio()'s follow-up-timeout branch)
     // instead of being held open forever in the background.
     const session = new GeminiLiveSession({
-      systemInstruction: JARVIS_PERSONALITY_PROMPT,
+      // [ADDED 2026-09-04] Real fix for a real, live-found hallucination:
+      // Gavin asked to pause a song before pause_music existed as a tool -
+      // with nothing real to call, the model just fabricated "I've paused
+      // it" (the song kept playing), then on the next try claimed it was
+      // "already paused" and offered to unpause it - two contradictory
+      // fabrications, zero real actions behind either. pause_music/
+      // resume_music are real now, but the underlying risk is general:
+      // any future request with no matching tool hits the same failure
+      // mode. This instruction is the actual guard, not just closing
+      // today's specific gap - matches the "never fabricate success"
+      // principle every other real action-confirmation path in this
+      // codebase already follows (see conversation-intelligence.ts's own
+      // ActionOutcome handling).
+      systemInstruction:
+        JARVIS_PERSONALITY_PROMPT +
+        "\n\nCRITICAL: You can only actually affect the real world through your registered tools " +
+        "(open_app, close_app, play_music, pause_music, resume_music). If the user asks for something " +
+        "none of these tools can do, say so honestly - never claim you did something, or that something " +
+        "is already in a certain state, unless a real tool call actually confirmed it. A true 'I can't do " +
+        "that yet' is always correct; a fabricated 'done' is never acceptable.",
       resumeHandle: this.lastSessionHandle,
     });
     // [FIXED 2026-09-04] "acting"/"acting-done" were declared as valid
@@ -240,6 +263,24 @@ export class LiveVoiceInterface {
       this.emit("acting", `Playing ${typeof args.query === "string" ? args.query : "music"}`);
       try {
         return await playMusicHandler(args);
+      } finally {
+        this.emit("acting-done");
+      }
+    });
+    const pauseMusicHandler = createPauseMusicToolHandler();
+    session.registerTool(PAUSE_MUSIC_DECLARATION, async () => {
+      this.emit("acting", "Pausing music");
+      try {
+        return await pauseMusicHandler();
+      } finally {
+        this.emit("acting-done");
+      }
+    });
+    const resumeMusicHandler = createResumeMusicToolHandler();
+    session.registerTool(RESUME_MUSIC_DECLARATION, async () => {
+      this.emit("acting", "Resuming music");
+      try {
+        return await resumeMusicHandler();
       } finally {
         this.emit("acting-done");
       }
@@ -359,7 +400,20 @@ export class LiveVoiceInterface {
       this.emit("idle");
     }, FOLLOW_UP_WINDOW_MS);
 
-    if (chunks.length === 0) return; // interrupted mid-reply, or a text-only turn
+    if (chunks.length === 0) {
+      // [FIXED 2026-09-04] Real bug found live (Gavin: "it seems to stay
+      // thinking even after hes done the thing and tlaked already") -
+      // this early return (interrupted mid-reply, or a tool-only turn
+      // where the model never actually said anything out loud - "pause
+      // the music"/"close YouTube" can genuinely end with just the tool
+      // call and no further spoken confirmation) used to skip emitting
+      // "interaction-complete" entirely, leaving the HUD stuck on
+      // whatever "acting-done" had set it to ("thinking") forever, since
+      // nothing ever told it the turn was actually over. Same real
+      // interaction-complete->idle mapping every other turn gets.
+      this.emit("interaction-complete");
+      return;
+    }
 
     const pcm = Buffer.concat(chunks);
     const wav = pcmToWav(pcm, this.turnSampleRateHz);

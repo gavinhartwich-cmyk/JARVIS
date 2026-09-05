@@ -11,7 +11,7 @@
 import type { FunctionDeclaration } from "./protocol";
 import { ScreenControl } from "../../phase3/screen-control";
 import { identityEngine } from "../../core/identity";
-import { spotifyPlayWithAutoOpen } from "../../core/spotify";
+import { spotifyPlayWithAutoOpen, spotifyPause, spotifyResume } from "../../core/spotify";
 
 export const OPEN_APP_DECLARATION: FunctionDeclaration = {
   name: "open_app",
@@ -122,6 +122,51 @@ export function createPlayMusicToolHandler(screenControl: ScreenControl = new Sc
         return { success: openResult.success, error: openResult.error };
       });
       return { success: result.success, playing: result.playing, type: result.type, error: result.error };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+}
+
+// [ADDED 2026-09-04] Real gap found live (Gavin: "i aske dhim to pause
+// the song and he said he did but it wasnt then i said it agian and he
+// said it was already paused and hell unpoase it") - this mode had
+// play_music but nothing for pause/resume at all. With no matching tool
+// to call, the model just fabricated a spoken "done" instead of honestly
+// saying it couldn't - real hallucination risk this project's other
+// paths avoid by only ever confirming a REAL action outcome (see
+// conversation-intelligence.ts's own ActionOutcome handling). Reuses the
+// exact real spotifyPause()/spotifyResume() (core/spotify.ts) the
+// non-Live path already calls - same real device, no second
+// implementation.
+export const PAUSE_MUSIC_DECLARATION: FunctionDeclaration = {
+  name: "pause_music",
+  description: "Pause the currently playing Spotify track.",
+  parameters: { type: "OBJECT", properties: {} },
+};
+
+export function createPauseMusicToolHandler() {
+  return async (): Promise<Record<string, unknown>> => {
+    try {
+      const result = await spotifyPause();
+      return { success: result.success, error: result.error };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+}
+
+export const RESUME_MUSIC_DECLARATION: FunctionDeclaration = {
+  name: "resume_music",
+  description: "Resume/unpause Spotify playback.",
+  parameters: { type: "OBJECT", properties: {} },
+};
+
+export function createResumeMusicToolHandler() {
+  return async (): Promise<Record<string, unknown>> => {
+    try {
+      const result = await spotifyResume();
+      return { success: result.success, error: result.error };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }

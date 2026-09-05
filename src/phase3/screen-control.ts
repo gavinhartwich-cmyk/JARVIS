@@ -437,7 +437,9 @@ export class ScreenControl {
       case "close":
         if (action.target) {
           console.log(`      → Closing: ${action.target}`);
-          await windowsController.closeApplication(action.target);
+          const closeDetail = await windowsController.closeApplication(action.target);
+          console.log(`      → ${closeDetail}`);
+          return closeDetail;
         }
         break;
 
@@ -497,11 +499,16 @@ export class ScreenControl {
    * conversational "close Spotify"/"quit Notepad" requests (see
    * `Orchestrator.parseAppControlIntent`) have the same one-call shape as
    * opening one — same authorization gate, same real
-   * `windowsController.closeApplication()` underneath (best-effort
-   * `Stop-Process` by name; a no-match is not an error). Also the
+   * `windowsController.closeApplication()` underneath. Also the
    * single-call deterministic executor the intent router's TOOL path
    * (core/intent-router.ts) uses for "close <app>", the same way it uses
    * openApp() for "open <app>".
+   *
+   * [CHANGED 2026-09-04] Per Gavin: "I want close to be minimized" -
+   * closeApplication() now minimizes the real matching window (by title,
+   * covers a browser tab's title the same as a native app's) instead of
+   * killing a process by name; a no-match is still not an error, just an
+   * honest "couldn't find it" detail string.
    */
   async closeApp(appName: string, identity: IdentityResult): Promise<ControlResult> {
     const seq = this.buildSequence(`Close ${appName}`);

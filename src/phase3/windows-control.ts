@@ -391,10 +391,46 @@ if ($app) {
     return `Opened ${realAppMatch ? realAppMatch[1].trim() : name}`;
   }
 
-  async closeApplication(name: string): Promise<void> {
-    // Stops the first matching process by name (without .exe). Best-effort —
-    // if nothing matches, PowerShell just reports nothing to stop.
-    await runPowerShell(`Get-Process "${psEscape(name)}" -ErrorAction SilentlyContinue | Stop-Process`);
+  /**
+   * [CHANGED 2026-09-04] Real behavior change per Gavin's direct
+   * preference: "I want close to be minimized." Previously this did a
+   * `Get-Process <name> | Stop-Process` - a real, working match for a
+   * native app whose process name matches what was asked (Notepad,
+   * Spotify), but it silently did NOTHING for a website opened via
+   * openApplication()'s KNOWN_WEBSITES/search fallback (a browser tab,
+   * not its own process) - "close YouTube" found no process literally
+   * named "youtube" and reported success having done nothing. Real fix,
+   * not just closing that one gap: match by real window TITLE instead of
+   * process name (Get-Process's own MainWindowTitle - the same real
+   * mechanism focusWindow()'s AppActivate already relies on for the same
+   * "loosely-named target -> the actual window" problem), and MINIMIZE
+   * the match (real Win32 ShowWindowAsync, SW_MINIMIZE) instead of
+   * killing it - safer (reversible, the user can restore it any time)
+   * and works uniformly for both a native app's window and a browser
+   * tab's window, since a browser tab's title genuinely includes the
+   * page title ("YouTube - Microsoft Edge") the same way any other
+   * window's title would match.
+   */
+  async closeApplication(name: string): Promise<string> {
+    const escapedName = psEscape(name);
+    const { stdout } = await runPowerShell(`
+Add-Type -Namespace JarvisWin32 -Name Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
+$name = "${escapedName}"
+$matches = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$name*" }
+if ($matches) {
+  foreach ($p in $matches) { [JarvisWin32.Native]::ShowWindowAsync($p.MainWindowHandle, 6) | Out-Null }
+  Write-Output "MINIMIZED:$($matches.Count):$($matches[0].MainWindowTitle)"
+} else {
+  Write-Output "NOT_FOUND"
+}
+`);
+    if (stdout.includes("NOT_FOUND")) {
+      return `Couldn't find a real open window matching "${name}" to minimize.`;
+    }
+    const match = stdout.match(/MINIMIZED:(\d+):(.+)/);
+    return match
+      ? `Minimized "${match[2].trim()}"${parseInt(match[1], 10) > 1 ? ` (and ${parseInt(match[1], 10) - 1} other matching window(s))` : ""}`
+      : `Minimized ${name}`;
   }
 
   async focusWindow(windowTitle: string): Promise<void> {
