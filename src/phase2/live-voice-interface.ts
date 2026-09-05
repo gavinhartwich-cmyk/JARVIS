@@ -14,7 +14,7 @@
  * open/close, screen/video/camera vision, web search, Spotify, proactive
  * intelligence, persistent memory) via `Orchestrator.processConversation()`.
  * Gemini Live's own model has none of that unless it's handed in as a
- * tool, and only `open_app`/`close_app` are wired here so far (see
+ * tool, and only `open_app`/`close_app`/`play_music` are wired here so far (see
  * `prototypes/gemini-live/live-tools.ts`) — this mode trades capability
  * breadth for real, measured speed. Both are real, both are selectable
  * (`bun run dev listen` vs `bun run dev listen-live`); this doesn't
@@ -56,8 +56,10 @@ import { GeminiLiveSession } from "../prototypes/gemini-live/gemini-live-session
 import {
   OPEN_APP_DECLARATION,
   CLOSE_APP_DECLARATION,
+  PLAY_MUSIC_DECLARATION,
   createOpenAppToolHandler,
   createCloseAppToolHandler,
+  createPlayMusicToolHandler,
 } from "../prototypes/gemini-live/live-tools";
 
 // How long to keep a session's mic stream open after its last reply
@@ -207,6 +209,15 @@ export class LiveVoiceInterface {
       this.emit("acting", `Closing ${typeof args.target === "string" ? args.target : "app"}`);
       try {
         return await closeAppHandler(args);
+      } finally {
+        this.emit("acting-done");
+      }
+    });
+    const playMusicHandler = createPlayMusicToolHandler();
+    session.registerTool(PLAY_MUSIC_DECLARATION, async (args) => {
+      this.emit("acting", `Playing ${typeof args.query === "string" ? args.query : "music"}`);
+      try {
+        return await playMusicHandler(args);
       } finally {
         this.emit("acting-done");
       }

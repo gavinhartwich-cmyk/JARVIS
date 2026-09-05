@@ -689,7 +689,7 @@ async function main() {
       // numbers (Gemini Live ~934ms end to end vs. current JARVIS's
       // ~3.6s). Same real wake-word/mic infrastructure as `listen` above -
       // see live-voice-interface.ts's own header comment for exactly what
-      // this trades away (only open_app/close_app as tools so far, no
+      // this trades away (only open_app/close_app/play_music as tools so far, no
       // vision/search/persistent-memory/Spotify - Orchestrator.
       // processConversation() isn't in this path) for real, measured
       // speed. Requires a real GEMINI_API_KEY.
@@ -999,7 +999,7 @@ async function main() {
       console.log("  bun run dev control-test  - Test real computer control (Windows only, opens Notepad)");
       console.log('  bun run dev voice-reply "<text>" - Real LLM + real TTS voice reply (no mic/wake-word yet)');
       console.log('  bun run dev listen - Real always-on voice assistant: say "Jarvis", it listens, thinks, and speaks back (Windows only, needs scripts/setup-voice.ps1 run first)');
-      console.log('  bun run dev listen-live - Same, but backed by Gemini Live (real, ~3.8x faster measured; needs GEMINI_API_KEY, fewer capabilities - open/close app only)');
+      console.log('  bun run dev listen-live - Same, but backed by Gemini Live (real, ~3.8x faster measured; needs GEMINI_API_KEY, fewer capabilities - open/close app + play music only)');
       console.log('  bun run dev conversation "<text>" - Phase 1.5 conversational intelligence, real LLM + memory/context');
       console.log("  bun run dev vision-test <path>   - Real Ollama vision model on a real image (Phase 3)");
       console.log('  bun run dev video-test <path> ["<question>"] - Real frame-sampled video understanding (Phase 3)');
