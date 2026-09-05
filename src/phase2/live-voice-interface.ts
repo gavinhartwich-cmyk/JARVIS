@@ -110,6 +110,8 @@ export class LiveVoiceInterface {
   private turnPcmChunks: Buffer[] = [];
   private turnSampleRateHz = 24000;
   private followUpTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Real session-resumption handle (protocol.ts's SessionResumptionConfig) - captured on every "session-handle" update and used to reconnect into the SAME conversation after an idle close, rather than the next wake word starting a cold, context-less session. */
+  private lastSessionHandle: string | undefined;
 
   constructor(config: VoiceConfig = DEFAULT_VOICE_CONFIG) {
     this.config = config;
@@ -186,7 +188,15 @@ export class LiveVoiceInterface {
   private async ensureSession(): Promise<GeminiLiveSession> {
     if (this.session) return this.session;
 
-    const session = new GeminiLiveSession({ systemInstruction: JARVIS_PERSONALITY_PROMPT });
+    // [ADDED 2026-09-04] Reconnect into the SAME real conversation via
+    // session resumption (protocol.ts's sessionResumption) rather than a
+    // cold, context-less one - matters now that the session is actually
+    // closed on idle (see flushTurnAudio()'s follow-up-timeout branch)
+    // instead of being held open forever in the background.
+    const session = new GeminiLiveSession({
+      systemInstruction: JARVIS_PERSONALITY_PROMPT,
+      resumeHandle: this.lastSessionHandle,
+    });
     // [FIXED 2026-09-04] "acting"/"acting-done" were declared as valid
     // events on this class's own on() signature but never actually
     // emitted anywhere - real gap found live (Gavin: "why isnt the hud
@@ -243,6 +253,9 @@ export class LiveVoiceInterface {
         console.error("❌ Gemini Live playback failed:", err instanceof Error ? err.message : err)
       );
     });
+    session.on("session-handle", (handle) => {
+      this.lastSessionHandle = handle as string;
+    });
     session.on("close", (info) => {
       console.log(`   🔌 Gemini Live session closed: ${JSON.stringify(info)}`);
       this.session = null;
@@ -293,7 +306,23 @@ export class LiveVoiceInterface {
     if (this.followUpTimer) clearTimeout(this.followUpTimer);
     this.followUpTimer = setTimeout(() => {
       this.isSending = false;
-      console.log('   (no follow-up heard - back to waiting for "Jarvis")');
+      // [FIXED 2026-09-04] Real gap found while investigating Gavin's
+      // "wake word takes many tries" report: this used to leave the
+      // WebSocket connection open in the background indefinitely after
+      // the follow-up window closed, unlike VoiceInterface's own
+      // Whisper-based path, which has no equivalent held-open connection
+      // once a turn ends. Not confirmed as the actual cause (the wake-
+      // word feeding code itself is identical between listen/listen-live
+      // - checked directly), but closing it here is a real robustness fix
+      // either way: a session held open for minutes with no traffic risks
+      // a silent server-side timeout/disconnect nobody would notice until
+      // the next real turn failed against a half-dead socket. Session
+      // resumption (see ensureSession()'s resumeHandle) means the next
+      // wake word reconnects into the SAME real conversation, not a cold
+      // one - this isn't losing continuity to gain robustness.
+      console.log('   (no follow-up heard - closing session, back to waiting for "Jarvis")');
+      this.session?.close();
+      this.session = null;
       this.emit("idle");
     }, FOLLOW_UP_WINDOW_MS);
 
