@@ -363,7 +363,36 @@ class CapabilityRegistry {
             const action = typeof step.action === "string" ? step.action.toLowerCase() : "";
             switch (action) {
               case "open":
-                if (typeof step.target === "string") this.screenControl.open(seq, step.target);
+                if (typeof step.target === "string") {
+                  this.screenControl.open(seq, step.target);
+                  // [FIXED 2026-09-04] Real bug found live (Gavin: "it did
+                  // the notepad mutosept but becuase i had the powershell
+                  // focues it typed on there") - opening an app is
+                  // asynchronous (Start-Process/Get-StartApps return
+                  // immediately, well before the real window even exists,
+                  // let alone has focus), so a "type"/"click" step right
+                  // after "open" in the same plan landed on whatever
+                  // already had focus - here, the terminal running
+                  // listen-live itself. ScreenControl.openApp() (the
+                  // single-purpose convenience method) already bakes in a
+                  // real 2s wait for exactly this reason - run_actions
+                  // didn't, since it built the sequence directly from
+                  // whatever steps the model provided, and nothing forced
+                  // it to remember a wait. Matches openApp()'s own proven
+                  // pattern exactly, not a new one: deliberately NOT also
+                  // chaining an explicit focus() action here - that throws
+                  // outright on any title mismatch (e.g. "Notepad" vs its
+                  // real window title "Untitled - Notepad"), and this
+                  // sequence loop has no per-action try/catch, so one
+                  // failed focus() would silently abort every step after
+                  // it, including the real type/click the user asked for -
+                  // worse than the bug this is fixing. A real wait plus
+                  // Windows' own normal "a newly launched app takes focus"
+                  // behavior is what openApp() already relies on
+                  // successfully; this just gives run_actions the same
+                  // real behavior instead of a second, riskier idea.
+                  this.screenControl.wait(seq, 2000);
+                }
                 break;
               case "close":
                 if (typeof step.target === "string") this.screenControl.close(seq, step.target);

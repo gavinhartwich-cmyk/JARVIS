@@ -38,13 +38,46 @@ export class HudServer {
   private activity: string | null = null;
   private htmlPath: string;
 
+  // [ADDED 2026-09-04] Real bug found live via Gemini Live specifically
+  // (Gavin: "soemtimes i get thourgh and hes listening but it doesnt go
+  // to listneing mode so i dont know and it messes me up a lot") -
+  // setState() used to overwrite this.state synchronously with no
+  // history at all, and the native HUD only learns about state by
+  // polling /state every 400ms (see native-hud's own "polling every
+  // 400ms" log lines). Gemini Live is fast enough that a full
+  // listening -> speaking transition can complete in well under 400ms,
+  // meaning "listening" could be set and then overwritten before the
+  // native app's next poll ever observed it - a real state the user
+  // needed to see, silently erased. A minimum dwell time fixes this
+  // generically (not a Gemini-Live-specific patch) - any state now
+  // stays visible for at least one real poll cycle before a newer one
+  // can replace it, queuing the newest pending state rather than
+  // dropping it outright.
+  private lastStateChangeAt = 0;
+  private pendingTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly MIN_DWELL_MS = 500; // comfortably above the native HUD's 400ms poll interval
+
   constructor(htmlPath: string = join(process.cwd(), "public", "hud.html")) {
     this.htmlPath = htmlPath;
   }
 
   setState(state: HudState, activity: string | null = null): void {
+    const elapsed = Date.now() - this.lastStateChangeAt;
+    if (this.pendingTimer) {
+      clearTimeout(this.pendingTimer);
+      this.pendingTimer = null;
+    }
+    if (elapsed >= HudServer.MIN_DWELL_MS) {
+      this.applyState(state, activity);
+    } else {
+      this.pendingTimer = setTimeout(() => this.applyState(state, activity), HudServer.MIN_DWELL_MS - elapsed);
+    }
+  }
+
+  private applyState(state: HudState, activity: string | null): void {
     this.state = state;
     this.activity = activity;
+    this.lastStateChangeAt = Date.now();
   }
 
   start(port: number): void {
